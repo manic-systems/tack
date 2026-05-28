@@ -341,7 +341,7 @@ fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
         .get(&url)
         .header("User-Agent", "tack")
         .header("Accept", "application/vnd.github+json");
-    if let Ok(token) = env::var("GITHUB_TOKEN") {
+    if let Ok(token) = env::var("GITHUB_TOKEN").or_else(|_| env::var("GH_TOKEN")) {
         req = req.header("Authorization", &format!("Bearer {token}"));
     }
     let body = req
