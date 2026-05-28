@@ -96,7 +96,7 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
         "add" => {
             let (mut name, mut url) = (None, None);
             let mut pin_type = PinType::Flake;
-            let mut unpack: Option<Unpack> = None;
+            let mut unpack = Option::<Unpack>::None;
             let mut dir = None;
             let mut submodules = false;
             let mut follows = Vec::new();

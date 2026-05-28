@@ -134,7 +134,7 @@ pub fn init(force: bool) -> Result<()> {
     let (pt, lp, rp) = (pins_path(&dir), lock_path(&dir), resolver_path(&dir));
 
     if !force {
-        let clash: Vec<String> = [&pt, &rp]
+        let clash = [&pt, &rp]
             .into_iter()
             .filter_map(|path| path.exists().then_some(path.display().to_string()))
             .collect::<Vec<String>>();
@@ -460,7 +460,7 @@ pub fn dedup(deep: bool) -> Result<()> {
     let shorturls = pins::shorturls(&doc);
     let configured_follows = existing_follows(&doc);
 
-    let mut groups: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
+    let mut groups = BTreeMap::<String, Vec<Entry>>::new();
 
     for inp in &inputs {
         let expanded = shorturl::expand(&inp.url, &shorturls);
@@ -477,7 +477,7 @@ pub fn dedup(deep: bool) -> Result<()> {
         }
     }
 
-    let mut frontier: Vec<TackTransitive> = inputs
+    let mut frontier = inputs
         .iter()
         .filter(|i| i.pin_type != PinType::Fixed)
         .filter_map(|inp| {
@@ -488,27 +488,27 @@ pub fn dedup(deep: bool) -> Result<()> {
                 submodules: inp.submodules,
             })
         })
-        .collect();
+        .collect::<Vec<TackTransitive>>();
     eprintln!("scanning {} pin(s)...", frontier.len());
 
     // bfs level-by-level: dedup the frontier against `visited`, fetch the
     // batch in parallel, then expand into the next frontier (deep only).
-    let mut visited: HashSet<String> = HashSet::new();
+    let mut visited = HashSet::<String>::new();
     while !frontier.is_empty() {
-        let mut batch: Vec<TackTransitive> = Vec::with_capacity(frontier.len());
+        let mut batch = Vec::<TackTransitive>::with_capacity(frontier.len());
         for item in frontier.drain(..) {
             if visited.insert(source_key(&item.source)) {
                 batch.push(item);
             }
         }
 
-        let results: Vec<(Vec<String>, Result<ScanResult>)> = batch
+        let results = batch
             .into_par_iter()
             .map(|item| {
                 let res = fetch_and_scan(&item);
                 (item.path, res)
             })
-            .collect();
+            .collect::<Vec<(Vec<String>, Result<ScanResult>)>>();
 
         for (path, res) in results {
             match res {
@@ -543,8 +543,8 @@ fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
 }
 
 fn scan_tree(root: &Path, path: &[String]) -> Result<ScanResult> {
-    let mut findings: Vec<Finding> = Vec::new();
-    let mut transitive: Vec<TackTransitive> = Vec::new();
+    let mut findings = Vec::<Finding>::new();
+    let mut transitive = Vec::<TackTransitive>::new();
     let parent_label = format!("via {}", path.join(" > "));
 
     if let Ok(raw) = fs::read_to_string(root.join("flake.lock"))
@@ -720,8 +720,11 @@ fn print_groups(
     inputs: &[pins::Input],
     configured: &BTreeSet<String>,
 ) {
-    let top_names: HashSet<&str> = inputs.iter().map(|i| i.name.as_str()).collect();
-    let mut suggest: BTreeSet<String> = BTreeSet::new();
+    let top_names = inputs
+        .iter()
+        .map(|i| i.name.as_str())
+        .collect::<HashSet<&str>>();
+    let mut suggest = BTreeSet::<String>::new();
     let mut printed = 0usize;
 
     for (id, entries) in groups {
