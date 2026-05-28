@@ -569,15 +569,39 @@ fn full_ref(reff: Option<&str>, default: impl FnOnce() -> Option<String>) -> Str
 
 fn callbacks() -> RemoteCallbacks<'static> {
     let mut cb = RemoteCallbacks::new();
-    cb.credentials(|_url, username, allowed| {
+    let mut tried_agent = false;
+    let mut key_idx = 0_usize;
+    cb.credentials(move |_url, username, allowed| {
         let user = username.unwrap_or("git");
-        if allowed.contains(CredentialType::SSH_KEY) {
-            Cred::ssh_key_from_agent(user)
-        } else if allowed.contains(CredentialType::USERNAME) {
-            Cred::username(user)
-        } else {
-            Err(git2::Error::from_str("no supported credential type"))
+        if allowed.contains(CredentialType::USERNAME) {
+            return Cred::username(user);
         }
+        if !allowed.contains(CredentialType::SSH_KEY) {
+            return Err(git2::Error::from_str("no supported credential type"));
+        }
+        if !tried_agent {
+            tried_agent = true;
+            if env::var_os("SSH_AUTH_SOCK").is_some()
+                && let Ok(cred) = Cred::ssh_key_from_agent(user)
+            {
+                return Ok(cred);
+            }
+        }
+        let ssh_dir = env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join(".ssh"))
+            .ok_or_else(|| git2::Error::from_str("ssh: $HOME unset, cannot locate keys"))?;
+        const NAMES: &[&str] = &["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"];
+        while key_idx < NAMES.len() {
+            let path = ssh_dir.join(NAMES[key_idx]);
+            key_idx += 1;
+            if path.is_file() {
+                return Cred::ssh_key(user, None, &path, None);
+            }
+        }
+        Err(git2::Error::from_str(
+            "ssh: no agent and no usable key under ~/.ssh",
+        ))
     });
     cb
 }
