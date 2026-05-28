@@ -32,10 +32,21 @@ use crate::{
 };
 
 const STARTER_TOML: &str = include_str!("../assets/pins.toml");
-const RESOLVER_NIX: &str = include_str!("../inputs.nix");
+const RESOLVER_NIX: &str = include_str!("../.tack/default.nix");
+const MARKER: &str = "# tack-managed resolver.";
 
 fn dir() -> PathBuf {
-    env::var_os("TACK_DIR").map_or_else(|| env::current_dir().expect("cwd"), PathBuf::from)
+    if let Some(d) = std::env::var_os("TACK_DIR") {
+        return PathBuf::from(d);
+    }
+    let cwd = std::env::current_dir().expect("cwd");
+    if cwd.join(".tack").is_dir() {
+        return cwd.join(".tack");
+    }
+    if cwd.join("inputs.nix").exists() {
+        return cwd;
+    }
+    cwd.join(".tack")
 }
 
 fn pins_path(dir: &Path) -> PathBuf {
@@ -43,6 +54,32 @@ fn pins_path(dir: &Path) -> PathBuf {
 }
 fn lock_path(dir: &Path) -> PathBuf {
     dir.join("pins.lock.json")
+}
+
+/// resolver lives next to pins.toml; legacy root-mode keeps the historical
+/// `inputs.nix` name, otherwise the new convention is `default.nix`.
+fn resolver_path(d: &Path) -> PathBuf {
+    let legacy = d.join("inputs.nix");
+    if legacy.exists() {
+        return legacy;
+    }
+    d.join("default.nix")
+}
+
+/// rewrite the resolver if it carries the management marker AND its bytes
+/// differ from the bundled template; leave it alone otherwise.
+fn refresh_resolver(d: &Path) {
+    let rp = resolver_path(d);
+    match std::fs::read_to_string(&rp) {
+        Ok(current) => {
+            if current.contains(MARKER) && current != RESOLVER_NIX {
+                let _ = write_atomic(&rp, RESOLVER_NIX);
+            }
+        },
+        Err(_) => {
+            // resolver missing — let init/etc. handle it; not our job here
+        },
+    }
 }
 
 fn short(rev: &str) -> String {
@@ -81,11 +118,11 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 }
 
 pub fn init(force: bool) -> Result<()> {
-    let dir = dir();
-    let (pt, lp, ip) = (pins_path(&dir), lock_path(&dir), dir.join("inputs.nix"));
+    let d = dir();
+    let (pt, lp, rp) = (pins_path(&d), lock_path(&d), resolver_path(&d));
 
     if !force {
-        let clash = [&pt, &ip]
+        let clash: Vec<String> = [&pt, &rp]
             .into_iter()
             .filter_map(|path| path.exists().then_some(path.display().to_string()))
             .collect::<Vec<String>>();
@@ -93,16 +130,27 @@ pub fn init(force: bool) -> Result<()> {
             bail!("{} already exists (use --force)", clash.join(", "));
         }
     }
+    std::fs::create_dir_all(&d)?;
     write_atomic(&pt, STARTER_TOML)?;
     if !lp.exists() {
         write_atomic(&lp, "{}\n")?;
     }
-    write_atomic(&ip, RESOLVER_NIX)?;
+    write_atomic(&rp, RESOLVER_NIX)?;
+
+    let resolver_name = rp
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("default.nix");
+    let import_hint = if d.ends_with(".tack") {
+        "import ./.tack".to_string()
+    } else {
+        format!("import ./{resolver_name}")
+    };
 
     println!("initialised tack in {}", dir.display());
     println!("  pins.toml       edit shorturls and inputs here");
     println!("  pins.lock.json  written by `tack update`");
-    println!("  inputs.nix      `import ./inputs.nix` from your flake/config");
+    println!("  {resolver_name:<14}  `{import_hint}` from your flake/config");
     Ok(())
 }
 
@@ -135,6 +183,7 @@ pub fn add(
             println!("  fix the url and run `tack update {name}`");
         },
     }
+    refresh_resolver(&d);
     Ok(())
 }
 
@@ -150,6 +199,7 @@ pub fn rm(name: &str) -> Result<()> {
     lk.remove(name);
     lock::save(&lock_path(&dir), &lk)?;
     println!("removed {name}");
+    refresh_resolver(&d);
     Ok(())
 }
 
@@ -171,6 +221,7 @@ pub fn alias(name: &str, template: Option<&str>, remove: bool) -> Result<()> {
         pins::save(&pins_path(&dir), &doc)?;
         println!("alias {name} = {tpl}");
     }
+    refresh_resolver(&d);
     Ok(())
 }
 
@@ -253,6 +304,7 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
         lock::save(&lock_path(&dir), &lk)?;
     }
     display.finish();
+    refresh_resolver(&d);
 
     if drift.into_inner() > 0 {
         bail!(
@@ -325,15 +377,17 @@ usage:
   tack rm <name>
   tack alias <name> <template> | tack alias --rm <name>
 
-import inputs.nix from your flake/config:
+tack lives in ./.tack/ by default; legacy root layouts (pins.toml etc. at
+cwd alongside inputs.nix) are detected and kept as-is. TACK_DIR overrides.
 
-  outputs = {{ self }}:
-    let inputs = import ./inputs.nix; in {{
+import from your flake/config:
+
+  outputs = { self }:
+    let inputs = import ./.tack; in {
       packages.x86_64-linux.default =
         inputs.nixpkgs.legacyPackages.x86_64-linux.hello;
     }};
 
-git flakes only see tracked files, so commit pins.toml, pins.lock.json and
-inputs.nix"
+git flakes only see tracked files, so commit the contents of .tack/"
     );
 }

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: EUPL-1.2
+# tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
 
 let
   pins = builtins.fromTOML (builtins.readFile ./pins.toml);

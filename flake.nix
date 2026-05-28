@@ -6,7 +6,7 @@
   outputs =
     { self }:
     let
-      inputs = import ./inputs.nix;
+      inputs = import ./.tack;
       inherit (inputs) nixpkgs fenix;
       inherit (nixpkgs) lib;
       forAllSystems = lib.genAttrs lib.systems.flakeExposed;

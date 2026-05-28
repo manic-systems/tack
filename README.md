@@ -2,34 +2,42 @@
 
 flake-like toml nix pins, lazily fetched and transformed
 
-maintains `pins.toml` (what you want) and `pins.lock.json` (what's fetched),
-plus an `inputs.nix` resolver to consume locked inputs without nix's flake
-machinery
+maintains `pins.toml` (what you want), `pins.lock.json` (what's fetched),
+and a vendored `default.nix` resolver to consume locked inputs without
+nix's flake machinery — all tucked into `./.tack/` so your repo root
+stays clean.
 
 ## layout
 
-`tack init` writes three files to the current dir (or `$TACK_DIR`)
+`tack init` creates `./.tack/` (override with `$TACK_DIR`) containing:
 
 - `pins.toml` inputs and shorturl schemes, hand-editable
 - `pins.lock.json` resolved inputs, written by `tack update`, read by nix
-- `inputs.nix` the resolver; `import ./inputs.nix` gives a name -> input attrset
-
-flake-free config
+- `default.nix` the resolver; `import ./.tack` gives a name -> input attrset
 
 ```nix
-let inputs = import ./inputs.nix;
+let inputs = import ./.tack;
 in inputs.nixpkgs.legacyPackages.x86_64-linux.hello
 ```
 
-or a flake
+or from a flake:
 
 ```nix
 outputs = { self }:
-  let inputs = import ./inputs.nix; in {
+  let inputs = import ./.tack; in {
     packages.x86_64-linux.default =
       inputs.nixpkgs.legacyPackages.x86_64-linux.hello;
   };
 ```
+
+the resolver carries a `# tack-managed resolver. delete this line ...`
+marker. any tack command that touches the lock will auto-refresh
+`default.nix` from the running binary's bundled copy while the marker is
+present; remove the marker line to fork the resolver and tack will leave
+it alone.
+
+legacy: existing layouts with `./inputs.nix` at repo root are detected
+and kept as-is. `tack` will read and write the legacy files in place.
 
 ## commands
 
