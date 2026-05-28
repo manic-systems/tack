@@ -479,13 +479,14 @@ pub fn dedup(deep: bool) -> Result<()> {
 
     let mut frontier: Vec<TackTransitive> = inputs
         .iter()
-        .filter(|i| i.pin_type != PinType::Fixed)
         .filter_map(|inp| {
             let node = lock.get(&inp.name)?;
-            Some(TackTransitive {
-                path:       vec![inp.name.clone()],
-                source:     SourceRef::Locked(node.clone()),
-                submodules: inp.submodules,
+            (inp.pin_type == PinType::Flake).then(|| {
+                TackTransitive {
+                    path:       vec![inp.name.clone()],
+                    source:     SourceRef::Locked(node.clone()),
+                    submodules: inp.submodules,
+                }
             })
         })
         .collect();
