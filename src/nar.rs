@@ -71,7 +71,7 @@ fn emit_node(hash: &mut Sha256, path: &mut PathBuf) -> Result<()> {
             emit_bytes(hash, b"");
         }
         emit_bytes(hash, b"contents");
-        emit_contents(hash, &path, meta.len())?;
+        emit_contents(hash, path, meta.len())?;
     }
     emit_bytes(hash, b")");
     Ok(())

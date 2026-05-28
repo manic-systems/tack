@@ -9,10 +9,7 @@ use std::{
         Path,
         PathBuf,
     },
-    sync::{
-        Arc,
-        OnceLock,
-    },
+    sync::OnceLock,
 };
 
 use anyhow::{
@@ -31,22 +28,31 @@ use git2::{
     Repository,
     build::CheckoutBuilder,
 };
-use native_tls::TlsConnector;
 use serde_json::{
     Value,
     json,
+};
+use ureq::{
+    Agent,
+    Body,
+    ResponseExt as _,
+    http,
+    tls::{
+        TlsConfig,
+        TlsProvider,
+    },
 };
 use xz2::read::XzDecoder;
 
 use crate::nar;
 
-fn agent() -> &'static ureq::Agent {
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+fn agent() -> &'static Agent {
+    static AGENT: OnceLock<Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        let connector = TlsConnector::new().expect("init tls");
-        ureq::AgentBuilder::new()
-            .tls_connector(Arc::new(connector))
-            .build()
+        let config = TlsConfig::builder()
+            .provider(TlsProvider::NativeTls)
+            .build();
+        Agent::config_builder().tls_config(config).build().into()
     })
 }
 
@@ -139,13 +145,13 @@ pub fn current_rev(expanded: &str) -> Result<String> {
         },
         Target::Tarball { url } => {
             let resp = agent()
-                .request("HEAD", &url)
-                .set("User-Agent", "tack")
+                .head(&url)
+                .header("User-Agent", "tack")
                 .call()
                 .or_else(|_| {
                     agent()
                         .get(&url)
-                        .set("User-Agent", "tack")
+                        .header("User-Agent", "tack")
                         .call()
                         .map_err(Box::new)
                 })
@@ -203,14 +209,16 @@ pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
             Ok((node, rev))
         },
         Target::Tarball { url } => {
-            let resp = agent()
+            let mut resp = agent()
                 .get(&url)
-                .set("User-Agent", "tack")
+                .header("User-Agent", "tack")
                 .call()
                 .with_context(|| format!("GET {url}"))?;
             let immutable_url = immutable_url_of(&resp, &url);
             let last_modified = resp
-                .header("Last-Modified")
+                .headers()
+                .get("Last-Modified")
+                .and_then(|header| header.to_str().ok())
                 .and_then(|header| epoch_from_http_date(header).ok())
                 .unwrap_or(0);
             let format = detect_tar_format(&immutable_url)
@@ -218,7 +226,7 @@ pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
                 .with_context(|| format!("tarball {url}"))?;
 
             let dir = tempfile::tempdir()?;
-            let root = unpack_tar_stream(resp.into_reader(), format, dir.path())?;
+            let root = unpack_tar_stream(resp.body_mut().as_reader(), format, dir.path())?;
             let nar_hash = nar::hash_path(&root)?;
             let node = json!({
                 "type": "tarball",
@@ -232,15 +240,17 @@ pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
 }
 
 /// Locked URL for a tarball response
-fn immutable_url_of(resp: &ureq::Response, fallback: &str) -> String {
-    resp.header("Link")
+fn immutable_url_of(resp: &http::Response<Body>, fallback: &str) -> String {
+    resp.headers()
+        .get("Link")
+        .and_then(|header| header.to_str().ok())
         .and_then(parse_link_immutable)
         .unwrap_or_else(|| {
-            let url = resp.get_url();
-            if url.is_empty() {
+            let uri = resp.get_uri().to_string();
+            if uri.is_empty() {
                 fallback.to_owned()
             } else {
-                url.to_owned()
+                uri
             }
         })
 }
@@ -329,15 +339,16 @@ fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{reff}");
     let mut req = agent()
         .get(&url)
-        .set("User-Agent", "tack")
-        .set("Accept", "application/vnd.github+json");
+        .header("User-Agent", "tack")
+        .header("Accept", "application/vnd.github+json");
     if let Ok(token) = env::var("GITHUB_TOKEN") {
-        req = req.set("Authorization", &format!("Bearer {token}"));
+        req = req.header("Authorization", &format!("Bearer {token}"));
     }
     let body = req
         .call()
         .with_context(|| format!("github api {owner}/{repo}@{reff}"))?
-        .into_string()?;
+        .body_mut()
+        .read_to_string()?;
     let parsed = serde_json::from_str::<Value>(&body)?;
     let rev = parsed["sha"]
         .as_str()
@@ -351,13 +362,12 @@ fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
 
 fn download_github_tarball(owner: &str, repo: &str, rev: &str, into: &Path) -> Result<PathBuf> {
     let url = format!("https://codeload.github.com/{owner}/{repo}/tar.gz/{rev}");
-    let reader = agent()
+    let mut resp = agent()
         .get(&url)
-        .set("User-Agent", "tack")
+        .header("User-Agent", "tack")
         .call()
-        .with_context(|| format!("download {url}"))?
-        .into_reader();
-    unpack_tar_stream(reader, TarFormat::Gz, into)
+        .with_context(|| format!("download {url}"))?;
+    unpack_tar_stream(resp.body_mut().as_reader(), TarFormat::Gz, into)
 }
 
 /// check out `rev` (if given) or the tip of `reff` (or remote default) into
@@ -423,7 +433,7 @@ fn update_submodules(repo: &Repository) -> Result<()> {
 
 fn branch_str(raw: Result<git2::Buf, git2::Error>) -> Option<String> {
     let buf = raw.ok()?;
-    buf.as_str().map(str::to_owned)
+    buf.as_str().ok().map(str::to_owned)
 }
 
 fn full_ref(reff: Option<&str>, default: impl FnOnce() -> Option<String>) -> String {
