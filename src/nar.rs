@@ -10,7 +10,10 @@ use std::{
         ffi::OsStrExt as _,
         fs::PermissionsExt as _,
     },
-    path::Path,
+    path::{
+        Path,
+        PathBuf,
+    },
 };
 
 use anyhow::{
@@ -28,15 +31,16 @@ const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 pub fn hash_path(root: &Path) -> Result<String> {
     let mut hash = Sha256::new();
     emit_bytes(&mut hash, b"nix-archive-1");
-    emit_node(&mut hash, root)?;
+    let mut path = root.to_path_buf();
+    emit_node(&mut hash, &mut path)?;
     Ok(format!("sha256-{}", b64(&hash.finalize())))
 }
 
-fn emit_node(hash: &mut Sha256, path: &Path) -> Result<()> {
-    let meta = fs::symlink_metadata(path).with_context(|| format!("stat {}", path.display()))?;
+fn emit_node(hash: &mut Sha256, path: &mut PathBuf) -> Result<()> {
+    let meta = fs::symlink_metadata(&path).with_context(|| format!("stat {}", path.display()))?;
     emit_bytes(hash, b"(");
     if meta.is_symlink() {
-        let target = fs::read_link(path)?;
+        let target = fs::read_link(&path)?;
         emit_bytes(hash, b"type");
         emit_bytes(hash, b"symlink");
         emit_bytes(hash, b"target");
@@ -44,7 +48,7 @@ fn emit_node(hash: &mut Sha256, path: &Path) -> Result<()> {
     } else if meta.is_dir() {
         emit_bytes(hash, b"type");
         emit_bytes(hash, b"directory");
-        let mut entries = fs::read_dir(path)?
+        let mut entries = fs::read_dir(&path)?
             .map(|entry| entry.map(|item| item.file_name()))
             .collect::<io::Result<Vec<_>>>()?;
         entries.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
@@ -54,7 +58,9 @@ fn emit_node(hash: &mut Sha256, path: &Path) -> Result<()> {
             emit_bytes(hash, b"name");
             emit_bytes(hash, name.as_bytes());
             emit_bytes(hash, b"node");
-            emit_node(hash, &path.join(&name))?;
+            path.push(&name);
+            emit_node(hash, path)?;
+            path.pop();
             emit_bytes(hash, b")");
         }
     } else {
@@ -65,7 +71,7 @@ fn emit_node(hash: &mut Sha256, path: &Path) -> Result<()> {
             emit_bytes(hash, b"");
         }
         emit_bytes(hash, b"contents");
-        emit_contents(hash, path, meta.len())?;
+        emit_contents(hash, &path, meta.len())?;
     }
     emit_bytes(hash, b")");
     Ok(())
