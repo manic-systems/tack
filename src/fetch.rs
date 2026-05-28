@@ -357,21 +357,7 @@ fn download_github_tarball(owner: &str, repo: &str, rev: &str, into: &Path) -> R
         .call()
         .with_context(|| format!("download {url}"))?
         .into_reader();
-    let gz = GzDecoder::new(reader);
-    let mut archive = tar::Archive::new(gz);
-    archive.set_preserve_permissions(true);
-    archive.unpack(into)?;
-    // codeload wraps everything in one repo-rev/ dir
-    let mut dirs = fs::read_dir(into)?
-        .filter_map(|entry| entry.ok().map(|item| item.path()))
-        .filter(|path| path.is_dir());
-    let root = dirs
-        .next()
-        .ok_or_else(|| anyhow!("empty tarball for {owner}/{repo}"))?;
-    if dirs.next().is_some() {
-        bail!("unexpected multiple top-level dirs in {owner}/{repo} tarball");
-    }
-    Ok(root)
+    unpack_tar_stream(reader, TarFormat::Gz, into)
 }
 
 /// check out `rev` (if given) or the tip of `reff` (or remote default) into
