@@ -26,6 +26,29 @@ fn lock_path(d: &Path) -> PathBuf {
 }
 
 fn short(rev: &str) -> String {
+    fn trim(s: &str) -> &str {
+        let s = s.split('?').next().unwrap_or(s);
+        s.split('#').next().unwrap_or(s)
+    }
+    if rev.contains("://") {
+        let segs = rev
+            .split_once("://")
+            .map(|x| x.1)
+            .unwrap_or("")
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<&str>>();
+
+        let pick = match segs.len() {
+            0 => None,
+            1 => Some(trim(segs[0])),
+            n => Some(trim(segs[n - 2])),
+        };
+
+        if let Some(seg) = pick {
+            return seg.chars().take(16).collect();
+        }
+    }
     rev.chars().take(7).collect()
 }
 

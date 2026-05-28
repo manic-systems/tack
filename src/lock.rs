@@ -26,7 +26,11 @@ pub fn save(path: &Path, lock: &Lock) -> Result<()> {
 }
 
 pub fn rev_of(node: &Value) -> Option<&str> {
-    node.get("rev")?.as_str()
+    if node.get("type").and_then(Value::as_str) == Some("tarball") {
+        node.get("url")?.as_str()
+    } else {
+        node.get("rev")?.as_str()
+    }
 }
 
 pub fn hash_of(node: &Value) -> Option<&str> {

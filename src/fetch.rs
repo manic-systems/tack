@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use git2::build::CheckoutBuilder;
 use git2::{Cred, CredentialType, Direction, FetchOptions, RemoteCallbacks, Repository};
 use serde_json::{Value, json};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -30,6 +31,9 @@ enum Target {
         reff: Option<String>,
         rev: Option<String>,
     },
+    Tarball {
+        url: String,
+    },
 }
 
 fn parse(expanded: &str) -> Result<Target> {
@@ -54,6 +58,11 @@ fn parse(expanded: &str) -> Result<Target> {
             url: url.to_string(),
             reff,
             rev,
+        });
+    }
+    if expanded.starts_with("https://") || expanded.starts_with("http://") {
+        return Ok(Target::Tarball {
+            url: expanded.to_string(),
         });
     }
     bail!("unsupported url scheme: {expanded}")
@@ -97,6 +106,15 @@ pub fn current_rev(expanded: &str) -> Result<String> {
                 }
             }
             bail!("ref {want} not found on {url}")
+        }
+        Target::Tarball { url } => {
+            let resp = agent()
+                .request("HEAD", &url)
+                .set("User-Agent", "tack")
+                .call()
+                .or_else(|_| agent().get(&url).set("User-Agent", "tack").call())
+                .with_context(|| format!("probe {url}"))?;
+            Ok(immutable_url_of(&resp, &url))
         }
     }
 }
@@ -144,7 +162,116 @@ pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
             }
             Ok((node, rev))
         }
+        Target::Tarball { url } => {
+            let resp = agent()
+                .get(&url)
+                .set("User-Agent", "tack")
+                .call()
+                .with_context(|| format!("GET {url}"))?;
+            let immutable_url = immutable_url_of(&resp, &url);
+            let last_modified = resp
+                .header("Last-Modified")
+                .and_then(|s| epoch_from_http_date(s).ok())
+                .unwrap_or(0);
+            let format = detect_tar_format(&immutable_url)
+                .or_else(|_| detect_tar_format(&url))
+                .with_context(|| format!("tarball {url}"))?;
+
+            let dir = tempfile::tempdir()?;
+            let root = unpack_tar_stream(resp.into_reader(), format, dir.path())?;
+            let nar_hash = nar::hash_path(&root)?;
+            let node = json!({
+                "type": "tarball",
+                "url": immutable_url,
+                "narHash": nar_hash,
+                "lastModified": last_modified,
+            });
+            Ok((node, immutable_url))
+        }
     }
+}
+
+/// Locked URL for a tarball response
+fn immutable_url_of(resp: &ureq::Response, fallback: &str) -> String {
+    resp.header("Link")
+        .and_then(parse_link_immutable)
+        .unwrap_or_else(|| {
+            let url = resp.get_url();
+            if url.is_empty() {
+                fallback.to_string()
+            } else {
+                url.to_string()
+            }
+        })
+}
+
+/// Extract the immutable URL from an HTTP Link header per RFC 8288.
+fn parse_link_immutable(header: &str) -> Option<String> {
+    for part in header.split(',') {
+        let part = part.trim();
+        let (url_part, params) = part.split_once(';')?;
+        let url = url_part
+            .trim()
+            .strip_prefix('<')
+            .and_then(|s| s.strip_suffix('>'))?;
+        for param in params.split(';') {
+            let (k, v) = param.trim().split_once('=')?;
+            if k.trim().eq_ignore_ascii_case("rel") {
+                let v = v.trim().trim_matches('"');
+                if v == "immutable" || v == "immutable_link" {
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum TarFormat {
+    Gz,
+    Xz,
+    Plain,
+}
+
+fn detect_tar_format(url: &str) -> Result<TarFormat> {
+    let path = url.split('?').next().unwrap_or(url);
+    let path = path.split('#').next().unwrap_or(path);
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".tar.xz") || lower.ends_with(".txz") {
+        Ok(TarFormat::Xz)
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        Ok(TarFormat::Gz)
+    } else if lower.ends_with(".tar") {
+        Ok(TarFormat::Plain)
+    } else {
+        bail!(
+            "cannot infer tarball format from url (need .tar, .tar.gz/.tgz, or .tar.xz/.txz): {url}"
+        )
+    }
+}
+
+/// Unpack a tarball stream into `into`, strip the single top-level directory
+/// and return the stripped root.
+fn unpack_tar_stream<R: Read>(reader: R, format: TarFormat, into: &Path) -> Result<PathBuf> {
+    let decompressed: Box<dyn Read> = match format {
+        TarFormat::Gz => Box::new(flate2::read::GzDecoder::new(reader)),
+        TarFormat::Xz => Box::new(xz2::read::XzDecoder::new(reader)),
+        TarFormat::Plain => Box::new(reader),
+    };
+    let mut archive = tar::Archive::new(decompressed);
+    archive.set_preserve_permissions(true);
+    archive
+        .unpack(into)
+        .with_context(|| format!("unpack into {}", into.display()))?;
+    let mut dirs = std::fs::read_dir(into)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir());
+    let root = dirs.next().ok_or_else(|| anyhow!("empty tarball"))?;
+    if dirs.next().is_some() {
+        bail!("unexpected multiple top-level dirs in tarball");
+    }
+    Ok(root)
 }
 
 fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
@@ -283,6 +410,38 @@ fn callbacks() -> RemoteCallbacks<'static> {
     cb
 }
 
+/// IMF-fixdate (e.g. `Sun, 06 Nov 1994 08:49:37 GMT`) to unix seconds.
+fn epoch_from_http_date(s: &str) -> Result<i64> {
+    let b = s.as_bytes();
+    if b.len() < 29 {
+        bail!("bad http date: {s}");
+    }
+    let n = |r: std::ops::Range<usize>| -> Result<i64> {
+        s[r].parse().with_context(|| format!("bad http date: {s}"))
+    };
+    let day = n(5..7)?;
+    let mon = match &s[8..11] {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        m => bail!("bad month in http date: {m}"),
+    };
+    let year = n(12..16)?;
+    let hh = n(17..19)?;
+    let mi = n(20..22)?;
+    let ss = n(23..25)?;
+    Ok(days_from_civil(year, mon, day) * 86400 + hh * 3600 + mi * 60 + ss)
+}
+
 /// iso8601 to unix seconds
 fn epoch_from_iso(s: &str) -> Result<i64> {
     let b = s.as_bytes();
@@ -336,6 +495,85 @@ mod tests {
             Target::Github { reff, .. } => assert_eq!(reff.as_deref(), Some("abc123")),
             _ => panic!("expected github target"),
         }
+    }
+
+    #[test]
+    fn https_url_is_tarball() {
+        match parse("https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz").unwrap() {
+            Target::Tarball { url } => {
+                assert_eq!(
+                    url,
+                    "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz"
+                )
+            }
+            _ => panic!("expected tarball target"),
+        }
+        match parse("http://example.com/release.tar.gz").unwrap() {
+            Target::Tarball { .. } => {}
+            _ => panic!("expected tarball target"),
+        }
+    }
+
+    #[test]
+    fn tar_format_from_extension() {
+        assert!(matches!(
+            detect_tar_format("https://x/y.tar.xz").unwrap(),
+            TarFormat::Xz
+        ));
+        assert!(matches!(
+            detect_tar_format("https://x/y.txz").unwrap(),
+            TarFormat::Xz
+        ));
+        assert!(matches!(
+            detect_tar_format("https://x/y.tar.gz").unwrap(),
+            TarFormat::Gz
+        ));
+        assert!(matches!(
+            detect_tar_format("https://x/y.tgz").unwrap(),
+            TarFormat::Gz
+        ));
+        assert!(matches!(
+            detect_tar_format("https://x/y.tar").unwrap(),
+            TarFormat::Plain
+        ));
+        // querystring and fragment must not defeat detection
+        assert!(matches!(
+            detect_tar_format("https://x/y.tar.xz?signed=1#frag").unwrap(),
+            TarFormat::Xz
+        ));
+        assert!(detect_tar_format("https://x/y").is_err());
+    }
+
+    #[test]
+    fn link_header_immutable() {
+        let h = "<https://releases.nixos.org/nixos/abc/nixexprs.tar.xz>; rel=\"immutable\"";
+        assert_eq!(
+            parse_link_immutable(h).as_deref(),
+            Some("https://releases.nixos.org/nixos/abc/nixexprs.tar.xz")
+        );
+
+        // rel=immutable_link is the historic name used by some nix releases
+        let h = "<https://x/y>; rel=\"immutable_link\"";
+        assert_eq!(parse_link_immutable(h).as_deref(), Some("https://x/y"));
+
+        // a Link header without an immutable rel yields None, not the wrong URL
+        let h = "<https://x/y>; rel=\"canonical\"";
+        assert!(parse_link_immutable(h).is_none());
+
+        // multiple values: the immutable one wins regardless of position
+        let h = "<https://x/canon>; rel=\"canonical\", <https://x/imm>; rel=\"immutable\"";
+        assert_eq!(parse_link_immutable(h).as_deref(), Some("https://x/imm"));
+    }
+
+    #[test]
+    fn http_date_roundtrip() {
+        // 1994-11-06T08:49:37Z = 784111777
+        assert_eq!(
+            epoch_from_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap(),
+            784111777
+        );
+        assert!(epoch_from_http_date("bogus").is_err());
+        assert!(epoch_from_http_date("Sun, 06 Foo 1994 08:49:37 GMT").is_err());
     }
 
     // our tarball nar hash must equal nix's narHash for this rev

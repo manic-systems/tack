@@ -43,6 +43,14 @@ tack alias <name> <template>   define a shorturl scheme
 tack alias --rm <name>         remove one
 ```
 
+## url schemes
+
+- `github:owner/repo[/ref]` tarball via codeload
+- `git+https://...` / `git+ssh://...` any git remote; `?ref=<branch>` /
+  `?rev=<sha>` to pin, `submodules = true` to recurse
+- `https://...` / `http://...` raw tarball, where the format is inferred
+  from the extension (e.g. `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`).
+
 ## shorturls
 
 `scheme:rest` expands by substituting `rest` into the template `{path}`
