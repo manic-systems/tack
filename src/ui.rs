@@ -1,10 +1,26 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::io::{IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::Duration;
+use std::{
+    fmt::Write as _,
+    io::{
+        self,
+        IsTerminal as _,
+        Write as _,
+    },
+    sync::{
+        Arc,
+        Mutex,
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
+    },
+    thread::{
+        self,
+        JoinHandle,
+    },
+    time::Duration,
+};
 
 #[derive(Clone)]
 pub enum PinStatus {
@@ -20,34 +36,46 @@ const FRAMES: [char; 4] = ['/', '-', '\\', '|'];
 
 pub struct Display {
     states: Arc<Mutex<Vec<PinStatus>>>,
-    names: Arc<Vec<String>>,
-    stop: Arc<AtomicBool>,
+    names:  Arc<[String]>,
+    stop:   Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
-    tty: bool,
+    tty:    bool,
 }
 
 impl Display {
-    pub fn new(names: Vec<String>) -> Self {
-        let tty = std::io::stdout().is_terminal();
-        let states = Arc::new(Mutex::new(vec![PinStatus::Pending; names.len()]));
-        let names = Arc::new(names);
+    pub fn new(initial_names: Vec<String>) -> Self {
+        let tty = io::stdout().is_terminal();
+        let states = Arc::new(Mutex::new(vec![PinStatus::Pending; initial_names.len()]));
+        let names = initial_names.into();
         let stop = Arc::new(AtomicBool::new(false));
 
         let handle = tty.then(|| {
-            let (states, names, stop) = (states.clone(), names.clone(), stop.clone());
-            std::thread::spawn(move || {
+            let states_for_draw = Arc::clone(&states);
+            let names_for_draw = Arc::clone(&names);
+            let stop_for_draw = Arc::clone(&stop);
+            thread::spawn(move || {
                 let mut drawn = false;
                 let mut frame = 0;
-                while !stop.load(Ordering::Relaxed) {
-                    draw(&names, &states.lock().unwrap(), frame, drawn);
+                while !stop_for_draw.load(Ordering::Relaxed) {
+                    draw(
+                        &names_for_draw,
+                        &states_for_draw.lock().unwrap(),
+                        frame,
+                        drawn,
+                    );
                     drawn = true;
                     frame = frame.wrapping_add(1);
-                    std::thread::sleep(Duration::from_millis(80));
+                    thread::sleep(Duration::from_millis(67));
                 }
-                draw(&names, &states.lock().unwrap(), frame, drawn);
+                draw(
+                    &names_for_draw,
+                    &states_for_draw.lock().unwrap(),
+                    frame,
+                    drawn,
+                );
             })
         });
-        Display {
+        Self {
             states,
             names,
             stop,
@@ -62,8 +90,8 @@ impl Display {
 
     pub fn finish(mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
         }
         if !self.tty {
             let states = self.states.lock().unwrap();
@@ -79,69 +107,73 @@ impl Display {
 fn draw(names: &[String], states: &[PinStatus], frame: usize, drawn: bool) {
     let mut out = String::new();
     if drawn {
-        out.push_str(&format!("\x1b[{}A", names.len()));
+        let _ = write!(out, "\x1b[{}A", names.len());
     }
     for (name, st) in names.iter().zip(states) {
         out.push_str("\x1b[2K");
-        out.push_str(&format!("[{}] {name}{}\n", glyph(st, frame), suffix(st)));
+        let _ = writeln!(out, "[{}] {name}{}", glyph(st, frame), suffix(st));
     }
-    let mut so = std::io::stdout().lock();
+    let mut so = io::stdout().lock();
     let _ = so.write_all(out.as_bytes());
     let _ = so.flush();
 }
 
 fn glyph(st: &PinStatus, frame: usize) -> String {
-    let (color, ch) = match st {
-        PinStatus::Pending => (2, '·'),
-        PinStatus::Fetching => (34, FRAMES[frame % FRAMES.len()]),
-        PinStatus::NoChange => (33, '-'),
-        PinStatus::Updated { .. } => (32, '✓'),
-        PinStatus::Drift { accepted: true, .. } => (33, '~'),
+    let (color, ch) = match *st {
+        PinStatus::Pending => (2_i32, '\u{b7}'),
+        PinStatus::Fetching => (34_i32, FRAMES[frame % FRAMES.len()]),
+        PinStatus::NoChange => (33_i32, '-'),
+        PinStatus::Updated { .. } => (32_i32, '\u{2713}'),
+        PinStatus::Drift { accepted: true, .. } => (33_i32, '~'),
         PinStatus::Drift {
             accepted: false, ..
-        } => (31, '!'),
-        PinStatus::Failed(_) => (31, '✗'),
+        } => (31_i32, '!'),
+        PinStatus::Failed(_) => (31_i32, '\u{2717}'),
     };
     format!("\x1b[{color}m{ch}\x1b[0m")
 }
 
 fn suffix(st: &PinStatus) -> String {
-    match st {
-        PinStatus::Updated { old, new } => format!("  {old} -> {new}"),
+    match *st {
+        PinStatus::Updated { ref old, ref new } => format!("  {old} -> {new}"),
         PinStatus::Drift {
-            rev,
+            ref rev,
             accepted: false,
         } => {
             format!("  DRIFT: rev {rev} unchanged but content differs (lock kept)")
-        }
+        },
         PinStatus::Drift {
-            rev,
+            ref rev,
             accepted: true,
         } => {
             format!("  DRIFT: rev {rev} content changed, relocked (--accept)")
-        }
-        PinStatus::Failed(msg) => format!("  {msg}"),
-        _ => String::new(),
+        },
+        PinStatus::Failed(ref msg) => format!("  {msg}"),
+        PinStatus::Pending | PinStatus::Fetching | PinStatus::NoChange => String::new(),
     }
 }
 
 fn plain_line(name: &str, st: &PinStatus) -> Option<String> {
-    match st {
-        PinStatus::Updated { old, new } => Some(format!("{name}: {old} -> {new}")),
+    match *st {
+        PinStatus::Updated { ref old, ref new } => Some(format!("{name}: {old} -> {new}")),
         PinStatus::NoChange => Some(format!("{name}: unchanged")),
         PinStatus::Drift {
-            rev,
+            ref rev,
             accepted: false,
-        } => Some(format!(
-            "{name}: DRIFT: rev {rev} unchanged but content differs (lock kept)"
-        )),
+        } => {
+            Some(format!(
+                "{name}: DRIFT: rev {rev} unchanged but content differs (lock kept)"
+            ))
+        },
         PinStatus::Drift {
-            rev,
+            ref rev,
             accepted: true,
-        } => Some(format!(
-            "{name}: DRIFT: rev {rev} content changed, relocked (--accept)"
-        )),
-        PinStatus::Failed(msg) => Some(format!("{name}: FAILED: {msg}")),
-        _ => None,
+        } => {
+            Some(format!(
+                "{name}: DRIFT: rev {rev} content changed, relocked (--accept)"
+            ))
+        },
+        PinStatus::Failed(ref msg) => Some(format!("{name}: FAILED: {msg}")),
+        PinStatus::Pending | PinStatus::Fetching => None,
     }
 }

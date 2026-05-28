@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use anyhow::{Context, Result, bail};
+use anyhow::{
+    Context as _,
+    Result,
+    bail,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
@@ -8,27 +12,27 @@ pub enum Command {
         force: bool,
     },
     Update {
-        names: Vec<String>,
+        names:  Vec<String>,
         accept: bool,
     },
     Look {
         names: Vec<String>,
     },
     Add {
-        name: String,
-        url: String,
-        flake: bool,
-        dir: Option<String>,
+        name:       String,
+        url:        String,
+        flake:      bool,
+        dir:        Option<String>,
         submodules: bool,
-        follows: Vec<(String, String)>,
+        follows:    Vec<(String, String)>,
     },
     Rm {
         name: String,
     },
     Alias {
-        name: String,
+        name:     String,
         template: Option<String>,
-        rm: bool,
+        rm:       bool,
     },
     Help,
 }
@@ -37,38 +41,41 @@ pub fn parse() -> Result<Command> {
     parse_parser(lexopt::Parser::from_env())
 }
 
-fn parse_parser(mut p: lexopt::Parser) -> Result<Command> {
+#[expect(clippy::too_many_lines, reason = "it's a simple parser")]
+fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
     use lexopt::prelude::*;
 
-    let sub = match p.next()? {
-        Some(Long("help") | Short('h')) => return Ok(Command::Help),
-        Some(Value(v)) => v
-            .string()
-            .map_err(|_| anyhow::anyhow!("invalid subcommand"))?,
-        Some(a) => return Err(a.unexpected().into()),
-        None => return Ok(Command::Help),
+    let sub = match parser.next()? {
+        Some(Value(value)) => {
+            value
+                .string()
+                .map_err(|_| anyhow::anyhow!("invalid subcommand"))?
+        },
+        Some(Long("help") | Short('h')) | None => return Ok(Command::Help),
+        Some(arg) => return Err(arg.unexpected().into()),
     };
 
     match sub.as_str() {
-        "help" => Ok(Command::Help),
         "init" => {
             let mut force = false;
-            while let Some(a) = p.next()? {
-                match a {
+            while let Some(arg) = parser.next()? {
+                match arg {
                     Long("force") => force = true,
-                    _ => return Err(a.unexpected().into()),
+                    Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
                 }
             }
             Ok(Command::Init { force })
-        }
+        },
         "update" | "look" => {
             let mut names = Vec::new();
             let mut accept = false;
-            while let Some(a) = p.next()? {
-                match a {
+            while let Some(arg) = parser.next()? {
+                match arg {
                     Long("accept") if sub == "update" => accept = true,
-                    Value(v) => names.push(v.string().map_err(|_| anyhow::anyhow!("bad name"))?),
-                    _ => return Err(a.unexpected().into()),
+                    Value(value) => {
+                        names.push(value.string().map_err(|_| anyhow::anyhow!("bad name"))?);
+                    },
+                    Short(_) | Long(_) => return Err(arg.unexpected().into()),
                 }
             }
             Ok(if sub == "update" {
@@ -76,42 +83,45 @@ fn parse_parser(mut p: lexopt::Parser) -> Result<Command> {
             } else {
                 Command::Look { names }
             })
-        }
+        },
         "add" => {
             let (mut name, mut url) = (None, None);
             let mut flake = true;
             let mut dir = None;
             let mut submodules = false;
             let mut follows = Vec::new();
-            while let Some(a) = p.next()? {
-                match a {
+            while let Some(arg) = parser.next()? {
+                match arg {
                     Long("no-flake") => flake = false,
                     Long("submodules") => submodules = true,
                     Long("dir") => {
                         dir = Some(
-                            p.value()?
+                            parser
+                                .value()?
                                 .string()
                                 .map_err(|_| anyhow::anyhow!("bad dir"))?,
-                        )
-                    }
+                        );
+                    },
                     Long("follows") => {
-                        let s = p
+                        let string = parser
                             .value()?
                             .string()
                             .map_err(|_| anyhow::anyhow!("bad follows"))?;
-                        follows.push(parse_follows(&s));
-                    }
-                    Value(v) => {
-                        let s = v.string().map_err(|_| anyhow::anyhow!("bad argument"))?;
+                        follows.push(parse_follows(&string));
+                    },
+                    Value(value) => {
+                        let str = value
+                            .string()
+                            .map_err(|_| anyhow::anyhow!("bad argument"))?;
                         if name.is_none() {
-                            name = Some(s);
+                            name = Some(str);
                         } else if url.is_none() {
-                            url = Some(s);
+                            url = Some(str);
                         } else {
                             bail!("add takes at most <name> <url>");
                         }
-                    }
-                    _ => return Err(a.unexpected().into()),
+                    },
+                    Short(_) | Long(_) => return Err(arg.unexpected().into()),
                 }
             }
             Ok(Command::Add {
@@ -122,61 +132,66 @@ fn parse_parser(mut p: lexopt::Parser) -> Result<Command> {
                 submodules,
                 follows,
             })
-        }
+        },
         "rm" => {
             let mut name = None;
-            while let Some(a) = p.next()? {
-                match a {
-                    Value(v) if name.is_none() => {
-                        name = Some(v.string().map_err(|_| anyhow::anyhow!("bad name"))?)
-                    }
-                    _ => return Err(a.unexpected().into()),
+            while let Some(arg) = parser.next()? {
+                match arg {
+                    Value(value) if name.is_none() => {
+                        name = Some(value.string().map_err(|_| anyhow::anyhow!("bad name"))?);
+                    },
+                    Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
                 }
             }
             Ok(Command::Rm {
                 name: name.context("rm: missing <name>")?,
             })
-        }
+        },
         "alias" => {
             let mut rm = false;
-            let (mut name, mut template) = (None, None);
-            while let Some(a) = p.next()? {
-                match a {
+            let (mut name_arg, mut template) = (None, None);
+            while let Some(arg) = parser.next()? {
+                match arg {
                     Long("rm") => rm = true,
-                    Value(v) => {
-                        let s = v.string().map_err(|_| anyhow::anyhow!("bad argument"))?;
-                        if name.is_none() {
-                            name = Some(s);
+                    Value(value) => {
+                        let str = value
+                            .string()
+                            .map_err(|_| anyhow::anyhow!("bad argument"))?;
+                        if name_arg.is_none() {
+                            name_arg = Some(str);
                         } else if template.is_none() {
-                            template = Some(s);
+                            template = Some(str);
                         } else {
                             bail!("alias takes at most <name> <template>");
                         }
-                    }
-                    _ => return Err(a.unexpected().into()),
+                    },
+                    Short(_) | Long(_) => return Err(arg.unexpected().into()),
                 }
             }
-            let name = name.context("alias: missing <name>")?;
+            let name = name_arg.context("alias: missing <name>")?;
             if !rm && template.is_none() {
                 bail!("alias: missing <template> (or pass --rm)");
             }
             Ok(Command::Alias { name, template, rm })
-        }
+        },
         _ => Ok(Command::Help),
     }
 }
 
-/// child=parent, or bare child -> follows the same-named pin
-fn parse_follows(s: &str) -> (String, String) {
-    match s.split_once('=') {
-        Some((c, p)) => (c.to_string(), p.to_string()),
-        None => (s.to_string(), s.to_string()),
+/// child=parent, or bare child -> follows the same-named pin.
+fn parse_follows(str: &str) -> (String, String) {
+    match str.split_once('=') {
+        Some((child, parent)) => (child.to_owned(), parent.to_owned()),
+        None => (str.to_owned(), str.to_owned()),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, parse_parser};
+    use super::{
+        Command,
+        parse_parser,
+    };
 
     fn parse(args: &[&str]) -> Command {
         parse_parser(lexopt::Parser::from_args(args)).expect("arguments should parse")

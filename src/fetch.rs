@@ -1,19 +1,49 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use anyhow::{Context, Result, anyhow, bail};
-use git2::build::CheckoutBuilder;
-use git2::{Cred, CredentialType, Direction, FetchOptions, RemoteCallbacks, Repository};
-use serde_json::{Value, json};
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::{
+    env,
+    fs,
+    io::Read,
+    ops::Range,
+    path::{
+        Path,
+        PathBuf,
+    },
+    sync::{
+        Arc,
+        OnceLock,
+    },
+};
+
+use anyhow::{
+    Context as _,
+    Result,
+    anyhow,
+    bail,
+};
+use flate2::read::GzDecoder;
+use git2::{
+    Cred,
+    CredentialType,
+    Direction,
+    FetchOptions,
+    RemoteCallbacks,
+    Repository,
+    build::CheckoutBuilder,
+};
+use native_tls::TlsConnector;
+use serde_json::{
+    Value,
+    json,
+};
+use xz2::read::XzDecoder;
 
 use crate::nar;
 
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        let connector = native_tls::TlsConnector::new().expect("init tls");
+        let connector = TlsConnector::new().expect("init tls");
         ureq::AgentBuilder::new()
             .tls_connector(Arc::new(connector))
             .build()
@@ -23,13 +53,13 @@ fn agent() -> &'static ureq::Agent {
 enum Target {
     Github {
         owner: String,
-        repo: String,
-        reff: Option<String>,
+        repo:  String,
+        reff:  Option<String>,
     },
     Git {
-        url: String,
+        url:  String,
         reff: Option<String>,
-        rev: Option<String>,
+        rev:  Option<String>,
     },
     Tarball {
         url: String,
@@ -38,47 +68,47 @@ enum Target {
 
 fn parse(expanded: &str) -> Result<Target> {
     if let Some(body) = expanded.strip_prefix("github:") {
-        let (path, reff, rev) = split_query(body);
-        let segs: Vec<&str> = path.split('/').collect();
+        let (path, query_ref, query_sha) = split_query(body);
+        let segs = path.split('/').collect::<Vec<&str>>();
         if segs.len() < 2 {
             bail!("malformed github url: {expanded}");
         }
-        let reff = reff
-            .or(rev)
+        let reff = query_ref
+            .or(query_sha)
             .or_else(|| (segs.len() > 2).then(|| segs[2..].join("/")));
         return Ok(Target::Github {
-            owner: segs[0].to_string(),
-            repo: segs[1].to_string(),
+            owner: segs[0].to_owned(),
+            repo: segs[1].to_owned(),
             reff,
         });
     }
     if let Some(rest) = expanded.strip_prefix("git+") {
         let (url, reff, rev) = split_query(rest);
         return Ok(Target::Git {
-            url: url.to_string(),
+            url: url.to_owned(),
             reff,
             rev,
         });
     }
     if expanded.starts_with("https://") || expanded.starts_with("http://") {
         return Ok(Target::Tarball {
-            url: expanded.to_string(),
+            url: expanded.to_owned(),
         });
     }
     bail!("unsupported url scheme: {expanded}")
 }
 
 /// pull out ref= and rev=
-fn split_query(s: &str) -> (&str, Option<String>, Option<String>) {
-    let Some((path, q)) = s.split_once('?') else {
-        return (s, None, None);
+fn split_query(str: &str) -> (&str, Option<String>, Option<String>) {
+    let Some((path, query)) = str.split_once('?') else {
+        return (str, None, None);
     };
     let (mut reff, mut rev) = (None, None);
-    for kv in q.split('&') {
-        if let Some(v) = kv.strip_prefix("ref=") {
-            reff = Some(v.to_string());
-        } else if let Some(v) = kv.strip_prefix("rev=") {
-            rev = Some(v.to_string());
+    for kv in query.split('&') {
+        if let Some(value) = kv.strip_prefix("ref=") {
+            reff = Some(value.to_owned());
+        } else if let Some(value) = kv.strip_prefix("rev=") {
+            rev = Some(value.to_owned());
         }
     }
     (path, reff, rev)
@@ -88,13 +118,13 @@ fn split_query(s: &str) -> (&str, Option<String>, Option<String>) {
 pub fn current_rev(expanded: &str) -> Result<String> {
     match parse(expanded)? {
         Target::Github { owner, repo, reff } => {
-            let reff = reff.as_deref().unwrap_or("HEAD");
-            Ok(gh_commit(&owner, &repo, reff)?.0)
-        }
+            let ref_str = reff.as_deref().unwrap_or("HEAD");
+            Ok(gh_commit(&owner, &repo, ref_str)?.0)
+        },
         Target::Git { url, reff, rev } => {
             // a pinned rev never moves; report it without touching the network
-            if let Some(rev) = rev {
-                return Ok(rev);
+            if let Some(pinned) = rev {
+                return Ok(pinned);
             }
             let cb = callbacks();
             let mut remote = git2::Remote::create_detached(url.as_str())?;
@@ -106,16 +136,22 @@ pub fn current_rev(expanded: &str) -> Result<String> {
                 }
             }
             bail!("ref {want} not found on {url}")
-        }
+        },
         Target::Tarball { url } => {
             let resp = agent()
                 .request("HEAD", &url)
                 .set("User-Agent", "tack")
                 .call()
-                .or_else(|_| agent().get(&url).set("User-Agent", "tack").call())
+                .or_else(|_| {
+                    agent()
+                        .get(&url)
+                        .set("User-Agent", "tack")
+                        .call()
+                        .map_err(Box::new)
+                })
                 .with_context(|| format!("probe {url}"))?;
             Ok(immutable_url_of(&resp, &url))
-        }
+        },
     }
 }
 
@@ -123,8 +159,8 @@ pub fn current_rev(expanded: &str) -> Result<String> {
 pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
     match parse(expanded)? {
         Target::Github { owner, repo, reff } => {
-            let reff = reff.as_deref().unwrap_or("HEAD");
-            let (rev, last_modified) = gh_commit(&owner, &repo, reff)?;
+            let ref_str = reff.as_deref().unwrap_or("HEAD");
+            let (rev, last_modified) = gh_commit(&owner, &repo, ref_str)?;
             let dir = tempfile::tempdir()?;
             let root = download_github_tarball(&owner, &repo, &rev, dir.path())?;
             let nar_hash = nar::hash_path(&root)?;
@@ -137,17 +173,21 @@ pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
                 "lastModified": last_modified,
             });
             Ok((node, rev))
-        }
-        Target::Git { url, reff, rev } => {
+        },
+        Target::Git {
+            url,
+            reff,
+            rev: rev_arg,
+        } => {
             let dir = tempfile::tempdir()?;
             let (rev, last_modified, refname) = git_checkout(
                 &url,
                 reff.as_deref(),
-                rev.as_deref(),
+                rev_arg.as_deref(),
                 submodules,
                 dir.path(),
             )?;
-            std::fs::remove_dir_all(dir.path().join(".git")).ok();
+            let _ = fs::remove_dir_all(dir.path().join(".git")).ok();
             let nar_hash = nar::hash_path(dir.path())?;
             let mut node = json!({
                 "type": "git",
@@ -161,7 +201,7 @@ pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
                 node["submodules"] = json!(true);
             }
             Ok((node, rev))
-        }
+        },
         Target::Tarball { url } => {
             let resp = agent()
                 .get(&url)
@@ -171,7 +211,7 @@ pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
             let immutable_url = immutable_url_of(&resp, &url);
             let last_modified = resp
                 .header("Last-Modified")
-                .and_then(|s| epoch_from_http_date(s).ok())
+                .and_then(|header| epoch_from_http_date(header).ok())
                 .unwrap_or(0);
             let format = detect_tar_format(&immutable_url)
                 .or_else(|_| detect_tar_format(&url))
@@ -187,7 +227,7 @@ pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
                 "lastModified": last_modified,
             });
             Ok((node, immutable_url))
-        }
+        },
     }
 }
 
@@ -198,28 +238,28 @@ fn immutable_url_of(resp: &ureq::Response, fallback: &str) -> String {
         .unwrap_or_else(|| {
             let url = resp.get_url();
             if url.is_empty() {
-                fallback.to_string()
+                fallback.to_owned()
             } else {
-                url.to_string()
+                url.to_owned()
             }
         })
 }
 
 /// Extract the immutable URL from an HTTP Link header per RFC 8288.
 fn parse_link_immutable(header: &str) -> Option<String> {
-    for part in header.split(',') {
-        let part = part.trim();
+    for raw_part in header.split(',') {
+        let part = raw_part.trim();
         let (url_part, params) = part.split_once(';')?;
         let url = url_part
             .trim()
             .strip_prefix('<')
-            .and_then(|s| s.strip_suffix('>'))?;
+            .and_then(|inner| inner.strip_suffix('>'))?;
         for param in params.split(';') {
-            let (k, v) = param.trim().split_once('=')?;
-            if k.trim().eq_ignore_ascii_case("rel") {
-                let v = v.trim().trim_matches('"');
-                if v == "immutable" || v == "immutable_link" {
-                    return Some(url.to_string());
+            let (key, raw_value) = param.trim().split_once('=')?;
+            if key.trim().eq_ignore_ascii_case("rel") {
+                let rel = raw_value.trim().trim_matches('"');
+                if rel == "immutable" || rel == "immutable_link" {
+                    return Some(url.to_owned());
                 }
             }
         }
@@ -235,28 +275,39 @@ enum TarFormat {
 }
 
 fn detect_tar_format(url: &str) -> Result<TarFormat> {
-    let path = url.split('?').next().unwrap_or(url);
-    let path = path.split('#').next().unwrap_or(path);
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".tar.xz") || lower.ends_with(".txz") {
+    let after_query = url.split('?').next().unwrap_or(url);
+    let path = after_query.split('#').next().unwrap_or(after_query);
+    if ends_with_ci(path, ".tar.xz") || ends_with_ci(path, ".txz") {
         Ok(TarFormat::Xz)
-    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+    } else if ends_with_ci(path, ".tar.gz") || ends_with_ci(path, ".tgz") {
         Ok(TarFormat::Gz)
-    } else if lower.ends_with(".tar") {
+    } else if ends_with_ci(path, ".tar") {
         Ok(TarFormat::Plain)
     } else {
         bail!(
-            "cannot infer tarball format from url (need .tar, .tar.gz/.tgz, or .tar.xz/.txz): {url}"
+            "cannot infer tarball format from url (need .tar, .tar.gz/.tgz, or .tar.xz/.txz): \
+             {url}"
         )
     }
 }
 
+/// case-insensitive ASCII suffix check that is bytes-based to dodge utf-8
+/// slicing
+fn ends_with_ci(path: &str, ext: &str) -> bool {
+    let pb = path.as_bytes();
+    let eb = ext.as_bytes();
+    pb.len() >= eb.len() && pb[pb.len() - eb.len()..].eq_ignore_ascii_case(eb)
+}
+
 /// Unpack a tarball stream into `into`, strip the single top-level directory
 /// and return the stripped root.
-fn unpack_tar_stream<R: Read>(reader: R, format: TarFormat, into: &Path) -> Result<PathBuf> {
+fn unpack_tar_stream<R>(reader: R, format: TarFormat, into: &Path) -> Result<PathBuf>
+where
+    R: Read,
+{
     let decompressed: Box<dyn Read> = match format {
-        TarFormat::Gz => Box::new(flate2::read::GzDecoder::new(reader)),
-        TarFormat::Xz => Box::new(xz2::read::XzDecoder::new(reader)),
+        TarFormat::Gz => Box::new(GzDecoder::new(reader)),
+        TarFormat::Xz => Box::new(XzDecoder::new(reader)),
         TarFormat::Plain => Box::new(reader),
     };
     let mut archive = tar::Archive::new(decompressed);
@@ -264,9 +315,9 @@ fn unpack_tar_stream<R: Read>(reader: R, format: TarFormat, into: &Path) -> Resu
     archive
         .unpack(into)
         .with_context(|| format!("unpack into {}", into.display()))?;
-    let mut dirs = std::fs::read_dir(into)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_dir());
+    let mut dirs = fs::read_dir(into)?
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|path| path.is_dir());
     let root = dirs.next().ok_or_else(|| anyhow!("empty tarball"))?;
     if dirs.next().is_some() {
         bail!("unexpected multiple top-level dirs in tarball");
@@ -280,19 +331,19 @@ fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
         .get(&url)
         .set("User-Agent", "tack")
         .set("Accept", "application/vnd.github+json");
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+    if let Ok(token) = env::var("GITHUB_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {token}"));
     }
     let body = req
         .call()
         .with_context(|| format!("github api {owner}/{repo}@{reff}"))?
         .into_string()?;
-    let v: Value = serde_json::from_str(&body)?;
-    let rev = v["sha"]
+    let parsed = serde_json::from_str::<Value>(&body)?;
+    let rev = parsed["sha"]
         .as_str()
         .ok_or_else(|| anyhow!("no sha in github response for {owner}/{repo}@{reff}"))?
-        .to_string();
-    let date = v["commit"]["committer"]["date"]
+        .to_owned();
+    let date = parsed["commit"]["committer"]["date"]
         .as_str()
         .ok_or_else(|| anyhow!("no commit date for {owner}/{repo}@{reff}"))?;
     Ok((rev, epoch_from_iso(date)?))
@@ -306,14 +357,14 @@ fn download_github_tarball(owner: &str, repo: &str, rev: &str, into: &Path) -> R
         .call()
         .with_context(|| format!("download {url}"))?
         .into_reader();
-    let gz = flate2::read::GzDecoder::new(reader);
+    let gz = GzDecoder::new(reader);
     let mut archive = tar::Archive::new(gz);
     archive.set_preserve_permissions(true);
     archive.unpack(into)?;
     // codeload wraps everything in one repo-rev/ dir
-    let mut dirs = std::fs::read_dir(into)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_dir());
+    let mut dirs = fs::read_dir(into)?
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|path| path.is_dir());
     let root = dirs
         .next()
         .ok_or_else(|| anyhow!("empty tarball for {owner}/{repo}"))?;
@@ -328,7 +379,7 @@ fn download_github_tarball(owner: &str, repo: &str, rev: &str, into: &Path) -> R
 fn git_checkout(
     url: &str,
     reff: Option<&str>,
-    rev: Option<&str>,
+    requested_rev: Option<&str>,
     submodules: bool,
     into: &Path,
 ) -> Result<(String, i64, String)> {
@@ -344,19 +395,20 @@ fn git_checkout(
     fo.remote_callbacks(callbacks());
     // a specific rev can be anywhere in history, so fetch the ref in full;
     // for a moving ref we only need the tip
-    if rev.is_none() {
+    if requested_rev.is_none() {
         fo.depth(1);
     }
     remote
         .fetch(&[&refname], Some(&mut fo), None)
         .with_context(|| format!("fetch {refname} from {url}"))?;
 
-    let commit = match rev {
-        Some(rev) => repo
-            .revparse_single(rev)
-            .with_context(|| format!("rev '{rev}' not reachable from {refname} on {url}"))?
-            .peel_to_commit()
-            .with_context(|| format!("'{rev}' is not a commit"))?,
+    let commit = match requested_rev {
+        Some(pinned) => {
+            repo.revparse_single(pinned)
+                .with_context(|| format!("rev '{pinned}' not reachable from {refname} on {url}"))?
+                .peel_to_commit()
+                .with_context(|| format!("'{pinned}' is not a commit"))?
+        },
         None => repo.find_reference("FETCH_HEAD")?.peel_to_commit()?,
     };
     let rev = commit.id().to_string();
@@ -383,15 +435,16 @@ fn update_submodules(repo: &Repository) -> Result<()> {
     Ok(())
 }
 
-fn branch_str(b: Result<git2::Buf, git2::Error>) -> Option<String> {
-    b.ok().and_then(|b| b.as_str().map(str::to_string))
+fn branch_str(raw: Result<git2::Buf, git2::Error>) -> Option<String> {
+    let buf = raw.ok()?;
+    buf.as_str().map(str::to_owned)
 }
 
 fn full_ref(reff: Option<&str>, default: impl FnOnce() -> Option<String>) -> String {
     match reff {
-        Some(r) if r.starts_with("refs/") => r.to_string(),
-        Some(r) => format!("refs/heads/{r}"),
-        None => default().unwrap_or_else(|| "HEAD".to_string()),
+        Some(target) if target.starts_with("refs/") => target.to_owned(),
+        Some(target) => format!("refs/heads/{target}"),
+        None => default().unwrap_or_else(|| "HEAD".to_owned()),
     }
 }
 
@@ -411,16 +464,23 @@ fn callbacks() -> RemoteCallbacks<'static> {
 }
 
 /// IMF-fixdate (e.g. `Sun, 06 Nov 1994 08:49:37 GMT`) to unix seconds.
-fn epoch_from_http_date(s: &str) -> Result<i64> {
-    let b = s.as_bytes();
-    if b.len() < 29 {
-        bail!("bad http date: {s}");
+fn epoch_from_http_date(input: &str) -> Result<i64> {
+    let bytes = input.as_bytes();
+    if bytes.len() < 29 {
+        bail!("bad http date: {input}");
     }
-    let n = |r: std::ops::Range<usize>| -> Result<i64> {
-        s[r].parse().with_context(|| format!("bad http date: {s}"))
+    let slice = |range: Range<usize>| -> Result<&str> {
+        input
+            .get(range)
+            .with_context(|| format!("bad http date: {input}"))
     };
-    let day = n(5..7)?;
-    let mon = match &s[8..11] {
+    let parse_num = |range: Range<usize>| -> Result<i64> {
+        slice(range)?
+            .parse()
+            .with_context(|| format!("bad http date: {input}"))
+    };
+    let day = parse_num(5..7)?;
+    let month = match slice(8..11)? {
         "Jan" => 1,
         "Feb" => 2,
         "Mar" => 3,
@@ -433,40 +493,49 @@ fn epoch_from_http_date(s: &str) -> Result<i64> {
         "Oct" => 10,
         "Nov" => 11,
         "Dec" => 12,
-        m => bail!("bad month in http date: {m}"),
+        name => bail!("bad month in http date: {name}"),
     };
-    let year = n(12..16)?;
-    let hh = n(17..19)?;
-    let mi = n(20..22)?;
-    let ss = n(23..25)?;
-    Ok(days_from_civil(year, mon, day) * 86400 + hh * 3600 + mi * 60 + ss)
+    let year = parse_num(12..16)?;
+    let hh = parse_num(17..19)?;
+    let mi = parse_num(20..22)?;
+    let ss = parse_num(23..25)?;
+    Ok(days_from_civil(year, month, day) * 86400 + hh * 3600 + mi * 60 + ss)
 }
 
 /// iso8601 to unix seconds
-fn epoch_from_iso(s: &str) -> Result<i64> {
-    let b = s.as_bytes();
-    if b.len() < 20 {
-        bail!("bad timestamp: {s}");
+fn epoch_from_iso(input: &str) -> Result<i64> {
+    let bytes = input.as_bytes();
+    if bytes.len() < 20 {
+        bail!("bad timestamp: {input}");
     }
-    let n = |r: std::ops::Range<usize>| -> Result<i64> {
-        s[r].parse().with_context(|| format!("bad timestamp: {s}"))
+    let parse_num = |range: Range<usize>| -> Result<i64> {
+        input
+            .get(range)
+            .with_context(|| format!("bad timestamp: {input}"))?
+            .parse()
+            .with_context(|| format!("bad timestamp: {input}"))
     };
-    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
-    let (hh, mi, ss) = (n(11..13)?, n(14..16)?, n(17..19)?);
-    Ok(days_from_civil(y, m, d) * 86400 + hh * 3600 + mi * 60 + ss)
+    let (year, month, day) = (parse_num(0..4)?, parse_num(5..7)?, parse_num(8..10)?);
+    let (hh, mi, ss) = (parse_num(11..13)?, parse_num(14..16)?, parse_num(17..19)?);
+    Ok(days_from_civil(year, month, day) * 86400 + hh * 3600 + mi * 60 + ss)
 }
 
 /// days since 1970-01-01 (howard hinnant)
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let adjusted_year = if month <= 2 { year - 1 } else { year };
+    let era = if adjusted_year >= 0 {
+        adjusted_year
+    } else {
+        adjusted_year - 399
+    } / 400;
+    let yoe = adjusted_year - era * 400;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
+    era * 146_097 + doe - 719_468
 }
 
 #[cfg(test)]
+#[expect(clippy::panic, reason = "panic is the test-failure coping mechanism")]
 mod tests {
     use super::*;
 
@@ -477,15 +546,15 @@ mod tests {
                 assert_eq!(url, "https://example.com/o/r");
                 assert_eq!(reff.as_deref(), Some("main"));
                 assert_eq!(rev.as_deref(), Some("abc123"));
-            }
-            _ => panic!("expected git target"),
+            },
+            Target::Github { .. } | Target::Tarball { .. } => panic!("expected git target"),
         }
         match parse("git+ssh://git@example.com/o/r?rev=deadbeef").unwrap() {
             Target::Git { reff, rev, .. } => {
                 assert_eq!(reff, None);
                 assert_eq!(rev.as_deref(), Some("deadbeef"));
-            }
-            _ => panic!("expected git target"),
+            },
+            Target::Github { .. } | Target::Tarball { .. } => panic!("expected git target"),
         }
     }
 
@@ -493,7 +562,7 @@ mod tests {
     fn github_rev_is_committish() {
         match parse("github:o/r?rev=abc123").unwrap() {
             Target::Github { reff, .. } => assert_eq!(reff.as_deref(), Some("abc123")),
-            _ => panic!("expected github target"),
+            Target::Git { .. } | Target::Tarball { .. } => panic!("expected github target"),
         }
     }
 
@@ -504,13 +573,13 @@ mod tests {
                 assert_eq!(
                     url,
                     "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz"
-                )
-            }
-            _ => panic!("expected tarball target"),
+                );
+            },
+            Target::Github { .. } | Target::Git { .. } => panic!("expected tarball target"),
         }
         match parse("http://example.com/release.tar.gz").unwrap() {
-            Target::Tarball { .. } => {}
-            _ => panic!("expected tarball target"),
+            Target::Tarball { .. } => {},
+            Target::Github { .. } | Target::Git { .. } => panic!("expected tarball target"),
         }
     }
 
@@ -546,23 +615,29 @@ mod tests {
 
     #[test]
     fn link_header_immutable() {
-        let h = "<https://releases.nixos.org/nixos/abc/nixexprs.tar.xz>; rel=\"immutable\"";
+        let immutable = "<https://releases.nixos.org/nixos/abc/nixexprs.tar.xz>; rel=\"immutable\"";
         assert_eq!(
-            parse_link_immutable(h).as_deref(),
+            parse_link_immutable(immutable).as_deref(),
             Some("https://releases.nixos.org/nixos/abc/nixexprs.tar.xz")
         );
 
         // rel=immutable_link is the historic name used by some nix releases
-        let h = "<https://x/y>; rel=\"immutable_link\"";
-        assert_eq!(parse_link_immutable(h).as_deref(), Some("https://x/y"));
+        let immutable_link = "<https://x/y>; rel=\"immutable_link\"";
+        assert_eq!(
+            parse_link_immutable(immutable_link).as_deref(),
+            Some("https://x/y")
+        );
 
         // a Link header without an immutable rel yields None, not the wrong URL
-        let h = "<https://x/y>; rel=\"canonical\"";
-        assert!(parse_link_immutable(h).is_none());
+        let canonical = "<https://x/y>; rel=\"canonical\"";
+        assert!(parse_link_immutable(canonical).is_none());
 
         // multiple values: the immutable one wins regardless of position
-        let h = "<https://x/canon>; rel=\"canonical\", <https://x/imm>; rel=\"immutable\"";
-        assert_eq!(parse_link_immutable(h).as_deref(), Some("https://x/imm"));
+        let mixed = "<https://x/canon>; rel=\"canonical\", <https://x/imm>; rel=\"immutable\"";
+        assert_eq!(
+            parse_link_immutable(mixed).as_deref(),
+            Some("https://x/imm")
+        );
     }
 
     #[test]
@@ -570,16 +645,16 @@ mod tests {
         // 1994-11-06T08:49:37Z = 784111777
         assert_eq!(
             epoch_from_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap(),
-            784111777
+            784_111_777
         );
-        assert!(epoch_from_http_date("bogus").is_err());
-        assert!(epoch_from_http_date("Sun, 06 Foo 1994 08:49:37 GMT").is_err());
+        epoch_from_http_date("bogus").unwrap_err();
+        epoch_from_http_date("Sun, 06 Foo 1994 08:49:37 GMT").unwrap_err();
     }
 
     // our tarball nar hash must equal nix's narHash for this rev
     // cargo test -- --ignored
     #[test]
-    #[ignore]
+    #[ignore = "hits codeload.github.com"]
     fn github_narhash_matches_nix() {
         let dir = tempfile::tempdir().unwrap();
         let root = download_github_tarball(
@@ -590,7 +665,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::nar::hash_path(&root).unwrap(),
+            nar::hash_path(&root).unwrap(),
             "sha256-nt/xmuXaJB/vWlRJ4wpdlYQCIgCzFR6QJwlRyhfNn5o="
         );
     }

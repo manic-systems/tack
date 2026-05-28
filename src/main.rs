@@ -9,12 +9,14 @@ mod pins;
 mod shorturl;
 mod ui;
 
+use std::process;
+
 use cli::Command;
 
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("tack: {e:#}");
-        std::process::exit(1);
+    if let Err(err) = run() {
+        eprintln!("tack: {err:#}");
+        process::exit(1);
     }
 }
 
@@ -36,6 +38,6 @@ fn run() -> anyhow::Result<()> {
         Command::Help => {
             commands::help();
             Ok(())
-        }
+        },
     }
 }
