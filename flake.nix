@@ -12,7 +12,16 @@
       forAllSystems = lib.genAttrs lib.systems.flakeExposed;
       pkgsFor = system: nixpkgs.legacyPackages.${system};
 
-      nativeDeps = pkgs: [ pkgs.pkg-config ];
+      # wild + clang are only used on Linux tier-1 arches
+      hasWild = plat: plat.isLinux && (plat.isx86_64 || plat.isAarch64);
+
+      nativeDeps =
+        pkgs:
+        [ pkgs.pkg-config ]
+        ++ lib.optionals (hasWild pkgs.stdenv.hostPlatform) [
+          pkgs.wild
+          pkgs.clang
+        ];
       linkDeps = pkgs: [
         pkgs.openssl
         pkgs.libgit2
