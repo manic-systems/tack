@@ -15,3 +15,8 @@
 #   submodules      fetch git submodules
 [inputs.nixpkgs]
 url = "github:nixos/nixpkgs/nixpkgs-unstable"
+
+# nightly rust for the `fmt` devshell only.
+[inputs.fenix]
+follows = { nixpkgs = "nixpkgs" }
+url     = "github:nix-community/fenix"

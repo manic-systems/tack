@@ -6,7 +6,8 @@
   outputs =
     { self }:
     let
-      nixpkgs = (import ./inputs.nix).nixpkgs;
+      inputs = import ./inputs.nix;
+      inherit (inputs) nixpkgs fenix;
       inherit (nixpkgs) lib;
       forAllSystems = lib.genAttrs lib.systems.flakeExposed;
       pkgsFor = system: nixpkgs.legacyPackages.${system};
@@ -55,6 +56,7 @@
         system:
         let
           pkgs = pkgsFor system;
+          nightlyRustfmt = fenix.packages.${system}.latest.rustfmt;
         in
         {
           default = pkgs.mkShell {
@@ -74,6 +76,52 @@
               OPENSSL_NO_VENDOR = 1;
             };
           };
+
+          # `nix develop .#fmt` formats on entry.
+          fmt = pkgs.mkShellNoCC {
+            packages = [
+              pkgs.cargo
+              nightlyRustfmt
+              pkgs.taplo
+              pkgs.nixfmt
+            ];
+            shellHook = ''
+              cargo fmt
+              taplo fmt
+              find . -name '*.nix' -not -path './target/*' -exec nixfmt {} +
+            '';
+          };
+        }
+      );
+
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+          nightlyRustfmt = fenix.packages.${system}.latest.rustfmt;
+        in
+        {
+          default = self.checks.${system}.fmt;
+          fmt =
+            pkgs.runCommand "tack-fmt-check"
+              {
+                nativeBuildInputs = [
+                  pkgs.cargo
+                  nightlyRustfmt
+                  pkgs.taplo
+                  pkgs.nixfmt
+                ];
+                src = ./.;
+              }
+              ''
+                cp -r $src ./tree
+                chmod -R +w ./tree
+                cd ./tree
+                cargo fmt -- --check
+                taplo fmt --check
+                find . -name '*.nix' -exec nixfmt --check {} +
+                touch $out
+              '';
         }
       );
     };
