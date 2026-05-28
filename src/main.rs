@@ -46,6 +46,7 @@ fn run() -> anyhow::Result<()> {
         },
         Command::Rm { name } => commands::rm(&name),
         Command::Alias { name, template, rm } => commands::alias(&name, template.as_deref(), rm),
+        Command::Dedup { deep } => commands::dedup(deep),
         Command::Help => {
             commands::help();
             Ok(())

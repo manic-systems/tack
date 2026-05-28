@@ -40,6 +40,9 @@ pub enum Command {
         template: Option<String>,
         rm:       bool,
     },
+    Dedup {
+        deep: bool,
+    },
     Help,
 }
 
@@ -194,6 +197,16 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
                 bail!("alias: missing <template> (or pass --rm)");
             }
             Ok(Command::Alias { name, template, rm })
+        },
+        "dedup" => {
+            let mut deep = false;
+            while let Some(arg) = parser.next()? {
+                match arg {
+                    Long("deep") => deep = true,
+                    Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
+                }
+            }
+            Ok(Command::Dedup { deep })
         },
         _ => Ok(Command::Help),
     }

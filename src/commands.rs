@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
+    collections::{
+        BTreeMap,
+        BTreeSet,
+        HashSet,
+    },
     fs,
     path::{
         Path,
@@ -18,6 +23,7 @@ use anyhow::{
 };
 use rayon::prelude::*;
 use serde_json::Value;
+use toml_edit::Item;
 
 use crate::{
     fetch,
@@ -419,6 +425,348 @@ fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Inpu
     out
 }
 
+struct Entry {
+    parent: String,
+    name:   String,
+    rev:    String,
+}
+
+struct Finding {
+    identity: String,
+    entry:    Entry,
+}
+
+struct ScanResult {
+    findings:   Vec<Finding>,
+    transitive: Vec<TackTransitive>,
+}
+
+struct TackTransitive {
+    path:       Vec<String>,
+    source:     SourceRef,
+    submodules: bool,
+}
+
+enum SourceRef {
+    Locked(Value),
+    Url(String),
+}
+
+pub fn dedup(deep: bool) -> Result<()> {
+    let dir = dir();
+    let doc = pins::load(&pins_path(&dir))?;
+    let lock = lock::load(&lock_path(&dir))?;
+    let inputs = pins::inputs(&doc)?;
+    let shorturls = pins::shorturls(&doc);
+    let configured_follows = existing_follows(&doc);
+
+    let mut groups: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
+
+    for inp in &inputs {
+        let expanded = shorturl::expand(&inp.url, &shorturls);
+        if let Some(id) = canonical_identity(&expanded) {
+            let rev = lock
+                .get(&inp.name)
+                .and_then(rev_for_display)
+                .unwrap_or_default();
+            groups.entry(id).or_default().push(Entry {
+                parent: "top".into(),
+                name: inp.name.clone(),
+                rev,
+            });
+        }
+    }
+
+    let mut frontier: Vec<TackTransitive> = inputs
+        .iter()
+        .filter(|i| i.pin_type != PinType::Fixed)
+        .filter_map(|inp| {
+            let node = lock.get(&inp.name)?;
+            Some(TackTransitive {
+                path:       vec![inp.name.clone()],
+                source:     SourceRef::Locked(node.clone()),
+                submodules: inp.submodules,
+            })
+        })
+        .collect();
+    eprintln!("scanning {} pin(s)...", frontier.len());
+
+    // bfs level-by-level: dedup the frontier against `visited`, fetch the
+    // batch in parallel, then expand into the next frontier (deep only).
+    let mut visited: HashSet<String> = HashSet::new();
+    while !frontier.is_empty() {
+        let mut batch: Vec<TackTransitive> = Vec::with_capacity(frontier.len());
+        for item in frontier.drain(..) {
+            if visited.insert(source_key(&item.source)) {
+                batch.push(item);
+            }
+        }
+
+        let results: Vec<(Vec<String>, Result<ScanResult>)> = batch
+            .into_par_iter()
+            .map(|item| {
+                let res = fetch_and_scan(&item);
+                (item.path, res)
+            })
+            .collect();
+
+        for (path, res) in results {
+            match res {
+                Ok(scan) => {
+                    for f in scan.findings {
+                        groups.entry(f.identity).or_default().push(f.entry);
+                    }
+                    if deep {
+                        frontier.extend(scan.transitive);
+                    }
+                },
+                Err(err) => eprintln!("tack: scan {}: {err:#}", path.join(" > ")),
+            }
+        }
+
+        if !deep {
+            break;
+        }
+    }
+
+    print_groups(&groups, &inputs, &configured_follows);
+    Ok(())
+}
+
+fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
+    let tmp = tempfile::tempdir()?;
+    let root = match &item.source {
+        SourceRef::Locked(node) => fetch::fetch_locked_tree_into(node, tmp.path())?,
+        SourceRef::Url(url) => fetch::fetch_tree_into(url, item.submodules, tmp.path())?,
+    };
+    scan_tree(&root, &item.path)
+}
+
+fn scan_tree(root: &Path, path: &[String]) -> Result<ScanResult> {
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut transitive: Vec<TackTransitive> = Vec::new();
+    let parent_label = format!("via {}", path.join(" > "));
+
+    if let Ok(raw) = fs::read_to_string(root.join("flake.lock"))
+        && let Ok(json) = serde_json::from_str::<Value>(&raw)
+    {
+        let root_key = json.get("root").and_then(Value::as_str).unwrap_or("root");
+        if let Some(nodes) = json.get("nodes").and_then(Value::as_object) {
+            for (key, node) in nodes {
+                if key == root_key {
+                    continue;
+                }
+                let Some(locked) = node.get("locked") else {
+                    continue;
+                };
+                if let Some(id) = node_identity(locked) {
+                    findings.push(Finding {
+                        identity: id,
+                        entry:    Entry {
+                            parent: parent_label.clone(),
+                            name:   strip_disambiguator(key).to_owned(),
+                            rev:    rev_for_display(locked).unwrap_or_default(),
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(td) = find_tack_dir(root)
+        && let Ok(doc) = pins::load(&td.join("pins.toml"))
+        && let Ok(tinputs) = pins::inputs(&doc)
+    {
+        let tlock = lock::load(&td.join("pins.lock.json")).unwrap_or_default();
+        let tshort = pins::shorturls(&doc);
+        for tinp in &tinputs {
+            let expanded = shorturl::expand(&tinp.url, &tshort);
+            if let Some(id) = canonical_identity(&expanded) {
+                findings.push(Finding {
+                    identity: id,
+                    entry:    Entry {
+                        parent: parent_label.clone(),
+                        name:   tinp.name.clone(),
+                        rev:    tlock
+                            .get(&tinp.name)
+                            .and_then(rev_for_display)
+                            .unwrap_or_default(),
+                    },
+                });
+            }
+            if tinp.pin_type != PinType::Fixed {
+                let mut next = path.to_vec();
+                next.push(tinp.name.clone());
+                let source = match tlock.get(&tinp.name) {
+                    Some(node) => SourceRef::Locked(node.clone()),
+                    None => SourceRef::Url(expanded),
+                };
+                transitive.push(TackTransitive {
+                    path: next,
+                    source,
+                    submodules: tinp.submodules,
+                });
+            }
+        }
+    }
+
+    Ok(ScanResult {
+        findings,
+        transitive,
+    })
+}
+
+fn find_tack_dir(root: &Path) -> Option<PathBuf> {
+    let new_layout = root.join(".tack");
+    if new_layout.join("pins.toml").exists() {
+        return Some(new_layout);
+    }
+    // legacy: pins.toml + inputs.nix at repo root
+    if root.join("pins.toml").exists() && root.join("inputs.nix").exists() {
+        return Some(root.to_owned());
+    }
+    None
+}
+
+fn canonical_identity(expanded: &str) -> Option<String> {
+    let no_query = expanded.split('?').next().unwrap_or(expanded);
+    let no_query = no_query.split('#').next().unwrap_or(no_query);
+    if let Some(body) = no_query.strip_prefix("github:") {
+        let mut segs = body.split('/');
+        let owner = segs.next()?;
+        let repo = segs.next()?;
+        if owner.is_empty() || repo.is_empty() {
+            return None;
+        }
+        return Some(format!("github:{owner}/{repo}"));
+    }
+    if let Some(rest) = no_query.strip_prefix("git+") {
+        return Some(format!("git+{rest}"));
+    }
+    if no_query.starts_with("http://") || no_query.starts_with("https://") {
+        return Some(format!("tarball:{no_query}"));
+    }
+    None
+}
+
+fn node_identity(locked: &Value) -> Option<String> {
+    let ty = locked.get("type")?.as_str()?;
+    match ty {
+        "github" => {
+            let owner = locked.get("owner")?.as_str()?;
+            let repo = locked.get("repo")?.as_str()?;
+            Some(format!("github:{owner}/{repo}"))
+        },
+        "git" => {
+            let url = locked.get("url")?.as_str()?;
+            let cut = url.split('?').next().unwrap_or(url);
+            Some(format!("git+{cut}"))
+        },
+        "tarball" => Some(format!("tarball:{}", locked.get("url")?.as_str()?)),
+        "indirect" => Some(format!("indirect:{}", locked.get("id")?.as_str()?)),
+        "path" => Some(format!("path:{}", locked.get("path")?.as_str()?)),
+        _ => None,
+    }
+}
+
+fn source_key(source: &SourceRef) -> String {
+    match source {
+        SourceRef::Locked(node) => node_identity(node).unwrap_or_else(|| node.to_string()),
+        SourceRef::Url(url) => url.clone(),
+    }
+}
+
+fn rev_for_display(node: &Value) -> Option<String> {
+    if let Some(rev) = node.get("rev").and_then(Value::as_str) {
+        return Some(short(rev));
+    }
+    if let Some(url) = node.get("url").and_then(Value::as_str) {
+        return Some(short(url));
+    }
+    if let Some(sha) = node.get("sha256").and_then(Value::as_str) {
+        return Some(short(sha));
+    }
+    None
+}
+
+/// flake.lock disambiguates same-named nodes as `name_2`, `name_3`, ...;
+/// recover the original input name so dedup groups by what the parent flake
+/// actually declares
+fn strip_disambiguator(key: &str) -> &str {
+    let bytes = key.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && bytes[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i > 0 && i < bytes.len() && bytes[i - 1] == b'_' {
+        &key[..i - 1]
+    } else {
+        key
+    }
+}
+
+fn existing_follows(doc: &toml_edit::DocumentMut) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if let Some(tbl) = doc.get("all_follow").and_then(Item::as_table) {
+        for (key, _) in tbl {
+            out.insert(key.to_owned());
+        }
+    }
+    out
+}
+
+fn print_groups(
+    groups: &BTreeMap<String, Vec<Entry>>,
+    inputs: &[pins::Input],
+    configured: &BTreeSet<String>,
+) {
+    let top_names: HashSet<&str> = inputs.iter().map(|i| i.name.as_str()).collect();
+    let mut suggest: BTreeSet<String> = BTreeSet::new();
+    let mut printed = 0usize;
+
+    for (id, entries) in groups {
+        if entries.len() < 2 {
+            continue;
+        }
+        printed += 1;
+        println!("\n{id}  x{}", entries.len());
+        let pw = entries.iter().map(|e| e.parent.len()).max().unwrap_or(0);
+        let nw = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
+        for e in entries {
+            println!(
+                "  {:pw$}  {:nw$}  {}",
+                e.parent,
+                e.name,
+                e.rev,
+                pw = pw,
+                nw = nw
+            );
+        }
+        let has_top = entries.iter().any(|e| e.parent == "top");
+        if has_top {
+            for e in entries {
+                if e.parent != "top"
+                    && top_names.contains(e.name.as_str())
+                    && !configured.contains(&e.name)
+                {
+                    suggest.insert(e.name.clone());
+                }
+            }
+        }
+    }
+
+    if printed == 0 {
+        println!("no duplicate inputs found");
+        return;
+    }
+    if !suggest.is_empty() {
+        println!("\nshare via [all_follow] in pins.toml:");
+        for name in &suggest {
+            println!("  {name} = \"{name}\"");
+        }
+    }
+}
+
 pub fn help() {
     println!(
         "tack: flake-like toml nix pins, lazily fetched and transformed
@@ -432,6 +780,7 @@ usage:
                         [--dir <d>] [--submodules] [--follows c=p]...
   tack rm <name>
   tack alias <name> <template> | tack alias --rm <name>
+  tack dedup [--deep]
 
 pin types: flake (default), fetch (source tree only), fixed (FOD)
 

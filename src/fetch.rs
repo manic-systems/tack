@@ -203,6 +203,87 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<(Value, Stri
     Ok((node, sha256))
 }
 
+/// download a locked tree into `dir` for inspection; no narhash, no metadata.
+/// fixed pins are flat content, not trees — caller skips those.
+pub fn fetch_locked_tree_into(node: &Value, dir: &Path) -> Result<PathBuf> {
+    let ty = node
+        .get("type")
+        .and_then(Value::as_str)
+        .context("lock node missing type")?;
+    match ty {
+        "github" => {
+            let owner = node
+                .get("owner")
+                .and_then(Value::as_str)
+                .context("github node missing owner")?;
+            let repo = node
+                .get("repo")
+                .and_then(Value::as_str)
+                .context("github node missing repo")?;
+            let rev = node
+                .get("rev")
+                .and_then(Value::as_str)
+                .context("github node missing rev")?;
+            download_github_tarball(owner, repo, rev, dir)
+        },
+        "git" => {
+            let url = node
+                .get("url")
+                .and_then(Value::as_str)
+                .context("git node missing url")?;
+            let reff = node.get("ref").and_then(Value::as_str);
+            let rev = node.get("rev").and_then(Value::as_str);
+            let submodules = node
+                .get("submodules")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            git_checkout(url, reff, rev, submodules, dir)?;
+            let _ = fs::remove_dir_all(dir.join(".git"));
+            Ok(dir.to_owned())
+        },
+        "tarball" => {
+            let url = node
+                .get("url")
+                .and_then(Value::as_str)
+                .context("tarball node missing url")?;
+            let mut resp = agent()
+                .get(url)
+                .header("User-Agent", "tack")
+                .call()
+                .with_context(|| format!("GET {url}"))?;
+            let format = detect_tar_format(url).with_context(|| format!("tarball {url}"))?;
+            unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
+        },
+        other => bail!("cannot inspect tree for lock type '{other}'"),
+    }
+}
+
+/// fetch a tree by parsed URL into `dir`; no narhash, no metadata.
+/// used when traversing tack transitives that have no committed lock.
+pub fn fetch_tree_into(expanded: &str, submodules: bool, dir: &Path) -> Result<PathBuf> {
+    match parse(expanded)? {
+        Target::Github { owner, repo, reff } => {
+            let ref_str = reff.as_deref().unwrap_or("HEAD");
+            let (rev, _) = gh_commit(&owner, &repo, ref_str)?;
+            download_github_tarball(&owner, &repo, &rev, dir)
+        },
+        Target::Git { url, reff, rev } => {
+            git_checkout(&url, reff.as_deref(), rev.as_deref(), submodules, dir)?;
+            let _ = fs::remove_dir_all(dir.join(".git"));
+            Ok(dir.to_owned())
+        },
+        Target::Tarball { url } => {
+            let mut resp = agent()
+                .get(&url)
+                .header("User-Agent", "tack")
+                .call()
+                .with_context(|| format!("GET {url}"))?;
+            let format = detect_tar_format(&url).with_context(|| format!("tarball {url}"))?;
+            unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
+        },
+    }
+}
+
 /// fetch the tree, return (locked node, rev)
 pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
     match parse(expanded)? {

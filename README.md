@@ -47,7 +47,13 @@ tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
 tack rm <name>
 tack alias <name> <template>         define a shorturl scheme
 tack alias --rm <name>               remove one
+tack dedup [--deep]                  report inputs reachable from multiple pins
 ```
+
+`tack dedup` reports inputs reachable from more than one of your pins —
+direct or transitive. when a top-level pin matches, it suggests a
+`[all_follow]` rule to share it. `--deep` recurses through the pins of your
+pins and so on indefinitely.
 
 ## pin types
 
