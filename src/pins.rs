@@ -130,18 +130,31 @@ pub fn shorturls(doc: &DocumentMut) -> BTreeMap<&str, &str> {
     out
 }
 
-/// the global `[all_follow]` table: child name -> target name
+/// the global `[all_follow]` table flattened to child name -> target name
+///
+/// two value shapes are accepted under the same table:
+/// * `alias = "target"` - `alias` follows `target`
+/// * `target = [a, b, ...]` - `target`, `a`, `b`, ... all follow `target`,
+///   useful when several transitive names share a single canonical target
 pub fn all_follows(doc: &DocumentMut) -> BTreeMap<String, String> {
-    doc.get("all_follow")
-        .and_then(Item::as_table)
-        .map(|tbl| {
-            tbl.iter()
-                .filter_map(|(key, value)| {
-                    value.as_str().map(|val| (key.to_owned(), val.to_owned()))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(table) = doc.get("all_follow").and_then(Item::as_table) else {
+        return BTreeMap::new();
+    };
+    let mut out = BTreeMap::new();
+    for (key, value) in table {
+        if let Some(target) = value.as_str() {
+            out.insert(key.to_owned(), target.to_owned());
+        } else if let Some(arr) = value.as_array() {
+            // key is its own target, plus every array member follows it too
+            out.insert(key.to_owned(), key.to_owned());
+            for el in arr {
+                if let Some(alias) = el.as_str() {
+                    out.insert(alias.to_owned(), key.to_owned());
+                }
+            }
+        }
+    }
+    out
 }
 
 pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
@@ -275,4 +288,60 @@ pub fn remove_alias(doc: &mut DocumentMut, name: &str) -> bool {
         .and_then(Item::as_table_mut)
         .and_then(|tbl| tbl.remove(name))
         .is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        all_follows,
+        parse_doc,
+    };
+
+    #[test]
+    fn all_follows_string_form() {
+        let doc = parse_doc("[all_follow]\nnixpkgs = \"nixpkgs\"\ncrane = \"my-crane\"\n")
+            .expect("parse");
+        let map = all_follows(&doc);
+        assert_eq!(map.get("nixpkgs").map(String::as_str), Some("nixpkgs"));
+        assert_eq!(map.get("crane").map(String::as_str), Some("my-crane"));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn all_follows_array_form_implies_key_alias() {
+        let doc = parse_doc("[all_follow]\ngit-hooks = [\"git-hooks-nix\"]\n").expect("parse");
+        let map = all_follows(&doc);
+        // both key and array members alias to key
+        assert_eq!(map.get("git-hooks").map(String::as_str), Some("git-hooks"));
+        assert_eq!(
+            map.get("git-hooks-nix").map(String::as_str),
+            Some("git-hooks")
+        );
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn all_follows_mixed_forms_coexist() {
+        let raw = "[all_follow]\nnixpkgs = \"nixpkgs\"\nxwl = [\"xwl-stable\", \"xwl-unstable\"]\n";
+        let doc = parse_doc(raw).expect("parse");
+        let map = all_follows(&doc);
+        assert_eq!(map.get("nixpkgs").map(String::as_str), Some("nixpkgs"));
+        assert_eq!(map.get("xwl").map(String::as_str), Some("xwl"));
+        assert_eq!(map.get("xwl-stable").map(String::as_str), Some("xwl"));
+        assert_eq!(map.get("xwl-unstable").map(String::as_str), Some("xwl"));
+    }
+
+    #[test]
+    fn all_follows_empty_array_is_self_map() {
+        let doc = parse_doc("[all_follow]\nfoo = []\n").expect("parse");
+        let map = all_follows(&doc);
+        assert_eq!(map.get("foo").map(String::as_str), Some("foo"));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn all_follows_missing_table_is_empty() {
+        let doc = parse_doc("[inputs]\n").expect("parse");
+        assert!(all_follows(&doc).is_empty());
+    }
 }

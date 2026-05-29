@@ -52,7 +52,10 @@ tack dedup                           report inputs reachable from multiple pins
 
 `tack dedup` reports inputs reachable from more than one of your pins, whether
 direct or transitive, and recurses through the pins of your pins indefinitely.
-when a top-level pin matches, it suggests an `[all_follow]` rule to share it.
+its output is two sub-blocks of ready-to-paste `[all_follow]` rules. the first
+block refers to existing top-level pins, the subsequent one refers to inputs tack
+will synthesise on the next `tack update`. targets with multiple aliases collapse
+into a single array entry.
 
 ## pin types
 
@@ -98,16 +101,30 @@ url = "gh:owner/foo"
 follows = { nixpkgs = "nixpkgs" }   # foo's nixpkgs -> your nixpkgs pin
 ```
 
-`all_follow` applies a rule to every pin that has a matching input
+`all_follow` applies a rule to every pin that has a matching input. two value
+shapes are accepted:
 
 ```toml
 [all_follow]
-nixpkgs = "nixpkgs"   # every input named nixpkgs follows your nixpkgs pin
+# alias -> target. every input named fenix follows your top-level fenix pin
+fenix = "fenix"
+
+# target -> [aliases]. the key is the canonical target, and the key plus every
+# array member alias to it. one row covers many aliases of the same target
+nixpkgs = ["nixpkgs-stable", "nixpkgs-unstable"]
 
 [inputs.bar]
 url = "gh:owner/bar"
 exclude_follow = ["nixpkgs"]   # ...except bar's
 ```
+
+when a target named in `[all_follow]` isn't itself a top-level `[inputs]` pin,
+`tack update` synthesises a lock entry for it by walking every top-level
+flake.lock, collecting the observed revs of the aliased name, and writing the
+freshest by `lastModified` into pins.lock.json. the resolver then treats the
+synthetic entry as a default flake, or as a bare source tree when its repo has
+no `flake.nix`. this lets you dedup transitive inputs (e.g. `crane`) without declaring
+them as top-level pins you don't actually consume.
 
 ## build
 

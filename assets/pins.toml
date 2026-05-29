@@ -9,6 +9,7 @@
 # opt out per-input with exclude_follow
 [all_follow]
 # nixpkgs = "nixpkgs"
+# nixpkgs = ["nixpkgs-stable", "nixpkgs-unstable"]
 
 # [inputs.<name>] fields
 #   url             required, shorturl ok; ?rev=<sha> pins an exact commit
