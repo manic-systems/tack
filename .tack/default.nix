@@ -4,7 +4,30 @@
 let
   pins = builtins.fromTOML (builtins.readFile ./pins.toml);
   lock = builtins.fromJSON (builtins.readFile ./pins.lock.json);
-  all_follow = pins.all_follow or { };
+  all_follow_raw = pins.all_follow or { };
+
+  # flatten `target = [aliases]` rows alongside `alias = "target"` rows
+  all_follow = builtins.foldl' (
+    acc: key:
+    let
+      val = all_follow_raw.${key};
+    in
+    if builtins.isList val then
+      acc
+      // {
+        ${key} = key;
+      }
+      // builtins.listToAttrs (
+        map (a: {
+          name = a;
+          value = key;
+        }) val
+      )
+    else if builtins.isString val then
+      acc // { ${key} = val; }
+    else
+      acc
+  ) { } (builtins.attrNames all_follow_raw);
 
   fetchPin = name: builtins.fetchTree lock.${name};
 
@@ -134,6 +157,30 @@ let
       in
       if pinType == "flake" then evalTopFlake sourceInfo pin else sourceInfo.outPath + subdir;
 
-  self = builtins.mapAttrs loadPin pins.inputs;
+  declared = pins.inputs or { };
+
+  # any lock entry without a declared [inputs] mate is an auto-dedup synthetic
+  # written by `tack update` for [all_follow] targets that aren't pinned
+  # top-level. fall back to the bare source tree if the fetched tree has no
+  # flake.nix (so `flake = false` consumers get a usable sourceInfo)
+  autoNames = builtins.filter (n: !(declared ? ${n})) (builtins.attrNames lock);
+  autoPin =
+    name:
+    let
+      sourceInfo = fetchPin name;
+    in
+    if builtins.pathExists (sourceInfo.outPath + "/flake.nix") then
+      evalTopFlake sourceInfo { }
+    else
+      sourceInfo;
+
+  self =
+    (builtins.mapAttrs loadPin declared)
+    // builtins.listToAttrs (
+      map (name: {
+        inherit name;
+        value = autoPin name;
+      }) autoNames
+    );
 in
 self

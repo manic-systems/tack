@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
+    cmp,
     collections::{
         BTreeMap,
         BTreeSet,
@@ -328,6 +329,10 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
             changed = true;
         }
     }
+    let all_follow = pins::all_follows(&doc);
+    if write_auto_dedup(&all, &all_follow, &mut lk) {
+        changed = true;
+    }
     if changed {
         lock::save(&lock_path(&dir), &lk)?;
     }
@@ -341,6 +346,108 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// for every `[all_follow]` entry whose target isn't a declared `[inputs]` pin,
+/// walk all top-level flake.locks once, collect every transitive observation
+/// of the aliased name, and write the freshest by `lastModified` to
+/// pins.lock.json under the target. also prunes stale auto-dedup entries that
+/// no longer have a route.
+fn write_auto_dedup(
+    inputs: &[pins::Input],
+    all_follow: &BTreeMap<String, String>,
+    lock: &mut lock::Lock,
+) -> bool {
+    let input_names = inputs
+        .iter()
+        .map(|i| i.name.as_str())
+        .collect::<HashSet<&str>>();
+
+    let aliases = all_follow
+        .iter()
+        .filter(|&(_, target)| !input_names.contains(target.as_str()))
+        .map(|(alias, target)| (alias.clone(), target.clone()))
+        .collect::<BTreeMap<String, String>>();
+
+    let mut valid = inputs
+        .iter()
+        .map(|i| i.name.clone())
+        .collect::<HashSet<String>>();
+    for target in aliases.values() {
+        valid.insert(target.clone());
+    }
+
+    let stale = lock
+        .keys()
+        .filter(|key| !valid.contains(key.as_str()))
+        .cloned()
+        .collect::<Vec<String>>();
+    let mut changed = false;
+    for key in stale {
+        lock.remove(&key);
+        changed = true;
+    }
+
+    if aliases.is_empty() {
+        return changed;
+    }
+
+    let batches = {
+        let lock_ro: &lock::Lock = lock;
+        inputs
+            .par_iter()
+            .filter(|inp| inp.pin_type == PinType::Flake)
+            .filter_map(|inp| {
+                let node = lock_ro.get(&inp.name)?;
+                let raw = try_raw_file(node, "flake.lock")?;
+                let parsed = serde_json::from_str::<Value>(&raw).ok()?;
+                let root_key = parsed
+                    .get("root")
+                    .and_then(Value::as_str)
+                    .unwrap_or("root")
+                    .to_owned();
+                let nodes = parsed.get("nodes")?.as_object()?.clone();
+                let mut local = Vec::<(String, i64, Value)>::new();
+                for (key, n) in &nodes {
+                    if *key == root_key {
+                        continue;
+                    }
+                    let stripped = strip_disambiguator(key);
+                    let Some(target) = aliases.get(stripped) else {
+                        continue;
+                    };
+                    let Some(locked) = n.get("locked") else {
+                        continue;
+                    };
+                    let lm = locked
+                        .get("lastModified")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    local.push((target.clone(), lm, locked.clone()));
+                }
+                Some(local)
+            })
+            .collect::<Vec<Vec<(String, i64, Value)>>>()
+    };
+
+    let mut observations = BTreeMap::<String, Vec<(i64, Value)>>::new();
+    for batch in batches {
+        for (target, lm, locked) in batch {
+            observations.entry(target).or_default().push((lm, locked));
+        }
+    }
+
+    for (target, mut obs) in observations {
+        obs.sort_by_key(|entry| cmp::Reverse(entry.0));
+        if let Some((_, winner)) = obs.into_iter().next()
+            && lock.get(&target) != Some(&winner)
+        {
+            lock.insert(target, winner);
+            changed = true;
+        }
+    }
+
+    changed
 }
 
 pub fn look(names: &[String], verbose: bool) -> Result<()> {
@@ -456,8 +563,8 @@ enum SourceRef {
 }
 
 /// rev the consumer's resolver would actually use for this entry once
-/// follows apply. at depth-1 the top-pin's `follows` wins, then `all_follow`
-/// (minus `exclude_follow`) at any depth
+/// follows apply. global `[all_follow]` wins, per-pin `follows` fills in at
+/// depth-1
 fn effective_rev(
     path: &[String],
     name: &str,
@@ -469,16 +576,16 @@ fn effective_rev(
     if path.is_empty() {
         return recorded.to_owned();
     }
-    if path.len() == 1
-        && let Some(inp) = top_input
-        && let Some(target) = inp.follows.get(name)
+    let excluded = top_input.is_some_and(|inp| inp.excludes.contains(name));
+    if !excluded
+        && let Some(target) = all_follow.get(name)
         && let Some(rev) = top_revs.get(target)
     {
         return rev.clone();
     }
-    let excluded = top_input.is_some_and(|inp| inp.excludes.contains(name));
-    if !excluded
-        && let Some(target) = all_follow.get(name)
+    if path.len() == 1
+        && let Some(inp) = top_input
+        && let Some(target) = inp.follows.get(name)
         && let Some(rev) = top_revs.get(target)
     {
         return rev.clone();
@@ -498,6 +605,10 @@ pub fn dedup() -> Result<()> {
         .map(|inp| (inp.name.as_str(), inp))
         .collect::<BTreeMap<&str, &pins::Input>>();
 
+    let input_set = inputs
+        .iter()
+        .map(|inp| inp.name.as_str())
+        .collect::<HashSet<&str>>();
     let top_revs = inputs
         .iter()
         .filter_map(|inp| {
@@ -505,6 +616,11 @@ pub fn dedup() -> Result<()> {
                 .and_then(rev_for_display)
                 .map(|rev| (inp.name.clone(), rev))
         })
+        .chain(lock.iter().filter_map(|(key, node)| {
+            (!input_set.contains(key.as_str()))
+                .then(|| rev_for_display(node).map(|rev| (key.clone(), rev)))
+                .flatten()
+        }))
         .collect::<BTreeMap<String, String>>();
 
     let mut groups = BTreeMap::<String, Vec<Entry>>::new();
@@ -581,7 +697,7 @@ pub fn dedup() -> Result<()> {
         }
     }
 
-    print_groups(&groups, &inputs, &all_follow);
+    print_groups(&groups, &all_follow);
     Ok(())
 }
 
@@ -609,15 +725,44 @@ fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
 /// `authoritative = true` means a 404 on every probe is final, and `false`
 /// means the caller should fall back to clone
 fn try_raw_files(node: &Value) -> Option<(Option<String>, Option<String>, Option<String>)> {
+    let (_, authoritative) = forge_base(node)?;
+    let triple = (
+        try_raw_file(node, "flake.lock"),
+        try_raw_file(node, ".tack/pins.toml"),
+        try_raw_file(node, ".tack/pins.lock.json"),
+    );
+    if !authoritative && triple.0.is_none() && triple.1.is_none() && triple.2.is_none() {
+        None
+    } else {
+        Some(triple)
+    }
+}
+
+/// fetch one file from a locked node via raw http. returns [`None`] on unknown
+/// host or http error
+fn try_raw_file(node: &Value, file: &str) -> Option<String> {
+    let (base, _) = forge_base(node)?;
     let rev = node.get("rev").and_then(Value::as_str)?;
-    let (base, authoritative) = match node.get("type").and_then(Value::as_str)? {
+    let (url, decoder) = forge_raw(&base, rev, file);
+    let body = fetch::raw(&url).ok()?;
+    if let Some(decode) = decoder {
+        decode(&body).ok()
+    } else {
+        Some(body)
+    }
+}
+
+/// (base url, authoritative) for raw-file probes. authoritative = true means
+/// a 404 is definitive
+fn forge_base(node: &Value) -> Option<(String, bool)> {
+    match node.get("type").and_then(Value::as_str)? {
         "github" => {
             let owner = node.get("owner").and_then(Value::as_str)?;
             let repo = node.get("repo").and_then(Value::as_str)?;
-            (
+            Some((
                 format!("https://raw.githubusercontent.com/{owner}/{repo}"),
                 true,
-            )
+            ))
         },
         "gitlab" => {
             let owner = node.get("owner").and_then(Value::as_str)?;
@@ -626,33 +771,13 @@ fn try_raw_files(node: &Value) -> Option<(Option<String>, Option<String>, Option
                 .get("host")
                 .and_then(Value::as_str)
                 .unwrap_or("gitlab.com");
-            (format!("https://{host}/{owner}/{repo}"), true)
+            Some((format!("https://{host}/{owner}/{repo}"), true))
         },
         "git" => {
             let url = node.get("url").and_then(Value::as_str)?;
-            (url.strip_suffix(".git").unwrap_or(url).to_owned(), false)
+            Some((url.strip_suffix(".git").unwrap_or(url).to_owned(), false))
         },
-        _ => return None,
-    };
-
-    let fetch_file = |file: &str| {
-        let (url, decoder) = forge_raw(&base, rev, file);
-        let body = fetch::raw(&url).ok()?;
-        if let Some(decode) = decoder {
-            decode(&body).ok()
-        } else {
-            Some(body)
-        }
-    };
-    let triple = (
-        fetch_file("flake.lock"),
-        fetch_file(".tack/pins.toml"),
-        fetch_file(".tack/pins.lock.json"),
-    );
-    if !authoritative && triple.0.is_none() && triple.1.is_none() && triple.2.is_none() {
-        None
-    } else {
-        Some(triple)
+        _ => None,
     }
 }
 
@@ -873,18 +998,12 @@ fn source_label(path: &[String]) -> String {
     }
 }
 
-fn print_groups(
-    groups: &BTreeMap<String, Vec<Entry>>,
-    inputs: &[pins::Input],
-    all_follow: &BTreeMap<String, String>,
-) {
+fn print_groups(groups: &BTreeMap<String, Vec<Entry>>, all_follow: &BTreeMap<String, String>) {
     const MAX_SOURCES: usize = 5;
 
-    let top_names = inputs
-        .iter()
-        .map(|i| i.name.as_str())
-        .collect::<HashSet<&str>>();
-    let mut suggest = BTreeSet::<String>::new();
+    // alias -> target, paste-ready under [all_follow]
+    let mut pin_follow = BTreeMap::<String, String>::new();
+    let mut auto_follow = BTreeMap::<String, String>::new();
     let mut printed = 0_usize;
 
     for (id, entries) in groups {
@@ -935,14 +1054,26 @@ fn print_groups(
             }
         }
 
-        let has_top = entries.iter().any(|entry| entry.path.is_empty());
-        if has_top {
+        let top_name = entries
+            .iter()
+            .filter(|entry| entry.path.is_empty())
+            .map(|entry| entry.name.as_str())
+            .min();
+        if let Some(top) = top_name {
             for entry in entries {
-                if !entry.path.is_empty()
-                    && top_names.contains(entry.name.as_str())
-                    && !all_follow.contains_key(&entry.name)
-                {
-                    suggest.insert(entry.name.clone());
+                if !entry.path.is_empty() && !all_follow.contains_key(&entry.name) {
+                    pin_follow.insert(entry.name.clone(), top.to_owned());
+                }
+            }
+        } else {
+            let aliases = entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<BTreeSet<String>>();
+            let canonical = pick_name(id, &aliases);
+            for alias in &aliases {
+                if !all_follow.contains_key(alias) {
+                    auto_follow.insert(alias.clone(), canonical.clone());
                 }
             }
         }
@@ -952,12 +1083,74 @@ fn print_groups(
         println!("no duplicate inputs found");
         return;
     }
-    if !suggest.is_empty() {
-        println!("\nshare via [all_follow] in pins.toml:");
-        for name in &suggest {
-            println!("  {name} = \"{name}\"");
+    if pin_follow.is_empty() && auto_follow.is_empty() {
+        return;
+    }
+    let pin_lines = collapse_follow(&pin_follow);
+    let auto_lines = collapse_follow(&auto_follow);
+    let kw = pin_lines
+        .iter()
+        .chain(auto_lines.iter())
+        .map(|&(ref key, _)| key.len())
+        .max()
+        .unwrap_or(0);
+    println!("\nshare via [all_follow] in pins.toml:");
+    for &(ref key, ref rhs) in &pin_lines {
+        println!("  {key:kw$} = {rhs}");
+    }
+    if !auto_lines.is_empty() {
+        if !pin_lines.is_empty() {
+            println!();
+        }
+        println!("  # auto-dedup (no top-level pin needed):");
+        for &(ref key, ref rhs) in &auto_lines {
+            println!("  {key:kw$} = {rhs}");
         }
     }
+}
+
+/// invert alias -> target into target -> aliases and emit one line per target.
+/// single-alias groups use string form (`alias = "target"`) whereas multi-alias
+/// groups collapse to array form (`target = ["a", "b"]`)
+fn collapse_follow(follow: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    let mut by_target = BTreeMap::<&str, BTreeSet<&str>>::new();
+    for (alias, target) in follow {
+        by_target
+            .entry(target.as_str())
+            .or_default()
+            .insert(alias.as_str());
+    }
+    let mut lines = Vec::<(String, String)>::new();
+    for (target, aliases) in &by_target {
+        if aliases.len() == 1 {
+            let alias = aliases.iter().next().copied().unwrap_or("");
+            lines.push((alias.to_owned(), format!("\"{target}\"")));
+        } else {
+            let body = aliases
+                .iter()
+                .filter(|alias| **alias != *target)
+                .map(|alias| format!("\"{alias}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(((*target).to_owned(), format!("[{body}]")));
+        }
+    }
+    lines
+}
+
+/// suggested top-level name for a transitive-only group. this uses the github
+/// repo basename when available, else the shortest alias seen
+fn pick_name(id: &str, aliases: &BTreeSet<String>) -> String {
+    if let Some(rest) = id.strip_prefix("github:")
+        && let Some((_, repo)) = rest.split_once('/')
+    {
+        return repo.trim_end_matches(".nix").replace('.', "-");
+    }
+    aliases
+        .iter()
+        .min_by_key(|name| (name.len(), name.as_str()))
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub fn help() {
@@ -982,4 +1175,73 @@ use `import ./.tack` to use inputs
 
 "
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{
+        BTreeMap,
+        BTreeSet,
+    };
+
+    use super::{
+        collapse_follow,
+        pick_name,
+    };
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|&(alias, target)| (alias.to_owned(), target.to_owned()))
+            .collect()
+    }
+
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn collapse_single_alias_uses_string_form() {
+        let lines = collapse_follow(&map(&[("nixpkgs", "nixpkgs")]));
+        assert_eq!(lines, vec![("nixpkgs".into(), "\"nixpkgs\"".into())]);
+    }
+
+    #[test]
+    fn collapse_multi_alias_uses_array_form_excluding_key() {
+        let lines = collapse_follow(&map(&[
+            ("git-hooks", "git-hooks"),
+            ("git-hooks-nix", "git-hooks"),
+        ]));
+        assert_eq!(lines, vec![(
+            "git-hooks".into(),
+            "[\"git-hooks-nix\"]".into()
+        )]);
+    }
+
+    #[test]
+    fn collapse_multi_alias_when_target_is_not_an_alias() {
+        let lines = collapse_follow(&map(&[("xwl-stable", "xwl"), ("xwl-unstable", "xwl")]));
+        assert_eq!(lines, vec![(
+            "xwl".into(),
+            "[\"xwl-stable\", \"xwl-unstable\"]".into()
+        )]);
+    }
+
+    #[test]
+    fn pick_name_strips_dot_nix_and_flattens_dots() {
+        assert_eq!(
+            pick_name("github:cachix/git-hooks.nix", &set(&["git-hooks"])),
+            "git-hooks"
+        );
+        assert_eq!(
+            pick_name("github:nix-community/nixpkgs.lib", &set(&["nixpkgs-lib"])),
+            "nixpkgs-lib"
+        );
+    }
+
+    #[test]
+    fn pick_name_falls_back_to_shortest_alias_for_non_github() {
+        let aliases = set(&["my-pin", "the-tarball"]);
+        assert_eq!(pick_name("tarball:https://x/y", &aliases), "my-pin");
+    }
 }
