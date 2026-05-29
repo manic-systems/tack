@@ -28,7 +28,11 @@ fn run() -> anyhow::Result<()> {
     let check_resolver = !matches!(cmd, Command::Init { .. } | Command::Help);
 
     let res = match cmd {
-        Command::Init { force, resolver } => commands::init(force, resolver),
+        Command::Init {
+            force,
+            resolver,
+            flake,
+        } => commands::init(force, resolver, flake),
         Command::Update { names, accept } => commands::update(&names, accept),
         Command::Look { names, verbose } => commands::look(&names, verbose),
         Command::Add {

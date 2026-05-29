@@ -23,8 +23,10 @@ in inputs.nixpkgs.legacyPackages.x86_64-linux.hello
 or from a flake:
 
 ```nix
-outputs = { self }:
-  let inputs = import ./.tack; in {
+outputs = { self, ... }@args:
+  let inputs = (import ./.tack) {
+    overrides = args.tackOverrides or { };
+  }; in {
     packages.x86_64-linux.default =
       inputs.nixpkgs.legacyPackages.x86_64-linux.hello;
   };
@@ -34,12 +36,18 @@ tack warns when `default.nix` has drifted from the running binary, as long as
 the `tack-managed` comment at its top is present. run `tack init --resolver` to
 update it, or delete that comment to fork the resolver and silence the warning.
 
+the `@args` form lets a parent tack project override this project's
+pins through the [follows](#follows) machinery. omit it for a closed
+project that doesn't want to be re-composed.
+
 legacy `./inputs.nix` at repo root is detected and preserved as-is.
 
 ## commands
 
 ```
-tack init [--force] [--resolver]     scaffold .tack/ (--resolver writes only default.nix)
+tack init [--force] [--resolver] [--flake]
+                                      scaffold .tack/ (--resolver writes only default.nix,
+                                      --flake also a wired flake.nix)
 tack update [names...] [--accept]    fetch latest, rewrite lock
 tack look [names...] [--verbose|-v]  report pins with newer upstream revs
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
@@ -125,6 +133,26 @@ freshest by `lastModified` into pins.lock.json. the resolver then treats the
 synthetic entry as a default flake, or as a bare source tree when its repo has
 no `flake.nix`. this lets you dedup transitive inputs (e.g. `crane`) without declaring
 them as top-level pins you don't actually consume.
+
+follows reach an upstream's tack pins too, provided the upstream wired
+its flake for it (see [publishing](#publishing)). when an upstream has
+both a flake input and a tack pin under the same name, a follow on that
+name reaches both. scope it with a `flake:` or `tack:` prefix to hit
+just one side:
+
+```toml
+[inputs.bar]
+follows = { "flake:systems" = "systems", "tack:nixpkgs" = "nixpkgs" }
+```
+
+## publishing
+
+if third parties consume your project as a tack pin, wire your flake so
+their [follows](#follows) can reach your pins — thread `tackOverrides`
+through `outputs` as in [layout](#layout). `tack init --flake` writes a
+wired flake for you; on an existing flake `tack init` prints the
+snippet. without the wiring, downstream overrides don't reach your
+pins.
 
 ## build
 

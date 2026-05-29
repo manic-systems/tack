@@ -31,6 +31,7 @@ use anyhow::{
 };
 use rayon::prelude::*;
 use serde_json::Value;
+use toml_edit::Item;
 
 use crate::{
     fetch,
@@ -50,6 +51,7 @@ use crate::{
 
 const STARTER_TOML: &str = include_str!("../assets/pins.toml");
 const RESOLVER_NIX: &str = include_str!("../.tack/default.nix");
+const SCAFFOLD_FLAKE: &str = include_str!("../templates/default/flake.nix");
 const MARKER: &str = "# tack-managed resolver.";
 
 fn dir() -> PathBuf {
@@ -134,7 +136,7 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn init(force: bool, resolver_only: bool) -> Result<()> {
+pub fn init(force: bool, resolver_only: bool, flake: bool) -> Result<()> {
     let dir = dir();
     let (pt, lp, rp) = (pins_path(&dir), lock_path(&dir), resolver_path(&dir));
 
@@ -163,6 +165,8 @@ pub fn init(force: bool, resolver_only: bool) -> Result<()> {
     println!("  pins.toml       edit shorturls and inputs here");
     println!("  pins.lock.json  written by `tack update`");
     println!("  default.nix     `import ./.tack` from your flake/config");
+
+    flake_awareness(flake, &dir)?;
     Ok(())
 }
 
@@ -185,6 +189,84 @@ fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     write_atomic(path, RESOLVER_NIX)?;
     println!("updated resolver at {}", path.display());
     Ok(())
+}
+
+/// `--flake` scaffolds a wired flake and marks the project recomposable, but
+/// only when no flake.nix exists. an existing flake.nix is the user's, never
+/// tack's.
+fn flake_awareness(scaffold: bool, dir: &Path) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let path = cwd.join("flake.nix");
+
+    if !path.exists() {
+        if scaffold {
+            write_atomic(&path, SCAFFOLD_FLAKE)?;
+            mark_recomposable(dir)?;
+            if dir != cwd.join(".tack") {
+                eprintln!(
+                    "tack: scaffolded flake.nix imports ./.tack but the resolver is at {} (adjust \
+                     the import)",
+                    dir.display()
+                );
+            }
+            println!("  flake.nix       wired resolver entry; edit its outputs");
+            println!("  pins.toml       marked recomposable for downstream follows");
+        } else {
+            println!("  hint: `tack init --flake` scaffolds a recomposable flake.nix");
+        }
+        return Ok(());
+    }
+
+    // never overwrite the user's flake, just reflect its wiring into pins.toml
+    if scaffold {
+        eprintln!("tack: flake.nix exists; left untouched (tack won't overwrite your flake)");
+    }
+    if fs::read_to_string(&path).is_ok_and(|text| wires_overrides(&text)) {
+        mark_recomposable(dir)?;
+        println!("  pins.toml       marked recomposable (flake.nix already wired)");
+    } else {
+        print_wiring_blurb();
+    }
+    Ok(())
+}
+
+/// whether `flake.nix` mentions `tackOverrides` in code rather than only a `#`
+/// comment.
+fn wires_overrides(flake: &str) -> bool {
+    flake.lines().any(|line| {
+        line.split_once('#')
+            .map_or(line, |(code, _)| code)
+            .contains("tackOverrides")
+    })
+}
+
+/// set `[tack] recomposable = true`, preserving any existing `[tack]` keys.
+fn mark_recomposable(dir: &Path) -> Result<()> {
+    let path = pins_path(dir);
+    let mut doc = pins::load(&path)?;
+    if let Some(table) = doc.get_mut("tack").and_then(Item::as_table_mut) {
+        table["recomposable"] = toml_edit::value(true);
+    } else {
+        let mut table = toml_edit::Table::new();
+        table["recomposable"] = toml_edit::value(true);
+        doc.insert("tack", Item::Table(table));
+    }
+    pins::save(&path, &doc)
+}
+
+fn print_wiring_blurb() {
+    println!(
+        "
+flake.nix is not marked recomposable. to let downstream tack projects
+override your pins, thread tackOverrides through outputs:
+
+  outputs =
+    {{ self, ... }}@args:
+    let inputs = (import ./.tack) {{ overrides = args.tackOverrides or {{ }}; }};
+    in {{ }};
+
+then set `[tack] recomposable = true` in .tack/pins.toml."
+    );
 }
 
 pub fn add(
@@ -407,10 +489,12 @@ fn write_auto_dedup(
         .map(|i| i.name.as_str())
         .collect::<HashSet<&str>>();
 
+    // synthesis observes flake.lock nodes, so project aliases onto the flake
+    // side: `flake:` is rekeyed bare and `tack:` is dropped
     let aliases = all_follow
         .iter()
         .filter(|&(_, target)| !input_names.contains(target.as_str()))
-        .map(|(alias, target)| (alias.clone(), target.clone()))
+        .filter_map(|(alias, target)| Some((pins::flake_side(alias)?.to_owned(), target.clone())))
         .collect::<BTreeMap<String, String>>();
 
     let mut valid = inputs
@@ -578,10 +662,29 @@ fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Inpu
     out
 }
 
+/// which side of an upstream a finding came from. a `flake:`/`tack:`-scoped
+/// follow only matches its own side, though a bare follow matches both.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Flake,
+    Tack,
+}
+
+impl Side {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Flake => "flake",
+            Self::Tack => "tack",
+        }
+    }
+}
+
 struct Entry {
     /// lineage from top-pin down to the parent tree being scanned
     path:     Vec<String>,
     name:     String,
+    /// flake input vs upstream tack pin, for side-scoped follow matching
+    side:     Side,
     /// abbreviated rev
     rev:      String,
     /// untruncated rev
@@ -646,6 +749,7 @@ fn top_map<T>(
 fn follow_target(
     path: &[String],
     name: &str,
+    side: Side,
     top_input: Option<&pins::Input>,
     all_follow: &BTreeMap<String, String>,
     top_revs: &BTreeMap<String, String>,
@@ -653,16 +757,18 @@ fn follow_target(
     if path.is_empty() {
         return None;
     }
+    // a bare follow reaches both sides, a `flake:`/`tack:` follow only its own
+    let scoped = format!("{}:{name}", side.as_str());
     let excluded = top_input.is_some_and(|inp| inp.excludes.contains(name));
     if !excluded
-        && let Some(target) = all_follow.get(name)
+        && let Some(target) = all_follow.get(name).or_else(|| all_follow.get(&scoped))
         && top_revs.contains_key(target)
     {
         return Some(target.clone());
     }
     if path.len() == 1
         && let Some(inp) = top_input
-        && let Some(target) = inp.follows.get(name)
+        && let Some(target) = inp.follows.get(name).or_else(|| inp.follows.get(&scoped))
         && top_revs.contains_key(target)
     {
         return Some(target.clone());
@@ -685,8 +791,14 @@ fn apply_follows(
             .path
             .first()
             .and_then(|name| by_name.get(name.as_str()).copied());
-        let Some(target) = follow_target(&entry.path, &entry.name, top, all_follow, top_revs)
-        else {
+        let Some(target) = follow_target(
+            &entry.path,
+            &entry.name,
+            entry.side,
+            top,
+            all_follow,
+            top_revs,
+        ) else {
             continue;
         };
         // `follow_target` only returns targets present in `top_revs`, and
@@ -728,6 +840,7 @@ pub fn dedup() -> Result<()> {
             groups.entry(id).or_default().push(Entry {
                 path: vec![],
                 name: inp.name.clone(),
+                side: Side::Flake,
                 rev,
                 full_rev,
                 lm,
@@ -949,6 +1062,7 @@ fn scan_files(
                         entry:    Entry {
                             path:     path.to_vec(),
                             name:     strip_disambiguator(key).to_owned(),
+                            side:     Side::Flake,
                             rev:      rev_for_display(locked).unwrap_or_default(),
                             full_rev: rev_full(locked).unwrap_or_default(),
                             lm:       last_modified(locked),
@@ -975,6 +1089,7 @@ fn scan_files(
                     entry:    Entry {
                         path:     path.to_vec(),
                         name:     tinp.name.clone(),
+                        side:     Side::Tack,
                         rev:      tlock
                             .get(&tinp.name)
                             .and_then(rev_for_display)
@@ -1409,7 +1524,7 @@ pub fn help() {
 
 usage:
   tack [-h|--help|help]
-  tack init [--force] [--resolver]
+  tack init [--force] [--resolver] [--flake]
   tack update [names...] [--accept]
   tack look [names...] [--verbose|-v]
   tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
@@ -1419,6 +1534,7 @@ usage:
   tack dedup
 
 pin types: flake (default), fetch (source tree only), fixed (FOD)
+follows keys may be scoped flake:<name> or tack:<name> (no prefix implies both)
 
 tack lives in ./.tack/ by default
 use `import ./.tack` to use inputs
@@ -1442,12 +1558,29 @@ mod tests {
 
     use super::{
         Entry,
+        Side,
         apply_follows,
         collapse_follow,
         comparator,
         pick_name,
         rm_in_dir,
+        wires_overrides,
     };
+
+    #[test]
+    fn wires_overrides_ignores_comments() {
+        assert!(wires_overrides(
+            "outputs = { self, ... }@args: (import ./.tack) { overrides = args.tackOverrides or \
+             {}; };"
+        ));
+        // a commented-out mention must not trip the recomposable flag
+        assert!(!wires_overrides(
+            "# threads args.tackOverrides through outputs\n{ }"
+        ));
+        assert!(!wires_overrides(
+            "outputs = { self }: { }; # no tackOverrides here"
+        ));
+    }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -1460,10 +1593,18 @@ mod tests {
         items.iter().map(|item| (*item).to_owned()).collect()
     }
 
+    fn tack_entry(path: &[&str], name: &str, rev: &str, lm: Option<u64>) -> Entry {
+        Entry {
+            side: Side::Tack,
+            ..entry(path, name, rev, lm)
+        }
+    }
+
     fn entry(path: &[&str], name: &str, rev: &str, lm: Option<u64>) -> Entry {
         Entry {
             path: path.iter().map(|item| (*item).to_owned()).collect(),
             name: name.to_owned(),
+            side: Side::Flake,
             rev: rev.to_owned(),
             full_rev: rev.to_owned(),
             lm,
@@ -1578,6 +1719,48 @@ mod tests {
         assert_eq!(followed.full_rev, "newrev-full");
         // lm should track the target rather than keeping the stale 50
         assert_eq!(followed.lm, Some(100));
+    }
+
+    #[test]
+    fn apply_follows_honors_scoped_all_follow_per_side() {
+        // an upstream tack pin `dep`, recorded as a tack-side finding
+        let mut groups = BTreeMap::new();
+        groups.insert("github:o/r".to_owned(), vec![tack_entry(
+            &["parent"],
+            "dep",
+            "oldrev",
+            Some(50),
+        )]);
+        let by_name = BTreeMap::new();
+        let top_revs = map(&[("replacement", "newrev")]);
+        let top_full_revs = map(&[("replacement", "newrev-full")]);
+        let top_lms = iter::once(("replacement".to_owned(), 100_u64)).collect();
+
+        // a `flake:`-scoped rule must not touch a tack-side entry
+        let flake_rule = map(&[("flake:dep", "replacement")]);
+        apply_follows(
+            &mut groups,
+            &by_name,
+            &flake_rule,
+            &top_revs,
+            &top_full_revs,
+            &top_lms,
+        );
+        assert_eq!(groups["github:o/r"][0].rev, "oldrev");
+
+        // the matching `tack:`-scoped rule aligns it onto the target
+        let tack_rule = map(&[("tack:dep", "replacement")]);
+        apply_follows(
+            &mut groups,
+            &by_name,
+            &tack_rule,
+            &top_revs,
+            &top_full_revs,
+            &top_lms,
+        );
+        assert_eq!(groups["github:o/r"][0].rev, "newrev");
+        assert_eq!(groups["github:o/r"][0].full_rev, "newrev-full");
+        assert_eq!(groups["github:o/r"][0].lm, Some(100));
     }
 
     #[test]

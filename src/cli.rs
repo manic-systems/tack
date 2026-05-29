@@ -16,6 +16,7 @@ pub enum Command {
     Init {
         force:    bool,
         resolver: bool,
+        flake:    bool,
     },
     Update {
         names:  Vec<String>,
@@ -68,14 +69,20 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
         "init" => {
             let mut force = false;
             let mut resolver = false;
+            let mut flake = false;
             while let Some(arg) = parser.next()? {
                 match arg {
                     Long("force") => force = true,
                     Long("resolver") => resolver = true,
+                    Long("flake") => flake = true,
                     Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
                 }
             }
-            Ok(Command::Init { force, resolver })
+            Ok(Command::Init {
+                force,
+                resolver,
+                flake,
+            })
         },
         "update" | "look" => {
             let mut names = Vec::new();

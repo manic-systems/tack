@@ -13,9 +13,11 @@
 
 # [inputs.<name>] fields
 #   url             required, shorturl ok; ?rev=<sha> pins an exact commit
-#   flake           default true; false exposes the source path
+#   type            flake (default), fetch, or fixed
+#   flake           legacy false means type = "fetch"
 #   follows         { child = "pin" } override map
 #   exclude_follow  all_follow names to skip
 #   dir             subdir holding flake.nix
 #   submodules      fetch git submodules
+#   unpack          fixed-only: tarball or file
 [inputs]
