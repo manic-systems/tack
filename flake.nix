@@ -113,7 +113,10 @@
           nightlyRustfmt = fenix.packages.${system}.latest.rustfmt;
         in
         {
-          default = self.checks.${system}.fmt;
+          default = pkgs.linkFarmFromDrvs "tack-checks" [
+            self.checks.${system}.fmt
+            self.checks.${system}.clippy
+          ];
           fmt =
             pkgs.runCommand "tack-fmt-check"
               {
@@ -134,6 +137,22 @@
                 find . -name '*.nix' -exec nixfmt --check {} +
                 touch $out
               '';
+          clippy = self.packages.${system}.tack.overrideAttrs (old: {
+            pname = "tack-clippy";
+            nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.clippy ];
+            buildPhase = ''
+              runHook preBuild
+              cargo clippy --all-targets --offline -- -D warnings
+              runHook postBuild
+            '';
+            checkPhase = "true";
+            doCheck = false;
+            installPhase = ''
+              runHook preInstall
+              touch $out
+              runHook postInstall
+            '';
+          });
         }
       );
     };
