@@ -49,9 +49,6 @@ fn dir() -> PathBuf {
         return PathBuf::from(d);
     }
     let cwd = std::env::current_dir().expect("cwd");
-    if cwd.join(".tack").is_dir() {
-        return cwd.join(".tack");
-    }
     if cwd.join("inputs.nix").exists() {
         return cwd;
     }
@@ -65,14 +62,14 @@ fn lock_path(dir: &Path) -> PathBuf {
     dir.join("pins.lock.json")
 }
 
-/// resolver lives next to pins.toml; legacy root-mode keeps the historical
-/// `inputs.nix` name, otherwise the new convention is `default.nix`.
-fn resolver_path(d: &Path) -> PathBuf {
-    let legacy = d.join("inputs.nix");
+/// resolver is `default.nix` in the modern `.tack/` layout, or `inputs.nix`
+/// when the dir is a repo root carrying the legacy layout
+fn resolver_path(dir: &Path) -> PathBuf {
+    let legacy = dir.join("inputs.nix");
     if legacy.exists() {
         return legacy;
     }
-    d.join("default.nix")
+    dir.join("default.nix")
 }
 
 /// rewrite the resolver if it carries the management marker AND its bytes
@@ -149,20 +146,10 @@ pub fn init(force: bool) -> Result<()> {
     }
     write_atomic(&rp, RESOLVER_NIX)?;
 
-    let resolver_name = rp
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("default.nix");
-    let import_hint = if dir.ends_with(".tack") {
-        "import ./.tack".to_string()
-    } else {
-        format!("import ./{resolver_name}")
-    };
-
     println!("initialised tack in {}", dir.display());
     println!("  pins.toml       edit shorturls and inputs here");
     println!("  pins.lock.json  written by `tack update`");
-    println!("  {resolver_name:<14}  `{import_hint}` from your flake/config");
+    println!("  default.nix     `import ./.tack` from your flake/config");
     Ok(())
 }
 
