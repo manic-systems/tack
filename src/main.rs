@@ -24,7 +24,7 @@ fn run() -> anyhow::Result<()> {
     match cli::parse()? {
         Command::Init { force } => commands::init(force),
         Command::Update { names, accept } => commands::update(&names, accept),
-        Command::Look { names } => commands::look(&names),
+        Command::Look { names, verbose } => commands::look(&names, verbose),
         Command::Add {
             name,
             url,

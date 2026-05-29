@@ -22,6 +22,8 @@ use std::{
     time::Duration,
 };
 
+use crate::fetch::CommitLog;
+
 #[derive(Clone)]
 pub enum PinStatus {
     Pending,
@@ -115,6 +117,58 @@ impl Display {
                 }
             }
         }
+    }
+
+    /// finish + render the per-pin commit log under each Updated entry
+    pub fn finish_verbose(mut self, logs: &[Option<CommitLog>]) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let states = self.states.lock().unwrap();
+        let mut out = io::stdout().lock();
+        if self.tty {
+            // rewind to the first pin row and clear what the spinner drew
+            let _ = write!(out, "\x1b[{}A\x1b[J", self.names.len());
+            for ((name, status), entry) in self.names.iter().zip(states.iter()).zip(logs.iter()) {
+                let _ = writeln!(out, "[{}] {name}{}", glyph(status, 0), suffix(status));
+                if matches!(*status, PinStatus::Updated { .. })
+                    && let Some(log) = entry.as_ref()
+                {
+                    let indent = " ".repeat(4 + name.len() + 2);
+                    print_log(&mut out, &indent, log);
+                }
+            }
+        } else {
+            for ((name, status), entry) in self.names.iter().zip(states.iter()).zip(logs.iter()) {
+                if let Some(line) = plain_line(name, status) {
+                    let _ = writeln!(out, "{line}");
+                }
+                if matches!(*status, PinStatus::Updated { .. })
+                    && let Some(log) = entry.as_ref()
+                {
+                    let indent = " ".repeat(name.len() + 2);
+                    print_log(&mut out, &indent, log);
+                }
+            }
+        }
+        let _ = out.flush();
+    }
+}
+
+fn short_hash(hash: &str) -> &str {
+    hash.get(..7).expect("hash should be at least 7 bytes")
+}
+
+fn print_log(out: &mut dyn io::Write, indent: &str, log: &CommitLog) {
+    for &(ref hash, ref subject) in &log.fresh {
+        let _ = writeln!(out, "{indent}{}    {subject}", short_hash(hash));
+    }
+    if log.more {
+        let _ = writeln!(out, "{indent}...");
+    }
+    if let Some(&(ref hash, ref subject)) = log.base.as_ref() {
+        let _ = writeln!(out, "{indent}{}    {subject}", short_hash(hash));
     }
 }
 

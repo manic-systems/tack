@@ -8,14 +8,18 @@ use std::{
     },
     env,
     fs,
+    iter,
     mem,
     path::{
         Path,
         PathBuf,
     },
-    sync::atomic::{
-        AtomicUsize,
-        Ordering,
+    sync::{
+        Mutex,
+        atomic::{
+            AtomicUsize,
+            Ordering,
+        },
     },
 };
 
@@ -339,18 +343,30 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn look(names: &[String]) -> Result<()> {
+pub fn look(names: &[String], verbose: bool) -> Result<()> {
+    const LOG_LIMIT: usize = 5;
+
     let dir = dir();
     let doc = pins::load(&pins_path(&dir))?;
     let shorturls = pins::shorturls(&doc);
     let all = pins::inputs(&doc)?;
+    if all.is_empty() {
+        println!(
+            "no pins in {}; add one with `tack add <name> <url>`",
+            pins_path(&dir).display()
+        );
+        return Ok(());
+    }
     let selected = select(&all, names);
     if selected.is_empty() {
         return Ok(());
     }
     let lk = lock::load(&lock_path(&dir))?;
 
-    let display = Display::new(selected.iter().map(|i| i.name.clone()).collect());
+    let display = Display::new(selected.iter().map(|inp| inp.name.clone()).collect());
+    let logs: Vec<Mutex<Option<fetch::CommitLog>>> = iter::repeat_with(|| Mutex::new(None))
+        .take(selected.len())
+        .collect();
 
     selected.par_iter().enumerate().for_each(|(i, inp)| {
         if inp.pin_type == PinType::Fixed {
@@ -372,11 +388,27 @@ pub fn look(names: &[String]) -> Result<()> {
                     old: old.as_deref().map_or_else(|| "NEW".into(), short),
                     new: short(&rev),
                 });
+                if verbose
+                    && let Some(old_rev) = old.as_deref()
+                    && let Ok(Some(log)) =
+                        fetch::commits_between(&expanded, old_rev, &rev, LOG_LIMIT)
+                {
+                    *logs[i].lock().unwrap() = Some(log);
+                }
             },
             Err(err) => display.set(i, PinStatus::Failed(format!("{err:#}"))),
         }
     });
-    display.finish();
+
+    if verbose {
+        let collected = logs
+            .into_iter()
+            .map(|mutex| mutex.into_inner().unwrap())
+            .collect::<Vec<_>>();
+        display.finish_verbose(&collected);
+    } else {
+        display.finish();
+    }
     Ok(())
 }
 
@@ -936,7 +968,7 @@ usage:
   tack [-h|--help|help]
   tack init [--force]
   tack update [names...] [--accept]
-  tack look [names...]
+  tack look [names...] [--verbose|-v]
   tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                         [--dir <d>] [--submodules] [--follows c=p]...
   tack rm <name>
