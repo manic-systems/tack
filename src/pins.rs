@@ -26,7 +26,7 @@ pub enum PinType {
 }
 
 impl PinType {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Flake => "flake",
             Self::Fetch => "fetch",
@@ -34,8 +34,8 @@ impl PinType {
         }
     }
 
-    fn parse(s: &str) -> Result<Self> {
-        match s {
+    fn parse(str: &str) -> Result<Self> {
+        match str {
             "flake" => Ok(Self::Flake),
             "fetch" => Ok(Self::Fetch),
             "fixed" => Ok(Self::Fixed),
@@ -51,15 +51,15 @@ pub enum Unpack {
 }
 
 impl Unpack {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Tarball => "tarball",
             Self::File => "file",
         }
     }
 
-    fn parse(s: &str) -> Result<Self> {
-        match s {
+    fn parse(str: &str) -> Result<Self> {
+        match str {
             "tarball" => Ok(Self::Tarball),
             "file" => Ok(Self::File),
             other => bail!("unknown unpack '{other}' (expected tarball|file)"),
@@ -68,13 +68,13 @@ impl Unpack {
 
     /// guess from a URL extension; tarball-family wins, otherwise file
     pub fn detect(url: &str) -> Self {
-        let path = url.split('?').next().unwrap_or(url);
-        let path = path.split('#').next().unwrap_or(path);
+        let no_query = url.split('?').next().unwrap_or(url);
+        let path = no_query.split('#').next().unwrap_or(no_query);
         let lower = path.to_ascii_lowercase();
         let tarballish = [
             ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz",
         ];
-        if tarballish.iter().any(|s| lower.ends_with(s)) {
+        if tarballish.iter().any(|ending| lower.ends_with(ending)) {
             Self::Tarball
         } else {
             Self::File
@@ -133,7 +133,7 @@ pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
             .with_context(|| format!("input '{name}' has no url"))?;
         // `type` is canonical; legacy `flake = false` reads as `fetch`
         let pin_type = match table.get("type").and_then(Item::as_str) {
-            Some(s) => PinType::parse(s).with_context(|| format!("input '{name}'"))?,
+            Some(typ) => PinType::parse(typ).with_context(|| format!("input '{name}'"))?,
             None => {
                 match table.get("flake").and_then(Item::as_bool) {
                     Some(false) => PinType::Fetch,
@@ -144,7 +144,7 @@ pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
         let unpack = table
             .get("unpack")
             .and_then(Item::as_str)
-            .map(|s| Unpack::parse(s).with_context(|| format!("input '{name}'")))
+            .map(|unpack| Unpack::parse(unpack).with_context(|| format!("input '{name}'")))
             .transpose()?;
         if pin_type != PinType::Fixed && unpack.is_some() {
             bail!("input '{name}': `unpack` is only valid for type = \"fixed\"");
@@ -169,34 +169,33 @@ pub fn has_input(doc: &DocumentMut, name: &str) -> bool {
         .is_some_and(|tbl| tbl.contains_key(name))
 }
 
-pub fn add_input(
-    doc: &mut DocumentMut,
-    name: &str,
-    url: &str,
-    pin_type: PinType,
-    unpack: Option<Unpack>,
-    dir: Option<&str>,
-    submodules: bool,
-    follows: &[(String, String)],
-) {
+pub struct AddInputOpts<'a> {
+    pub pin_type:   PinType,
+    pub unpack:     Option<Unpack>,
+    pub dir:        Option<&'a str>,
+    pub submodules: bool,
+    pub follows:    &'a [(String, String)],
+}
+
+pub fn add_input(doc: &mut DocumentMut, name: &str, url: &str, opts: &AddInputOpts<'_>) {
     let mut entry = Table::new();
     entry.set_implicit(false);
     entry["url"] = value(url);
-    if pin_type != PinType::Flake {
-        entry["type"] = value(pin_type.as_str());
+    if opts.pin_type != PinType::Flake {
+        entry["type"] = value(opts.pin_type.as_str());
     }
-    if let Some(u) = unpack {
-        entry["unpack"] = value(u.as_str());
+    if let Some(unpak) = opts.unpack {
+        entry["unpack"] = value(unpak.as_str());
     }
-    if let Some(subdir) = dir {
+    if let Some(subdir) = opts.dir {
         entry["dir"] = value(subdir);
     }
-    if submodules {
+    if opts.submodules {
         entry["submodules"] = value(true);
     }
-    if !follows.is_empty() {
+    if !opts.follows.is_empty() {
         let mut follows_tbl = Table::new();
-        for &(ref child, ref parent) in follows {
+        for &(ref child, ref parent) in opts.follows {
             follows_tbl[child] = value(parent.as_str());
         }
         entry["follows"] = Item::Table(follows_tbl);

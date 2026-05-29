@@ -133,22 +133,21 @@ fn draw(names: &[String], states: &[PinStatus], frame: usize, drawn: bool) {
 }
 
 fn glyph(st: &PinStatus, frame: usize) -> String {
-    let (color, ch) = match st {
-        PinStatus::Pending => (2, '·'),
-        PinStatus::Fetching => (34, FRAMES[frame % FRAMES.len()]),
-        PinStatus::NoChange => (33, '-'),
-        PinStatus::Updated { .. } => (32, '✓'),
+    let (color, ch) = match *st {
+        PinStatus::Fetching => (34_i32, FRAMES[frame % FRAMES.len()]),
+        PinStatus::NoChange => (33_i32, '-'),
+        PinStatus::Updated { .. } => (32_i32, '\u{2713}'), // ✓
         PinStatus::Drift { accepted: true, .. } | PinStatus::FixedDrift { accepted: true, .. } => {
-            (33, '~')
+            (33_i32, '~')
         },
         PinStatus::Drift {
             accepted: false, ..
         }
         | PinStatus::FixedDrift {
             accepted: false, ..
-        } => (31, '!'),
-        PinStatus::Skipped(_) => (2, '·'),
-        PinStatus::Failed(_) => (31, '✗'),
+        } => (31_i32, '!'),
+        PinStatus::Pending | PinStatus::Skipped(_) => (2_i32, '\u{b7}'), // ·
+        PinStatus::Failed(_) => (31_i32, '\u{2717}'),                    // ✗
     };
     format!("\x1b[{color}m{ch}\x1b[0m")
 }
@@ -186,7 +185,7 @@ fn suffix(st: &PinStatus) -> String {
         },
         PinStatus::Skipped(ref note) => format!("  {note}"),
         PinStatus::Failed(ref msg) => format!("  {msg}"),
-        _ => String::new(),
+        PinStatus::Pending | PinStatus::Fetching | PinStatus::NoChange => String::new(),
     }
 }
 
@@ -231,6 +230,6 @@ fn plain_line(name: &str, st: &PinStatus) -> Option<String> {
         },
         PinStatus::Skipped(ref note) => Some(format!("{name}: {note}")),
         PinStatus::Failed(ref msg) => Some(format!("{name}: FAILED: {msg}")),
-        _ => None,
+        PinStatus::Pending | PinStatus::Fetching => None,
     }
 }
