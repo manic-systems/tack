@@ -40,9 +40,7 @@ pub enum Command {
         template: Option<String>,
         rm:       bool,
     },
-    Dedup {
-        deep: bool,
-    },
+    Dedup,
     Help,
 }
 
@@ -198,14 +196,10 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
             Ok(Command::Alias { name, template, rm })
         },
         "dedup" => {
-            let mut deep = false;
-            while let Some(arg) = parser.next()? {
-                match arg {
-                    Long("deep") => deep = true,
-                    Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
-                }
+            if let Some(arg) = parser.next()? {
+                return Err(arg.unexpected().into());
             }
-            Ok(Command::Dedup { deep })
+            Ok(Command::Dedup)
         },
         _ => Ok(Command::Help),
     }
