@@ -21,7 +21,8 @@ pub enum Command {
         accept: bool,
     },
     Look {
-        names: Vec<String>,
+        names:   Vec<String>,
+        verbose: bool,
     },
     Add {
         name:       String,
@@ -76,9 +77,11 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
         "update" | "look" => {
             let mut names = Vec::new();
             let mut accept = false;
+            let mut verbose = false;
             while let Some(arg) = parser.next()? {
                 match arg {
                     Long("accept") if sub == "update" => accept = true,
+                    Long("verbose") | Short('v') if sub == "look" => verbose = true,
                     Value(value) => {
                         names.push(value.string().map_err(|_| anyhow::anyhow!("bad name"))?);
                     },
@@ -88,7 +91,7 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
             Ok(if sub == "update" {
                 Command::Update { names, accept }
             } else {
-                Command::Look { names }
+                Command::Look { names, verbose }
             })
         },
         "add" => {

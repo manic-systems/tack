@@ -41,7 +41,7 @@ legacy `./inputs.nix` at repo root is detected and preserved as-is.
 ```
 tack init [--force]
 tack update [names...] [--accept]    fetch latest, rewrite lock
-tack look [names...]                 report pins with newer upstream revs
+tack look [names...] [--verbose|-v]  report pins with newer upstream revs
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                       [--dir <d>] [--submodules] [--follows c=p]...
 tack rm <name>

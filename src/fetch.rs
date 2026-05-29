@@ -458,10 +458,9 @@ where
     Ok(root)
 }
 
-fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{reff}");
+fn gh_get(url: &str) -> Result<Value> {
     let mut req = agent()
-        .get(&url)
+        .get(url)
         .header("User-Agent", "tack")
         .header("Accept", "application/vnd.github+json");
     if let Ok(token) = env::var("GITHUB_TOKEN").or_else(|_| env::var("GH_TOKEN")) {
@@ -469,10 +468,15 @@ fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
     }
     let body = req
         .call()
-        .with_context(|| format!("github api {owner}/{repo}@{reff}"))?
+        .with_context(|| format!("github api {url}"))?
         .body_mut()
         .read_to_string()?;
-    let parsed = serde_json::from_str::<Value>(&body)?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{reff}");
+    let parsed = gh_get(&url).with_context(|| format!("github api {owner}/{repo}@{reff}"))?;
     let rev = parsed["sha"]
         .as_str()
         .ok_or_else(|| anyhow!("no sha in github response for {owner}/{repo}@{reff}"))?
@@ -481,6 +485,55 @@ fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
         .as_str()
         .ok_or_else(|| anyhow!("no commit date for {owner}/{repo}@{reff}"))?;
     Ok((rev, epoch_from_iso(date)?))
+}
+
+pub struct CommitLog {
+    /// freshest commits in the range, newest first
+    pub fresh: Vec<(String, String)>,
+    /// more than the requested limit existed; render an ellipsis
+    pub more:  bool,
+    /// the currently-pinned (base) commit, for context
+    pub base:  Option<(String, String)>,
+}
+
+/// fresh commits between `old` and `new` revs, capped at `limit`. [`None`] for
+/// non-github targets (no clone-free way to do this yet).
+pub fn commits_between(
+    expanded: &str,
+    old: &str,
+    new: &str,
+    limit: usize,
+) -> Result<Option<CommitLog>> {
+    let Target::Github { owner, repo, .. } = parse(expanded)? else {
+        return Ok(None);
+    };
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/compare/{old}...{new}");
+    let parsed = gh_get(&url)?;
+    let commits = parsed["commits"].as_array().cloned().unwrap_or_default();
+    let total = parsed
+        .get("total_commits")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(commits.len());
+    let fresh = commits
+        .iter()
+        .rev()
+        .take(limit)
+        .filter_map(commit_pair)
+        .collect::<Vec<_>>();
+    let base = parsed.get("base_commit").and_then(commit_pair);
+    Ok(Some(CommitLog {
+        fresh,
+        more: total > limit,
+        base,
+    }))
+}
+
+fn commit_pair(node: &Value) -> Option<(String, String)> {
+    let sha = node.get("sha")?.as_str()?.to_owned();
+    let msg = node.get("commit")?.get("message")?.as_str()?;
+    let subject = msg.lines().next().unwrap_or("").trim_end().to_owned();
+    Some((sha, subject))
 }
 
 /// get a text resource
