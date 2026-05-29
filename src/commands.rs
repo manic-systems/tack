@@ -25,7 +25,6 @@ use anyhow::{
 };
 use rayon::prelude::*;
 use serde_json::Value;
-use toml_edit::Item;
 
 use crate::{
     fetch,
@@ -77,13 +76,12 @@ fn resolver_path(dir: &Path) -> PathBuf {
 /// rewrite the resolver if it carries the management marker AND its bytes
 /// differ from the bundled template; leave it alone otherwise.
 fn refresh_resolver(dir: &Path) {
-    let rp = resolver_path(dir);
-    if let Ok(current) = fs::read_to_string(&rp) {
-        if current.contains(MARKER) && current != RESOLVER_NIX {
-            let _ = write_atomic(&rp, RESOLVER_NIX);
-        }
-    } else {
-        // resolver missing — let init/etc. handle it; not our job here
+    let path = resolver_path(dir);
+    if let Ok(current) = fs::read_to_string(&path)
+        && current.contains(MARKER)
+        && current != RESOLVER_NIX
+    {
+        let _ = write_atomic(&path, RESOLVER_NIX);
     }
 }
 
@@ -398,9 +396,10 @@ fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Inpu
 }
 
 struct Entry {
-    parent: String,
-    name:   String,
-    rev:    String,
+    /// lineage from top-pin down to the parent tree being scanned
+    path: Vec<String>,
+    name: String,
+    rev:  String,
 }
 
 struct Finding {
@@ -424,25 +423,66 @@ enum SourceRef {
     Url(String),
 }
 
+/// rev the consumer's resolver would actually use for this entry once
+/// follows apply. at depth-1 the top-pin's `follows` wins, then `all_follow`
+/// (minus `exclude_follow`) at any depth
+fn effective_rev(
+    path: &[String],
+    name: &str,
+    recorded: &str,
+    top_input: Option<&pins::Input>,
+    all_follow: &BTreeMap<String, String>,
+    top_revs: &BTreeMap<String, String>,
+) -> String {
+    if path.is_empty() {
+        return recorded.to_owned();
+    }
+    if path.len() == 1
+        && let Some(inp) = top_input
+        && let Some(target) = inp.follows.get(name)
+        && let Some(rev) = top_revs.get(target)
+    {
+        return rev.clone();
+    }
+    let excluded = top_input.is_some_and(|inp| inp.excludes.contains(name));
+    if !excluded
+        && let Some(target) = all_follow.get(name)
+        && let Some(rev) = top_revs.get(target)
+    {
+        return rev.clone();
+    }
+    recorded.to_owned()
+}
+
 pub fn dedup() -> Result<()> {
     let dir = dir();
     let doc = pins::load(&pins_path(&dir))?;
     let lock = lock::load(&lock_path(&dir))?;
     let inputs = pins::inputs(&doc)?;
     let shorturls = pins::shorturls(&doc);
-    let configured_follows = existing_follows(&doc);
+    let all_follow = pins::all_follows(&doc);
+    let by_name = inputs
+        .iter()
+        .map(|inp| (inp.name.as_str(), inp))
+        .collect::<BTreeMap<&str, &pins::Input>>();
+
+    let top_revs = inputs
+        .iter()
+        .filter_map(|inp| {
+            lock.get(&inp.name)
+                .and_then(rev_for_display)
+                .map(|rev| (inp.name.clone(), rev))
+        })
+        .collect::<BTreeMap<String, String>>();
 
     let mut groups = BTreeMap::<String, Vec<Entry>>::new();
 
     for inp in &inputs {
         let expanded = shorturl::expand(&inp.url, &shorturls);
         if let Some(id) = canonical_identity(&expanded) {
-            let rev = lock
-                .get(&inp.name)
-                .and_then(rev_for_display)
-                .unwrap_or_default();
+            let rev = top_revs.get(&inp.name).cloned().unwrap_or_default();
             groups.entry(id).or_default().push(Entry {
-                parent: "top".into(),
+                path: vec![],
                 name: inp.name.clone(),
                 rev,
             });
@@ -492,7 +532,24 @@ pub fn dedup() -> Result<()> {
         }
     }
 
-    print_groups(&groups, &inputs, &configured_follows);
+    for entries in groups.values_mut() {
+        for entry in entries.iter_mut() {
+            let top = entry
+                .path
+                .first()
+                .and_then(|name| by_name.get(name.as_str()).copied());
+            entry.rev = effective_rev(
+                &entry.path,
+                &entry.name,
+                &entry.rev,
+                top,
+                &all_follow,
+                &top_revs,
+            );
+        }
+    }
+
+    print_groups(&groups, &inputs, &all_follow);
     Ok(())
 }
 
@@ -625,7 +682,6 @@ fn scan_files(
 ) -> ScanResult {
     let mut findings = Vec::<Finding>::new();
     let mut transitive = Vec::<TackTransitive>::new();
-    let parent_label = format!("via {}", path.join(" > "));
 
     if let Some(raw) = flake_lock
         && let Ok(json) = serde_json::from_str::<Value>(raw)
@@ -643,9 +699,9 @@ fn scan_files(
                     findings.push(Finding {
                         identity: id,
                         entry:    Entry {
-                            parent: parent_label.clone(),
-                            name:   strip_disambiguator(key).to_owned(),
-                            rev:    rev_for_display(locked).unwrap_or_default(),
+                            path: path.to_vec(),
+                            name: strip_disambiguator(key).to_owned(),
+                            rev:  rev_for_display(locked).unwrap_or_default(),
                         },
                     });
                 }
@@ -667,9 +723,9 @@ fn scan_files(
                 findings.push(Finding {
                     identity: id,
                     entry:    Entry {
-                        parent: parent_label.clone(),
-                        name:   tinp.name.clone(),
-                        rev:    tlock
+                        path: path.to_vec(),
+                        name: tinp.name.clone(),
+                        rev:  tlock
                             .get(&tinp.name)
                             .and_then(rev_for_display)
                             .unwrap_or_default(),
@@ -702,42 +758,43 @@ fn scan_files(
 fn canonical_identity(expanded: &str) -> Option<String> {
     let no_query = expanded.split('?').next().unwrap_or(expanded);
     let path = no_query.split('#').next().unwrap_or(no_query);
-    if let Some(body) = path.strip_prefix("github:") {
+    let id = if let Some(body) = path.strip_prefix("github:") {
         let mut segs = body.split('/');
         let owner = segs.next()?;
         let repo = segs.next()?;
         if owner.is_empty() || repo.is_empty() {
             return None;
         }
-        return Some(format!("github:{owner}/{repo}"));
-    }
-    if let Some(rest) = path.strip_prefix("git+") {
-        return Some(format!("git+{rest}"));
-    }
-    if path.starts_with("http://") || path.starts_with("https://") {
-        return Some(format!("tarball:{path}"));
-    }
-    None
+        format!("github:{owner}/{repo}")
+    } else if let Some(rest) = path.strip_prefix("git+") {
+        format!("git+{rest}")
+    } else if path.starts_with("http://") || path.starts_with("https://") {
+        format!("tarball:{path}")
+    } else {
+        return None;
+    };
+    Some(id.to_lowercase())
 }
 
 fn node_identity(locked: &Value) -> Option<String> {
     let ty = locked.get("type")?.as_str()?;
-    match ty {
+    let id = match ty {
         "github" => {
             let owner = locked.get("owner")?.as_str()?;
             let repo = locked.get("repo")?.as_str()?;
-            Some(format!("github:{owner}/{repo}"))
+            format!("github:{owner}/{repo}")
         },
         "git" => {
             let url = locked.get("url")?.as_str()?;
             let cut = url.split('?').next().unwrap_or(url);
-            Some(format!("git+{cut}"))
+            format!("git+{cut}")
         },
-        "tarball" => Some(format!("tarball:{}", locked.get("url")?.as_str()?)),
-        "indirect" => Some(format!("indirect:{}", locked.get("id")?.as_str()?)),
-        "path" => Some(format!("path:{}", locked.get("path")?.as_str()?)),
-        _ => None,
-    }
+        "tarball" => format!("tarball:{}", locked.get("url")?.as_str()?),
+        "indirect" => format!("indirect:{}", locked.get("id")?.as_str()?),
+        "path" => format!("path:{}", locked.get("path")?.as_str()?),
+        _ => return None,
+    };
+    Some(id.to_lowercase())
 }
 
 fn source_key(source: &SourceRef) -> String {
@@ -776,21 +833,21 @@ fn strip_disambiguator(key: &str) -> &str {
     }
 }
 
-fn existing_follows(doc: &toml_edit::DocumentMut) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    if let Some(tbl) = doc.get("all_follow").and_then(Item::as_table) {
-        for (key, _) in tbl {
-            out.insert(key.to_owned());
-        }
+fn source_label(path: &[String]) -> String {
+    if path.is_empty() {
+        "top".into()
+    } else {
+        path.join(" > ")
     }
-    out
 }
 
 fn print_groups(
     groups: &BTreeMap<String, Vec<Entry>>,
     inputs: &[pins::Input],
-    configured: &BTreeSet<String>,
+    all_follow: &BTreeMap<String, String>,
 ) {
+    const MAX_SOURCES: usize = 5;
+
     let top_names = inputs
         .iter()
         .map(|i| i.name.as_str())
@@ -802,34 +859,56 @@ fn print_groups(
         if entries.len() < 2 {
             continue;
         }
+        // already aligned by follows: skip
+        let mut revs = entries.iter().map(|entry| entry.rev.as_str());
+        if let Some(first) = revs.next()
+            && revs.all(|rev| rev == first)
+        {
+            continue;
+        }
+
         printed += 1;
         println!("\n{id}  x{}", entries.len());
-        let pw = entries
-            .iter()
-            .map(|entry| entry.parent.len())
-            .max()
-            .unwrap_or(0);
-        let nw = entries
-            .iter()
-            .map(|entry| entry.name.len())
-            .max()
-            .unwrap_or(0);
+
+        // group by rev, then by name within rev
+        let mut by_rev = BTreeMap::<&str, BTreeMap<&str, Vec<String>>>::new();
         for entry in entries {
-            println!(
-                "  {:pw$}  {:nw$}  {}",
-                entry.parent,
-                entry.name,
-                entry.rev,
-                pw = pw,
-                nw = nw
-            );
+            by_rev
+                .entry(entry.rev.as_str())
+                .or_default()
+                .entry(entry.name.as_str())
+                .or_default()
+                .push(source_label(&entry.path));
         }
-        let has_top = entries.iter().any(|entry| entry.parent == "top");
+
+        let rw = by_rev.keys().map(|rev| rev.len()).max().unwrap_or(0);
+        let nw = by_rev
+            .values()
+            .flat_map(|names| names.keys().map(|name| name.len()))
+            .max()
+            .unwrap_or(0);
+
+        for (rev, names) in &by_rev {
+            for (name, sources) in names {
+                let shown = sources.len().min(MAX_SOURCES);
+                for (idx, source) in sources.iter().take(shown).enumerate() {
+                    let rev_cell = if idx == 0 { *rev } else { "" };
+                    let name_cell = if idx == 0 { *name } else { "" };
+                    println!("  {rev_cell:rw$}  {name_cell:nw$}  {source}");
+                }
+                if sources.len() > shown {
+                    let extra = sources.len() - shown;
+                    println!("  {empty:rw$}  {empty:nw$}  ...{extra} more", empty = "");
+                }
+            }
+        }
+
+        let has_top = entries.iter().any(|entry| entry.path.is_empty());
         if has_top {
             for entry in entries {
-                if entry.parent != "top"
+                if !entry.path.is_empty()
                     && top_names.contains(entry.name.as_str())
-                    && !configured.contains(&entry.name)
+                    && !all_follow.contains_key(&entry.name)
                 {
                     suggest.insert(entry.name.clone());
                 }
