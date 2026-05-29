@@ -76,7 +76,7 @@
               pkgs.cargo
               pkgs.rustc
               pkgs.clippy
-              pkgs.rustfmt
+              nightlyRustfmt
               pkgs.rust-analyzer
             ]
             ++ nativeDeps pkgs
