@@ -468,20 +468,13 @@ pub fn dedup(deep: bool) -> Result<()> {
     // batch in parallel, then expand into the next frontier (deep only).
     let mut visited = HashSet::<String>::new();
     while !frontier.is_empty() {
-        let mut batch = Vec::<TackTransitive>::with_capacity(frontier.len());
-        for item in mem::take(&mut frontier) {
-            if visited.insert(source_key(&item.source)) {
-                batch.push(item);
-            }
-        }
-
-        let results = batch
+        let results = mem::take(&mut frontier)
+            .into_iter()
+            .filter(|item| visited.insert(source_key(&item.source)))
+            .collect::<Vec<_>>()
             .into_par_iter()
-            .map(|item| {
-                let res = fetch_and_scan(&item);
-                (item.path, res)
-            })
-            .collect::<Vec<(Vec<String>, Result<ScanResult>)>>();
+            .map(|item| (item.path.clone(), fetch_and_scan(&item)))
+            .collect::<Vec<_>>();
 
         for (path, res) in results {
             match res {
@@ -510,6 +503,18 @@ pub fn dedup(deep: bool) -> Result<()> {
 }
 
 fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
+    // fetch only the 3 files scan needs via http if the source's forge supports it
+    if let SourceRef::Locked(ref node) = item.source
+        && let Some((flake_lock, tack_pins, tack_lock)) = try_raw_files(node)
+    {
+        return Ok(scan_files(
+            flake_lock.as_deref(),
+            tack_pins.as_deref(),
+            tack_lock.as_deref(),
+            &item.path,
+        ));
+    }
+
     let tmp = tempfile::tempdir()?;
     let root = match item.source {
         SourceRef::Locked(ref node) => fetch::fetch_locked_tree_into(node, tmp.path())?,
@@ -518,13 +523,118 @@ fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
     Ok(scan_tree(&root, &item.path))
 }
 
+/// `authoritative = true` means a 404 on every probe is final, and `false`
+/// means the caller should fall back to clone
+fn try_raw_files(node: &Value) -> Option<(Option<String>, Option<String>, Option<String>)> {
+    let rev = node.get("rev").and_then(Value::as_str)?;
+    let (base, authoritative) = match node.get("type").and_then(Value::as_str)? {
+        "github" => {
+            let owner = node.get("owner").and_then(Value::as_str)?;
+            let repo = node.get("repo").and_then(Value::as_str)?;
+            (
+                format!("https://raw.githubusercontent.com/{owner}/{repo}"),
+                true,
+            )
+        },
+        "gitlab" => {
+            let owner = node.get("owner").and_then(Value::as_str)?;
+            let repo = node.get("repo").and_then(Value::as_str)?;
+            let host = node
+                .get("host")
+                .and_then(Value::as_str)
+                .unwrap_or("gitlab.com");
+            (format!("https://{host}/{owner}/{repo}"), true)
+        },
+        "git" => {
+            let url = node.get("url").and_then(Value::as_str)?;
+            (url.strip_suffix(".git").unwrap_or(url).to_owned(), false)
+        },
+        _ => return None,
+    };
+
+    let fetch_file = |file: &str| {
+        let (url, decoder) = forge_raw(&base, rev, file);
+        let body = fetch::raw(&url).ok()?;
+        if let Some(decode) = decoder {
+            decode(&body).ok()
+        } else {
+            Some(body)
+        }
+    };
+    let triple = (
+        fetch_file("flake.lock"),
+        fetch_file(".tack/pins.toml"),
+        fetch_file(".tack/pins.lock.json"),
+    );
+    if !authoritative && triple.0.is_none() && triple.1.is_none() && triple.2.is_none() {
+        None
+    } else {
+        Some(triple)
+    }
+}
+
+/// body decoder applied after the http get
+type Decoder = fn(&str) -> Result<String>;
+
+/// map a repo base url + rev + file path to (raw-file url, optional decoder)
+fn forge_raw(base: &str, rev: &str, file: &str) -> (String, Option<Decoder>) {
+    let host = base
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("");
+    if host == "raw.githubusercontent.com" {
+        (format!("{base}/{rev}/{file}"), None)
+    } else if host == "gitlab.com" || host.starts_with("gitlab.") {
+        (format!("{base}/-/raw/{rev}/{file}"), None)
+    } else if host == "bitbucket.org" {
+        (format!("{base}/raw/{rev}/{file}"), None)
+    } else if host.starts_with("cgit.") || host == "git.kernel.org" {
+        (format!("{base}/plain/{file}?id={rev}"), None)
+    } else if host.ends_with(".googlesource.com") || host.starts_with("gerrit.") {
+        // gerrit/gitiles returns base64-encoded text under ?format=TEXT
+        (
+            format!("{base}/+/{rev}/{file}?format=TEXT"),
+            Some(decode_b64),
+        )
+    } else {
+        // forgejo / gitea / codeberg / unknown self-hosted
+        (format!("{base}/raw/commit/{rev}/{file}"), None)
+    }
+}
+
+fn decode_b64(body: &str) -> Result<String> {
+    let bytes = data_encoding::BASE64
+        .decode(body.trim().as_bytes())
+        .map_err(|err| anyhow::anyhow!("base64 decode: {err}"))?;
+    String::from_utf8(bytes).map_err(|err| anyhow::anyhow!("utf-8 decode: {err}"))
+}
+
 fn scan_tree(root: &Path, path: &[String]) -> ScanResult {
+    let flake_lock = fs::read_to_string(root.join("flake.lock")).ok();
+    let td = root.join(".tack");
+    let tack_pins = fs::read_to_string(td.join("pins.toml")).ok();
+    let tack_lock = fs::read_to_string(td.join("pins.lock.json")).ok();
+    scan_files(
+        flake_lock.as_deref(),
+        tack_pins.as_deref(),
+        tack_lock.as_deref(),
+        path,
+    )
+}
+
+fn scan_files(
+    flake_lock: Option<&str>,
+    tack_pins: Option<&str>,
+    tack_lock: Option<&str>,
+    path: &[String],
+) -> ScanResult {
     let mut findings = Vec::<Finding>::new();
     let mut transitive = Vec::<TackTransitive>::new();
     let parent_label = format!("via {}", path.join(" > "));
 
-    if let Ok(raw) = fs::read_to_string(root.join("flake.lock"))
-        && let Ok(json) = serde_json::from_str::<Value>(&raw)
+    if let Some(raw) = flake_lock
+        && let Ok(json) = serde_json::from_str::<Value>(raw)
     {
         let root_key = json.get("root").and_then(Value::as_str).unwrap_or("root");
         if let Some(nodes) = json.get("nodes").and_then(Value::as_object) {
@@ -549,11 +659,13 @@ fn scan_tree(root: &Path, path: &[String]) -> ScanResult {
         }
     }
 
-    if let Some(td) = find_tack_dir(root)
-        && let Ok(doc) = pins::load(&td.join("pins.toml"))
+    if let Some(raw) = tack_pins
+        && let Ok(doc) = pins::parse_doc(raw)
         && let Ok(tinputs) = pins::inputs(&doc)
     {
-        let tlock = lock::load(&td.join("pins.lock.json")).unwrap_or_default();
+        let tlock = tack_lock
+            .and_then(|str| lock::parse(str).ok())
+            .unwrap_or_default();
         let tshort = pins::shorturls(&doc);
         for tinp in &tinputs {
             let expanded = shorturl::expand(&tinp.url, &tshort);
@@ -591,18 +703,6 @@ fn scan_tree(root: &Path, path: &[String]) -> ScanResult {
         findings,
         transitive,
     }
-}
-
-fn find_tack_dir(root: &Path) -> Option<PathBuf> {
-    let new_layout = root.join(".tack");
-    if new_layout.join("pins.toml").exists() {
-        return Some(new_layout);
-    }
-    // legacy: pins.toml + inputs.nix at repo root
-    if root.join("pins.toml").exists() && root.join("inputs.nix").exists() {
-        return Some(root.to_owned());
-    }
-    None
 }
 
 fn canonical_identity(expanded: &str) -> Option<String> {

@@ -20,7 +20,12 @@ pub fn load(path: &Path) -> Result<Lock> {
         return Ok(Lock::new());
     }
     let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
+    parse(&raw).with_context(|| format!("parse {}", path.display()))
+}
+
+/// parse pins.lock.json from an in-memory string
+pub fn parse(raw: &str) -> Result<Lock> {
+    serde_json::from_str(raw).context("parse pins.lock.json")
 }
 
 pub fn save(path: &Path, lock: &Lock) -> Result<()> {
