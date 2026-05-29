@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     fs,
     path::Path,
 };
@@ -88,6 +91,11 @@ pub struct Input {
     pub submodules: bool,
     pub pin_type:   PinType,
     pub unpack:     Option<Unpack>,
+    /// per-pin `follows` from `[inputs.<name>.follows]`
+    pub follows:    BTreeMap<String, String>,
+    /// per-pin `exclude_follow` from `[inputs.<name>]`, names that opt out of
+    /// the global `[all_follow]` rules
+    pub excludes:   BTreeSet<String>,
 }
 
 pub fn load(path: &Path) -> Result<DocumentMut> {
@@ -122,6 +130,20 @@ pub fn shorturls(doc: &DocumentMut) -> BTreeMap<&str, &str> {
     out
 }
 
+/// the global `[all_follow]` table: child name -> target name
+pub fn all_follows(doc: &DocumentMut) -> BTreeMap<String, String> {
+    doc.get("all_follow")
+        .and_then(Item::as_table)
+        .map(|tbl| {
+            tbl.iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|val| (key.to_owned(), val.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
     let mut out = Vec::new();
     let Some(table) = doc.get("inputs").and_then(Item::as_table) else {
@@ -153,6 +175,28 @@ pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
         if pin_type != PinType::Fixed && unpack.is_some() {
             bail!("input '{name}': `unpack` is only valid for type = \"fixed\"");
         }
+        let follows = entry
+            .get("follows")
+            .and_then(Item::as_table_like)
+            .map(|tbl| {
+                tbl.iter()
+                    .filter_map(|(child, target)| {
+                        target
+                            .as_str()
+                            .map(|val| (child.to_owned(), val.to_owned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let excludes = entry
+            .get("exclude_follow")
+            .and_then(Item::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|excl| excl.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
         out.push(Input {
             name: name.to_owned(),
             url: url.to_owned(),
@@ -162,6 +206,8 @@ pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
                 .unwrap_or(false),
             pin_type,
             unpack,
+            follows,
+            excludes,
         });
     }
     Ok(out)
