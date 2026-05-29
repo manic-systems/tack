@@ -424,7 +424,7 @@ enum SourceRef {
     Url(String),
 }
 
-pub fn dedup(deep: bool) -> Result<()> {
+pub fn dedup() -> Result<()> {
     let dir = dir();
     let doc = pins::load(&pins_path(&dir))?;
     let lock = lock::load(&lock_path(&dir))?;
@@ -465,7 +465,7 @@ pub fn dedup(deep: bool) -> Result<()> {
     eprintln!("scanning {} pin(s)...", frontier.len());
 
     // bfs level-by-level: dedup the frontier against `visited`, fetch the
-    // batch in parallel, then expand into the next frontier (deep only).
+    // batch in parallel, then expand into the next frontier
     let mut visited = HashSet::<String>::new();
     while !frontier.is_empty() {
         let results = mem::take(&mut frontier)
@@ -485,16 +485,10 @@ pub fn dedup(deep: bool) -> Result<()> {
                             .or_default()
                             .push(finding.entry);
                     }
-                    if deep {
-                        frontier.extend(scan.transitive);
-                    }
+                    frontier.extend(scan.transitive);
                 },
                 Err(err) => eprintln!("tack: scan {}: {err:#}", path.join(" > ")),
             }
-        }
-
-        if !deep {
-            break;
         }
     }
 
@@ -868,7 +862,7 @@ usage:
                         [--dir <d>] [--submodules] [--follows c=p]...
   tack rm <name>
   tack alias <name> <template> | tack alias --rm <name>
-  tack dedup [--deep]
+  tack dedup
 
 pin types: flake (default), fetch (source tree only), fixed (FOD)
 
