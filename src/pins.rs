@@ -157,6 +157,16 @@ pub fn all_follows(doc: &DocumentMut) -> BTreeMap<String, String> {
     out
 }
 
+/// project a follows alias onto the flake side, for the flake.lock walk in
+/// dedup synthesis: `dep`/`flake:dep` -> `dep`, `tack:dep` -> dropped.
+pub fn flake_side(key: &str) -> Option<&str> {
+    match key.split_once(':') {
+        Some(("flake", rest)) => Some(rest),
+        Some(("tack", _)) => None,
+        _ => Some(key),
+    }
+}
+
 pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
     let mut out = Vec::new();
     let Some(table) = doc.get("inputs").and_then(Item::as_table) else {
@@ -171,16 +181,16 @@ pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
             .and_then(Item::as_str)
             .with_context(|| format!("input '{name}' has no url"))?;
         // `type` is canonical; legacy `flake = false` reads as `fetch`
-        let pin_type = match table.get("type").and_then(Item::as_str) {
+        let pin_type = match entry.get("type").and_then(Item::as_str) {
             Some(typ) => PinType::parse(typ).with_context(|| format!("input '{name}'"))?,
             None => {
-                match table.get("flake").and_then(Item::as_bool) {
+                match entry.get("flake").and_then(Item::as_bool) {
                     Some(false) => PinType::Fetch,
                     _ => PinType::Flake,
                 }
             },
         };
-        let unpack = table
+        let unpack = entry
             .get("unpack")
             .and_then(Item::as_str)
             .map(|unpack| Unpack::parse(unpack).with_context(|| format!("input '{name}'")))
@@ -292,8 +302,14 @@ pub fn remove_alias(doc: &mut DocumentMut, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
+        PinType,
+        Unpack,
         all_follows,
+        flake_side,
+        inputs,
         parse_doc,
     };
 
@@ -343,5 +359,64 @@ mod tests {
     fn all_follows_missing_table_is_empty() {
         let doc = parse_doc("[inputs]\n").expect("parse");
         assert!(all_follows(&doc).is_empty());
+    }
+
+    #[test]
+    fn all_follows_keeps_scoped_keys_verbatim() {
+        let raw =
+            "[all_follow]\n\"flake:dep\" = \"replacement\"\n\"tack:other\" = \"x\"\nbare = \"y\"\n";
+        let doc = parse_doc(raw).expect("parse");
+        let map = all_follows(&doc);
+
+        // scoping is preserved raw, but consumers project per side
+        assert_eq!(
+            map.get("flake:dep").map(String::as_str),
+            Some("replacement")
+        );
+        assert_eq!(map.get("tack:other").map(String::as_str), Some("x"));
+        assert_eq!(map.get("bare").map(String::as_str), Some("y"));
+    }
+
+    #[test]
+    fn flake_side_projects_scope() {
+        assert_eq!(flake_side("dep"), Some("dep"));
+        assert_eq!(flake_side("flake:dep"), Some("dep"));
+        assert_eq!(flake_side("tack:dep"), None);
+    }
+
+    #[test]
+    fn inputs_read_type_unpack_and_legacy_flake_from_each_entry() {
+        let doc = parse_doc(
+            r#"
+[inputs.default]
+url = "github:o/default"
+
+[inputs.source]
+url = "github:o/source"
+type = "fetch"
+
+[inputs.archive]
+url = "https://example.com/archive.tar.gz"
+type = "fixed"
+unpack = "tarball"
+
+[inputs.legacy]
+url = "github:o/legacy"
+flake = false
+"#,
+        )
+        .expect("parse");
+
+        let parsed = inputs(&doc).expect("inputs");
+        let by_name = parsed
+            .iter()
+            .map(|inp| (inp.name.as_str(), inp))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(by_name["default"].pin_type, PinType::Flake);
+        assert_eq!(by_name["source"].pin_type, PinType::Fetch);
+        assert_eq!(by_name["archive"].pin_type, PinType::Fixed);
+        assert_eq!(by_name["archive"].unpack, Some(Unpack::Tarball));
+        assert_eq!(by_name["legacy"].pin_type, PinType::Fetch);
     }
 }

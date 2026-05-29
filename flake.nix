@@ -4,9 +4,11 @@
   description = "flake-like toml nix pins, lazily fetched and transformed";
 
   outputs =
-    { self }:
+    { self, ... }@args:
     let
-      inputs = import ./.tack;
+      inputs = (import ./.tack) {
+        overrides = args.tackOverrides or { };
+      };
       inherit (inputs) nixpkgs fenix;
       inherit (nixpkgs) lib;
       forAllSystems = lib.genAttrs (lib.systems.doubles.linux ++ lib.systems.doubles.darwin);
@@ -30,6 +32,11 @@
       ];
     in
     {
+      templates.default = {
+        path = ./templates/default;
+        description = "tack-wired flake, recomposable via tackOverrides";
+      };
+
       packages = forAllSystems (
         system:
         let
