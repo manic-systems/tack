@@ -9,8 +9,8 @@
       inputs = import ./.tack;
       inherit (inputs) nixpkgs fenix;
       inherit (nixpkgs) lib;
-      forAllSystems = lib.genAttrs lib.systems.flakeExposed;
-      pkgsFor = system: nixpkgs.legacyPackages.${system};
+      forAllSystems = lib.genAttrs (lib.systems.doubles.linux ++ lib.systems.doubles.darwin);
+      pkgsFor = system: nixpkgs.legacyPackages.${system} or (import nixpkgs { inherit system; });
 
       # wild + clang are only used on Linux tier-1 arches
       hasWild = plat: plat.isLinux && (plat.isx86_64 || plat.isAarch64);
@@ -38,29 +38,7 @@
         {
           default = self.packages.${system}.tack;
 
-          tack = pkgs.rustPlatform.buildRustPackage {
-            pname = "tack";
-            version = "0.1.0";
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-
-            nativeBuildInputs = nativeDeps pkgs;
-            buildInputs = linkDeps pkgs;
-
-            # link nixpkgs c libs, no vendored copies.
-            env = {
-              LIBGIT2_NO_VENDOR = 1;
-              OPENSSL_NO_VENDOR = 1;
-            }
-            // lib.optionalAttrs (hasWild pkgs.stdenv.hostPlatform) {
-              RUSTFLAGS = "-Clinker=${pkgs.clang}/bin/clang -Clink-arg=--ld-path=wild";
-            };
-
-            meta = {
-              description = "flake-like toml nix pins, lazily fetched and transformed";
-              mainProgram = "tack";
-            };
-          };
+          tack = pkgs.callPackage ./nix/package.nix { };
         }
       );
 
