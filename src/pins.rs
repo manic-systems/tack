@@ -95,8 +95,12 @@ pub fn load(path: &Path) -> Result<DocumentMut> {
         bail!("no pins.toml at {} (run `tack init`)", path.display());
     }
     let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    raw.parse()
-        .with_context(|| format!("parse {}", path.display()))
+    parse_doc(&raw).with_context(|| format!("parse {}", path.display()))
+}
+
+/// parse pins.toml from an in-memory string
+pub fn parse_doc(raw: &str) -> Result<DocumentMut> {
+    raw.parse().context("parse pins.toml")
 }
 
 pub fn save(path: &Path, doc: &DocumentMut) -> Result<()> {

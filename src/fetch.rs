@@ -483,6 +483,25 @@ fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
     Ok((rev, epoch_from_iso(date)?))
 }
 
+/// get a text resource
+pub fn raw(url: &str) -> Result<String> {
+    let mut resp = agent()
+        .get(url)
+        .header("User-Agent", "tack")
+        .call()
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if status != 200 {
+        bail!("GET {url}: {status}");
+    }
+    let mut body = String::new();
+    resp.body_mut()
+        .as_reader()
+        .read_to_string(&mut body)
+        .with_context(|| format!("read body of {url}"))?;
+    Ok(body)
+}
+
 fn download_github_tarball(owner: &str, repo: &str, rev: &str, into: &Path) -> Result<PathBuf> {
     let url = format!("https://codeload.github.com/{owner}/{repo}/tar.gz/{rev}");
     let mut resp = agent()
