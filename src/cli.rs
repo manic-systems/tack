@@ -102,8 +102,7 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
             let mut follows = Vec::new();
             while let Some(arg) = parser.next()? {
                 match arg {
-                    Long("no-flake") => pin_type = PinType::Fetch,
-                    Long("fetch") => pin_type = PinType::Fetch,
+                    Long("fetch" | "no-flake") => pin_type = PinType::Fetch,
                     Long("fixed") => pin_type = PinType::Fixed,
                     Long("unpack") => {
                         let value = parser

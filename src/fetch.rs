@@ -185,7 +185,7 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<(Value, Stri
     let sha256 = nar::hash_bytes(&bytes);
     // detect from the user-supplied URL first; the immutable URL may have lost
     // the extension via a redirect (e.g. github archives -> codeload)
-    let unpack = unpack.unwrap_or_else(|| {
+    let kind = unpack.unwrap_or_else(|| {
         if Unpack::detect(url) == Unpack::Tarball
             || Unpack::detect(&immutable_url) == Unpack::Tarball
         {
@@ -198,7 +198,7 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<(Value, Stri
         "type": "fixed",
         "url": immutable_url,
         "sha256": sha256,
-        "unpack": unpack.as_str(),
+        "unpack": kind.as_str(),
     });
     Ok((node, sha256))
 }
@@ -568,6 +568,8 @@ fn full_ref(reff: Option<&str>, default: impl FnOnce() -> Option<String>) -> Str
 }
 
 fn callbacks() -> RemoteCallbacks<'static> {
+    const NAMES: &[&str] = &["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"];
+
     let mut cb = RemoteCallbacks::new();
     let mut tried_agent = false;
     let mut key_idx = 0_usize;
@@ -589,9 +591,8 @@ fn callbacks() -> RemoteCallbacks<'static> {
         }
         let ssh_dir = env::var_os("HOME")
             .map(PathBuf::from)
-            .map(|h| h.join(".ssh"))
+            .map(|home| home.join(".ssh"))
             .ok_or_else(|| git2::Error::from_str("ssh: $HOME unset, cannot locate keys"))?;
-        const NAMES: &[&str] = &["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"];
         while key_idx < NAMES.len() {
             let path = ssh_dir.join(NAMES[key_idx]);
             key_idx += 1;

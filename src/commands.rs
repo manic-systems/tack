@@ -6,7 +6,9 @@ use std::{
         BTreeSet,
         HashSet,
     },
+    env,
     fs,
+    mem,
     path::{
         Path,
         PathBuf,
@@ -45,10 +47,10 @@ const RESOLVER_NIX: &str = include_str!("../.tack/default.nix");
 const MARKER: &str = "# tack-managed resolver.";
 
 fn dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("TACK_DIR") {
-        return PathBuf::from(d);
+    if let Some(dir) = env::var_os("TACK_DIR") {
+        return PathBuf::from(dir);
     }
-    let cwd = std::env::current_dir().expect("cwd");
+    let cwd = env::current_dir().expect("cwd");
     if cwd.join("inputs.nix").exists() {
         return cwd;
     }
@@ -74,17 +76,14 @@ fn resolver_path(dir: &Path) -> PathBuf {
 
 /// rewrite the resolver if it carries the management marker AND its bytes
 /// differ from the bundled template; leave it alone otherwise.
-fn refresh_resolver(d: &Path) {
-    let rp = resolver_path(d);
-    match std::fs::read_to_string(&rp) {
-        Ok(current) => {
-            if current.contains(MARKER) && current != RESOLVER_NIX {
-                let _ = write_atomic(&rp, RESOLVER_NIX);
-            }
-        },
-        Err(_) => {
-            // resolver missing — let init/etc. handle it; not our job here
-        },
+fn refresh_resolver(dir: &Path) {
+    let rp = resolver_path(dir);
+    if let Ok(current) = fs::read_to_string(&rp) {
+        if current.contains(MARKER) && current != RESOLVER_NIX {
+            let _ = write_atomic(&rp, RESOLVER_NIX);
+        }
+    } else {
+        // resolver missing — let init/etc. handle it; not our job here
     }
 }
 
@@ -139,7 +138,7 @@ pub fn init(force: bool) -> Result<()> {
             bail!("{} already exists (use --force)", clash.join(", "));
         }
     }
-    std::fs::create_dir_all(&dir)?;
+    fs::create_dir_all(&dir)?;
     write_atomic(&pt, STARTER_TOML)?;
     if !lp.exists() {
         write_atomic(&lp, "{}\n")?;
@@ -170,15 +169,19 @@ pub fn add(
     if pins::has_input(&doc, name) {
         bail!("input '{name}' already exists");
     }
-    pins::add_input(
-        &mut doc, name, url, pin_type, unpack, dir_field, submodules, follows,
-    );
+    pins::add_input(&mut doc, name, url, &pins::AddInputOpts {
+        pin_type,
+        unpack,
+        dir: dir_field,
+        submodules,
+        follows,
+    });
     pins::save(&pins_path(&dir), &doc)?;
 
     let expanded = shorturl::expand(url, &pins::shorturls(&doc));
     let fetched = match pin_type {
         PinType::Fixed => fetch::fetch_fixed_pin(&expanded, unpack),
-        _ => fetch::fetch_pin(&expanded, submodules),
+        PinType::Flake | PinType::Fetch => fetch::fetch_pin(&expanded, submodules),
     };
     match fetched {
         Ok((node, rev)) => {
@@ -258,7 +261,7 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
             let old_rev = old.and_then(lock::rev_of);
             let fetched = match inp.pin_type {
                 PinType::Fixed => fetch::fetch_fixed_pin(&expanded, inp.unpack),
-                _ => fetch::fetch_pin(&expanded, inp.submodules),
+                PinType::Flake | PinType::Fetch => fetch::fetch_pin(&expanded, inp.submodules),
             };
             match fetched {
                 // for fixed pins sha256 is the identity; any mismatch is drift
@@ -267,26 +270,16 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
                         && old_rev.is_some()
                         && old_rev != Some(rev.as_str()) =>
                 {
-                    let old_short = old_rev.map(short).unwrap_or_default();
-                    let new_short = short(&rev);
-                    match accept {
-                        true => {
-                            display.set(i, PinStatus::FixedDrift {
-                                old:      old_short,
-                                new:      new_short,
-                                accepted: true,
-                            });
-                            Some(node)
-                        },
-                        false => {
-                            drift.fetch_add(1, Ordering::Relaxed);
-                            display.set(i, PinStatus::FixedDrift {
-                                old:      old_short,
-                                new:      new_short,
-                                accepted: false,
-                            });
-                            None
-                        },
+                    display.set(i, PinStatus::FixedDrift {
+                        old:      old_rev.map(short).unwrap_or_default(),
+                        new:      short(&rev),
+                        accepted: accept,
+                    });
+                    if accept {
+                        Some(node)
+                    } else {
+                        drift.fetch_add(1, Ordering::Relaxed);
+                        None
                     }
                 },
                 Ok((node, rev)) if old_rev == Some(rev.as_str()) => {
@@ -295,28 +288,20 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
                         (old.and_then(lock::hash_of), lock::hash_of(&node)),
                         (Some(prev), Some(curr)) if prev != curr
                     );
-                    match (drifted, accept) {
-                        // relock to the drifted tree, the user vouched for it
-                        (true, true) => {
-                            display.set(i, PinStatus::Drift {
-                                rev:      short(&rev),
-                                accepted: true,
-                            });
+                    if drifted {
+                        display.set(i, PinStatus::Drift {
+                            rev:      short(&rev),
+                            accepted: accept,
+                        });
+                        if accept {
                             Some(node)
-                        },
-                        // trip the alarm and keep the locked node
-                        (true, false) => {
+                        } else {
                             drift.fetch_add(1, Ordering::Relaxed);
-                            display.set(i, PinStatus::Drift {
-                                rev:      short(&rev),
-                                accepted: false,
-                            });
                             None
-                        },
-                        (false, _) => {
-                            display.set(i, PinStatus::NoChange);
-                            None
-                        },
+                        }
+                    } else {
+                        display.set(i, PinStatus::NoChange);
+                        None
                     }
                 },
                 Ok((node, rev)) => {
@@ -484,7 +469,7 @@ pub fn dedup(deep: bool) -> Result<()> {
     let mut visited = HashSet::<String>::new();
     while !frontier.is_empty() {
         let mut batch = Vec::<TackTransitive>::with_capacity(frontier.len());
-        for item in frontier.drain(..) {
+        for item in mem::take(&mut frontier) {
             if visited.insert(source_key(&item.source)) {
                 batch.push(item);
             }
@@ -501,8 +486,11 @@ pub fn dedup(deep: bool) -> Result<()> {
         for (path, res) in results {
             match res {
                 Ok(scan) => {
-                    for f in scan.findings {
-                        groups.entry(f.identity).or_default().push(f.entry);
+                    for finding in scan.findings {
+                        groups
+                            .entry(finding.identity)
+                            .or_default()
+                            .push(finding.entry);
                     }
                     if deep {
                         frontier.extend(scan.transitive);
@@ -523,14 +511,14 @@ pub fn dedup(deep: bool) -> Result<()> {
 
 fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
     let tmp = tempfile::tempdir()?;
-    let root = match &item.source {
-        SourceRef::Locked(node) => fetch::fetch_locked_tree_into(node, tmp.path())?,
-        SourceRef::Url(url) => fetch::fetch_tree_into(url, item.submodules, tmp.path())?,
+    let root = match item.source {
+        SourceRef::Locked(ref node) => fetch::fetch_locked_tree_into(node, tmp.path())?,
+        SourceRef::Url(ref url) => fetch::fetch_tree_into(url, item.submodules, tmp.path())?,
     };
-    scan_tree(&root, &item.path)
+    Ok(scan_tree(&root, &item.path))
 }
 
-fn scan_tree(root: &Path, path: &[String]) -> Result<ScanResult> {
+fn scan_tree(root: &Path, path: &[String]) -> ScanResult {
     let mut findings = Vec::<Finding>::new();
     let mut transitive = Vec::<TackTransitive>::new();
     let parent_label = format!("via {}", path.join(" > "));
@@ -585,10 +573,11 @@ fn scan_tree(root: &Path, path: &[String]) -> Result<ScanResult> {
             if tinp.pin_type != PinType::Fixed {
                 let mut next = path.to_vec();
                 next.push(tinp.name.clone());
-                let source = match tlock.get(&tinp.name) {
-                    Some(node) => SourceRef::Locked(node.clone()),
-                    None => SourceRef::Url(expanded),
-                };
+                let source = tlock
+                    .get(&tinp.name)
+                    .map_or(SourceRef::Url(expanded), |node| {
+                        SourceRef::Locked(node.clone())
+                    });
                 transitive.push(TackTransitive {
                     path: next,
                     source,
@@ -598,10 +587,10 @@ fn scan_tree(root: &Path, path: &[String]) -> Result<ScanResult> {
         }
     }
 
-    Ok(ScanResult {
+    ScanResult {
         findings,
         transitive,
-    })
+    }
 }
 
 fn find_tack_dir(root: &Path) -> Option<PathBuf> {
@@ -618,8 +607,8 @@ fn find_tack_dir(root: &Path) -> Option<PathBuf> {
 
 fn canonical_identity(expanded: &str) -> Option<String> {
     let no_query = expanded.split('?').next().unwrap_or(expanded);
-    let no_query = no_query.split('#').next().unwrap_or(no_query);
-    if let Some(body) = no_query.strip_prefix("github:") {
+    let path = no_query.split('#').next().unwrap_or(no_query);
+    if let Some(body) = path.strip_prefix("github:") {
         let mut segs = body.split('/');
         let owner = segs.next()?;
         let repo = segs.next()?;
@@ -628,11 +617,11 @@ fn canonical_identity(expanded: &str) -> Option<String> {
         }
         return Some(format!("github:{owner}/{repo}"));
     }
-    if let Some(rest) = no_query.strip_prefix("git+") {
+    if let Some(rest) = path.strip_prefix("git+") {
         return Some(format!("git+{rest}"));
     }
-    if no_query.starts_with("http://") || no_query.starts_with("https://") {
-        return Some(format!("tarball:{no_query}"));
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return Some(format!("tarball:{path}"));
     }
     None
 }
@@ -658,9 +647,9 @@ fn node_identity(locked: &Value) -> Option<String> {
 }
 
 fn source_key(source: &SourceRef) -> String {
-    match source {
-        SourceRef::Locked(node) => node_identity(node).unwrap_or_else(|| node.to_string()),
-        SourceRef::Url(url) => url.clone(),
+    match *source {
+        SourceRef::Locked(ref node) => node_identity(node).unwrap_or_else(|| node.to_string()),
+        SourceRef::Url(ref url) => url.clone(),
     }
 }
 
@@ -687,7 +676,7 @@ fn strip_disambiguator(key: &str) -> &str {
         i -= 1;
     }
     if i > 0 && i < bytes.len() && bytes[i - 1] == b'_' {
-        &key[..i - 1]
+        key.get(..i - 1).unwrap_or(key)
     } else {
         key
     }
@@ -713,7 +702,7 @@ fn print_groups(
         .map(|i| i.name.as_str())
         .collect::<HashSet<&str>>();
     let mut suggest = BTreeSet::<String>::new();
-    let mut printed = 0usize;
+    let mut printed = 0_usize;
 
     for (id, entries) in groups {
         if entries.len() < 2 {
@@ -721,26 +710,34 @@ fn print_groups(
         }
         printed += 1;
         println!("\n{id}  x{}", entries.len());
-        let pw = entries.iter().map(|e| e.parent.len()).max().unwrap_or(0);
-        let nw = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
-        for e in entries {
+        let pw = entries
+            .iter()
+            .map(|entry| entry.parent.len())
+            .max()
+            .unwrap_or(0);
+        let nw = entries
+            .iter()
+            .map(|entry| entry.name.len())
+            .max()
+            .unwrap_or(0);
+        for entry in entries {
             println!(
                 "  {:pw$}  {:nw$}  {}",
-                e.parent,
-                e.name,
-                e.rev,
+                entry.parent,
+                entry.name,
+                entry.rev,
                 pw = pw,
                 nw = nw
             );
         }
-        let has_top = entries.iter().any(|e| e.parent == "top");
+        let has_top = entries.iter().any(|entry| entry.parent == "top");
         if has_top {
-            for e in entries {
-                if e.parent != "top"
-                    && top_names.contains(e.name.as_str())
-                    && !configured.contains(&e.name)
+            for entry in entries {
+                if entry.parent != "top"
+                    && top_names.contains(entry.name.as_str())
+                    && !configured.contains(&entry.name)
                 {
-                    suggest.insert(e.name.clone());
+                    suggest.insert(entry.name.clone());
                 }
             }
         }
