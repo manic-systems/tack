@@ -20,12 +20,11 @@ use anyhow::{
     Context as _,
     Result,
 };
+use data_encoding::BASE64;
 use sha2::{
     Digest as _,
     Sha256,
 };
-
-const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// sri nar hash of `root`, matching builtins.fetchTree
 pub fn hash_path(root: &Path) -> Result<String> {
@@ -33,12 +32,12 @@ pub fn hash_path(root: &Path) -> Result<String> {
     emit_bytes(&mut hash, b"nix-archive-1");
     let mut path = root.to_path_buf();
     emit_node(&mut hash, &mut path)?;
-    Ok(format!("sha256-{}", b64(&hash.finalize())))
+    Ok(format!("sha256-{}", BASE64.encode(&hash.finalize())))
 }
 
 /// sri sha256 of raw bytes; matches what `builtin:fetchurl` checks against
 pub fn hash_bytes(bytes: &[u8]) -> String {
-    format!("sha256-{}", b64(&Sha256::digest(bytes)))
+    format!("sha256-{}", BASE64.encode(&Sha256::digest(bytes)))
 }
 
 fn emit_node(hash: &mut Sha256, path: &mut PathBuf) -> Result<()> {
@@ -114,31 +113,4 @@ fn pad(hasher: &mut Sha256, len: u64) {
     if rem != 0 {
         hasher.update(&[0_u8; 8][..8 - rem]);
     }
-}
-
-fn b64(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let triple = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let packed = (u32::from(triple[0]) << 16_u32)
-            | (u32::from(triple[1]) << 8_u32)
-            | u32::from(triple[2]);
-        out.push(B64[((packed >> 18_u32) & 63_u32) as usize] as char);
-        out.push(B64[((packed >> 12_u32) & 63_u32) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            B64[((packed >> 6_u32) & 63_u32) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            B64[(packed & 63_u32) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
