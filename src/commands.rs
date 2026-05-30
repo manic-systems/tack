@@ -80,15 +80,19 @@ fn resolver_path(dir: &Path) -> PathBuf {
     dir.join("default.nix")
 }
 
-/// rewrite the resolver if it carries the management marker AND its bytes
-/// differ from the bundled template; leave it alone otherwise.
-fn refresh_resolver(dir: &Path) {
-    let path = resolver_path(dir);
+/// warn when the resolver still carries tack's marker but has drifted from the
+/// bundled template. this is silent for forked resolvers who've stripped the
+/// marker and when uninitialised, so it never nags people who own their copy.
+pub fn warn_stale_resolver() {
+    let path = resolver_path(&dir());
     if let Ok(current) = fs::read_to_string(&path)
         && current.contains(MARKER)
         && current != RESOLVER_NIX
     {
-        let _ = write_atomic(&path, RESOLVER_NIX);
+        eprintln!(
+            "tack: resolver at {} is out of date. run `tack init --resolver` to update",
+            path.display()
+        );
     }
 }
 
@@ -130,9 +134,14 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn init(force: bool) -> Result<()> {
+pub fn init(force: bool, resolver_only: bool) -> Result<()> {
     let dir = dir();
     let (pt, lp, rp) = (pins_path(&dir), lock_path(&dir), resolver_path(&dir));
+
+    // `--resolver` only bumps the resolver to the bundled template
+    if resolver_only {
+        return write_resolver(&dir, &rp, force);
+    }
 
     if !force {
         let clash = [&pt, &rp]
@@ -154,6 +163,27 @@ pub fn init(force: bool) -> Result<()> {
     println!("  pins.toml       edit shorturls and inputs here");
     println!("  pins.lock.json  written by `tack update`");
     println!("  default.nix     `import ./.tack` from your flake/config");
+    Ok(())
+}
+
+/// (re)write just the resolver to the bundled template. refuses to clobber a
+/// forked resolver (marker stripped) unless `force`.
+fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
+    if let Ok(current) = fs::read_to_string(path) {
+        if current == RESOLVER_NIX {
+            println!("resolver already up to date at {}", path.display());
+            return Ok(());
+        }
+        if !current.contains(MARKER) && !force {
+            bail!(
+                "{} has no tack marker, refusing to overwrite (use --force)",
+                path.display()
+            );
+        }
+    }
+    fs::create_dir_all(dir)?;
+    write_atomic(path, RESOLVER_NIX)?;
+    println!("updated resolver at {}", path.display());
     Ok(())
 }
 
@@ -200,7 +230,6 @@ pub fn add(
             println!("  fix the url and run `tack update {name}`");
         },
     }
-    refresh_resolver(&dir);
     Ok(())
 }
 
@@ -216,7 +245,6 @@ pub fn rm(name: &str) -> Result<()> {
     lk.remove(name);
     lock::save(&lock_path(&dir), &lk)?;
     println!("removed {name}");
-    refresh_resolver(&dir);
     Ok(())
 }
 
@@ -238,7 +266,6 @@ pub fn alias(name: &str, template: Option<&str>, remove: bool) -> Result<()> {
         pins::save(&pins_path(&dir), &doc)?;
         println!("alias {name} = {tpl}");
     }
-    refresh_resolver(&dir);
     Ok(())
 }
 
@@ -339,7 +366,6 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
         lock::save(&lock_path(&dir), &lk)?;
     }
     display.finish();
-    refresh_resolver(&dir);
 
     if drift.into_inner() > 0 {
         bail!(
@@ -1367,7 +1393,7 @@ pub fn help() {
 
 usage:
   tack [-h|--help|help]
-  tack init [--force]
+  tack init [--force] [--resolver]
   tack update [names...] [--accept]
   tack look [names...] [--verbose|-v]
   tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
@@ -1380,6 +1406,8 @@ pin types: flake (default), fetch (source tree only), fixed (FOD)
 
 tack lives in ./.tack/ by default
 use `import ./.tack` to use inputs
+
+run `tack init --resolver` to update a drifted resolver
 
 "
     );
