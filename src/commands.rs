@@ -5,6 +5,7 @@ use std::{
     collections::{
         BTreeMap,
         BTreeSet,
+        HashMap,
         HashSet,
     },
     env,
@@ -33,6 +34,7 @@ use serde_json::Value;
 
 use crate::{
     fetch,
+    fetch::CompareStatus,
     lock,
     pins,
     pins::{
@@ -536,9 +538,14 @@ fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Inpu
 
 struct Entry {
     /// lineage from top-pin down to the parent tree being scanned
-    path: Vec<String>,
-    name: String,
-    rev:  String,
+    path:     Vec<String>,
+    name:     String,
+    /// abbreviated rev
+    rev:      String,
+    /// untruncated rev
+    full_rev: String,
+    /// `lastModified` of the locked node
+    lm:       Option<u64>,
 }
 
 struct Finding {
@@ -562,35 +569,94 @@ enum SourceRef {
     Url(String),
 }
 
-/// rev the consumer's resolver would actually use for this entry once
-/// follows apply. global `[all_follow]` wins, per-pin `follows` fills in at
-/// depth-1
-fn effective_rev(
+/// build a name → value map over declared inputs plus undeclared lock entries,
+/// pulling each value with `project`. transitive-only names are left in the
+/// lock
+fn top_map<T>(
+    inputs: &[pins::Input],
+    lock: &lock::Lock,
+    project: impl Fn(&Value) -> Option<T>,
+) -> BTreeMap<String, T> {
+    let declared = inputs
+        .iter()
+        .map(|inp| inp.name.as_str())
+        .collect::<HashSet<&str>>();
+    inputs
+        .iter()
+        .filter_map(|inp| {
+            lock.get(&inp.name)
+                .and_then(&project)
+                .map(|val| (inp.name.clone(), val))
+        })
+        .chain(lock.iter().filter_map(|(key, node)| {
+            (!declared.contains(key.as_str()))
+                .then(|| project(node).map(|val| (key.clone(), val)))
+                .flatten()
+        }))
+        .collect()
+}
+
+/// the top-level input `name` follows, when it resolves to a known rev. returns
+/// [`None`] to keep the entry's recorded values.
+///
+/// note that `[all_follow]` applies at any depth, though a parent flake's own
+/// `follows` only one level down
+fn follow_target(
     path: &[String],
     name: &str,
-    recorded: &str,
     top_input: Option<&pins::Input>,
     all_follow: &BTreeMap<String, String>,
     top_revs: &BTreeMap<String, String>,
-) -> String {
+) -> Option<String> {
     if path.is_empty() {
-        return recorded.to_owned();
+        return None;
     }
     let excluded = top_input.is_some_and(|inp| inp.excludes.contains(name));
     if !excluded
         && let Some(target) = all_follow.get(name)
-        && let Some(rev) = top_revs.get(target)
+        && top_revs.contains_key(target)
     {
-        return rev.clone();
+        return Some(target.clone());
     }
     if path.len() == 1
         && let Some(inp) = top_input
         && let Some(target) = inp.follows.get(name)
-        && let Some(rev) = top_revs.get(target)
+        && top_revs.contains_key(target)
     {
-        return rev.clone();
+        return Some(target.clone());
     }
-    recorded.to_owned()
+    None
+}
+
+/// align each followed entry onto its target, which provides rev, full rev and
+/// `lastModified`.
+fn apply_follows(
+    groups: &mut BTreeMap<String, Vec<Entry>>,
+    by_name: &BTreeMap<&str, &pins::Input>,
+    all_follow: &BTreeMap<String, String>,
+    top_revs: &BTreeMap<String, String>,
+    top_full_revs: &BTreeMap<String, String>,
+    top_lms: &BTreeMap<String, u64>,
+) {
+    for entry in groups.values_mut().flatten() {
+        let top = entry
+            .path
+            .first()
+            .and_then(|name| by_name.get(name.as_str()).copied());
+        let Some(target) = follow_target(&entry.path, &entry.name, top, all_follow, top_revs)
+        else {
+            continue;
+        };
+        // `follow_target` only returns targets present in `top_revs`, and
+        // `top_full_revs` shares its key set
+        if let Some(rev) = top_revs.get(&target) {
+            entry.rev.clone_from(rev);
+        }
+        if let Some(full_rev) = top_full_revs.get(&target) {
+            entry.full_rev.clone_from(full_rev);
+        }
+        entry.lm = top_lms.get(&target).copied();
+    }
 }
 
 pub fn dedup() -> Result<()> {
@@ -605,23 +671,9 @@ pub fn dedup() -> Result<()> {
         .map(|inp| (inp.name.as_str(), inp))
         .collect::<BTreeMap<&str, &pins::Input>>();
 
-    let input_set = inputs
-        .iter()
-        .map(|inp| inp.name.as_str())
-        .collect::<HashSet<&str>>();
-    let top_revs = inputs
-        .iter()
-        .filter_map(|inp| {
-            lock.get(&inp.name)
-                .and_then(rev_for_display)
-                .map(|rev| (inp.name.clone(), rev))
-        })
-        .chain(lock.iter().filter_map(|(key, node)| {
-            (!input_set.contains(key.as_str()))
-                .then(|| rev_for_display(node).map(|rev| (key.clone(), rev)))
-                .flatten()
-        }))
-        .collect::<BTreeMap<String, String>>();
+    let top_revs = top_map(&inputs, &lock, rev_for_display);
+    let top_full_revs = top_map(&inputs, &lock, rev_full);
+    let top_lms = top_map(&inputs, &lock, last_modified);
 
     let mut groups = BTreeMap::<String, Vec<Entry>>::new();
 
@@ -629,10 +681,14 @@ pub fn dedup() -> Result<()> {
         let expanded = shorturl::expand(&inp.url, &shorturls);
         if let Some(id) = canonical_identity(&expanded) {
             let rev = top_revs.get(&inp.name).cloned().unwrap_or_default();
+            let full_rev = top_full_revs.get(&inp.name).cloned().unwrap_or_default();
+            let lm = lock.get(&inp.name).and_then(last_modified);
             groups.entry(id).or_default().push(Entry {
                 path: vec![],
                 name: inp.name.clone(),
                 rev,
+                full_rev,
+                lm,
             });
         }
     }
@@ -680,24 +736,17 @@ pub fn dedup() -> Result<()> {
         }
     }
 
-    for entries in groups.values_mut() {
-        for entry in entries.iter_mut() {
-            let top = entry
-                .path
-                .first()
-                .and_then(|name| by_name.get(name.as_str()).copied());
-            entry.rev = effective_rev(
-                &entry.path,
-                &entry.name,
-                &entry.rev,
-                top,
-                &all_follow,
-                &top_revs,
-            );
-        }
-    }
+    apply_follows(
+        &mut groups,
+        &by_name,
+        &all_follow,
+        &top_revs,
+        &top_full_revs,
+        &top_lms,
+    );
 
-    print_groups(&groups, &all_follow);
+    let compares = ahead_behind(&groups);
+    print_groups(&groups, &all_follow, &compares);
     Ok(())
 }
 
@@ -856,9 +905,11 @@ fn scan_files(
                     findings.push(Finding {
                         identity: id,
                         entry:    Entry {
-                            path: path.to_vec(),
-                            name: strip_disambiguator(key).to_owned(),
-                            rev:  rev_for_display(locked).unwrap_or_default(),
+                            path:     path.to_vec(),
+                            name:     strip_disambiguator(key).to_owned(),
+                            rev:      rev_for_display(locked).unwrap_or_default(),
+                            full_rev: rev_full(locked).unwrap_or_default(),
+                            lm:       last_modified(locked),
                         },
                     });
                 }
@@ -880,12 +931,14 @@ fn scan_files(
                 findings.push(Finding {
                     identity: id,
                     entry:    Entry {
-                        path: path.to_vec(),
-                        name: tinp.name.clone(),
-                        rev:  tlock
+                        path:     path.to_vec(),
+                        name:     tinp.name.clone(),
+                        rev:      tlock
                             .get(&tinp.name)
                             .and_then(rev_for_display)
                             .unwrap_or_default(),
+                        full_rev: tlock.get(&tinp.name).and_then(rev_full).unwrap_or_default(),
+                        lm:       tlock.get(&tinp.name).and_then(last_modified),
                     },
                 });
             }
@@ -961,15 +1014,21 @@ fn source_key(source: &SourceRef) -> String {
     }
 }
 
+fn last_modified(node: &Value) -> Option<u64> {
+    node.get("lastModified").and_then(Value::as_u64)
+}
+
 fn rev_for_display(node: &Value) -> Option<String> {
-    if let Some(rev) = node.get("rev").and_then(Value::as_str) {
-        return Some(short(rev));
-    }
-    if let Some(url) = node.get("url").and_then(Value::as_str) {
-        return Some(short(url));
-    }
-    if let Some(sha) = node.get("sha256").and_then(Value::as_str) {
-        return Some(short(sha));
+    rev_full(node).as_deref().map(short)
+}
+
+/// the locked node's identifying string, untruncated: `rev`, else `url`, else
+/// `sha256`. [`rev_for_display`] is just this passed through [`short`].
+fn rev_full(node: &Value) -> Option<String> {
+    for key in ["rev", "url", "sha256"] {
+        if let Some(val) = node.get(key).and_then(Value::as_str) {
+            return Some(val.to_owned());
+        }
     }
     None
 }
@@ -998,7 +1057,153 @@ fn source_label(path: &[String]) -> String {
     }
 }
 
-fn print_groups(groups: &BTreeMap<String, Vec<Entry>>, all_follow: &BTreeMap<String, String>) {
+/// the entry a group is measured against. returns the version pinned at top,
+/// else the newest transitive version by `lastModified`, else the lowest-named
+/// entry for a deterministic fallback
+fn comparator(entries: &[Entry]) -> Option<&Entry> {
+    entries
+        .iter()
+        .filter(|entry| entry.path.is_empty())
+        .min_by_key(|entry| entry.name.as_str())
+        .or_else(|| {
+            entries
+                .iter()
+                .filter(|entry| entry.lm.is_some())
+                .max_by_key(|entry| entry.lm)
+        })
+        .or_else(|| entries.iter().min_by_key(|entry| entry.name.as_str()))
+}
+
+/// a group is worth printing only when its revs disagree
+fn group_diverges(entries: &[Entry]) -> bool {
+    let mut revs = entries.iter().map(|entry| entry.rev.as_str());
+    revs.next()
+        .is_some_and(|first| revs.any(|rev| rev != first))
+}
+
+/// ask github for the direction of every divergent rev against its comparator,
+/// in parallel. keyed by `(group id, abbreviated rev)`. misses are reported
+/// and fall back to commit-date ordering
+fn ahead_behind(groups: &BTreeMap<String, Vec<Entry>>) -> HashMap<(String, String), CompareStatus> {
+    let jobs = groups
+        .iter()
+        .filter(|group| group_diverges(group.1))
+        .filter_map(|(id, entries)| {
+            let base = comparator(entries)?;
+            if base.full_rev.is_empty() {
+                return None; // nothing concrete to compare against
+            }
+            let (owner, repo) = id.strip_prefix("github:")?.split_once('/')?;
+            let mut seen = HashSet::new();
+            let heads = entries
+                .iter()
+                .filter(|entry| {
+                    entry.rev != base.rev
+                        && !entry.full_rev.is_empty()
+                        && seen.insert(entry.rev.as_str())
+                })
+                .map(|entry| {
+                    (
+                        id.clone(),
+                        owner.to_owned(),
+                        repo.to_owned(),
+                        base.full_rev.clone(),
+                        entry.full_rev.clone(),
+                        entry.rev.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            Some(heads)
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+
+    let attempted = jobs.len();
+    let compares = jobs
+        .into_par_iter()
+        .filter_map(|(id, owner, repo, base, head, head_short)| {
+            fetch::compare_status(&owner, &repo, &base, &head)
+                .ok()
+                .flatten()
+                .map(|status| ((id, head_short), status))
+        })
+        .collect::<HashMap<(String, String), CompareStatus>>();
+
+    let dropped = attempted - compares.len();
+    if dropped > 0 {
+        eprintln!(
+            "tack: {dropped} branch comparison(s) unavailable (rate limit or network); falling \
+             back to commit-date order"
+        );
+    }
+    compares
+}
+
+/// per-rev status glyph for a printable group, measured against its comparator.
+/// returns github ahead/behind when we have it, commit-date ordering otherwise,
+/// and the widest glyph, for padding
+fn group_marks<'a>(
+    id: &str,
+    entries: &'a [Entry],
+    revs: impl Iterator<Item = &'a str>,
+    compares: &HashMap<(String, String), CompareStatus>,
+) -> (BTreeMap<&'a str, (String, usize)>, usize) {
+    let comp_entry = comparator(entries);
+    let mut lm_of = BTreeMap::<&str, u64>::new();
+    for entry in entries {
+        let Some(lm) = entry.lm else {
+            continue;
+        };
+        let slot = lm_of.entry(entry.rev.as_str()).or_insert(lm);
+        *slot = (*slot).max(lm);
+    }
+    let paint = |code: i32, body: &str| format!("\x1b[{code}m{body}\x1b[0m");
+    let render = |rev: &str| -> (String, usize) {
+        let Some(comp) = comp_entry else {
+            return (" ".to_owned(), 1);
+        };
+        if rev == comp.rev {
+            return (paint(36_i32, "="), 1); // = comparator
+        }
+        if let Some(status) = compares.get(&(id.to_owned(), rev.to_owned())) {
+            // real direction from github's merge-base comparison
+            match *status {
+                CompareStatus::Ahead => return (paint(32_i32, "\u{2191}"), 1), // ↑ newer
+                CompareStatus::Behind => return (paint(33_i32, "\u{2193}"), 1), // ↓ older
+                // diverged: green ↑ beside yellow ↓
+                CompareStatus::Diverged => {
+                    let glyph =
+                        format!("{}{}", paint(32_i32, "\u{2191}"), paint(33_i32, "\u{2193}"));
+                    return (glyph, 2);
+                },
+                CompareStatus::Identical => return (paint(36_i32, "="), 1),
+            }
+        }
+        // no git answer (non-github, or the call failed): commit-date order
+        let Some(comparator_lm) = comp.lm else {
+            return (" ".to_owned(), 1);
+        };
+        let Some(lm) = lm_of.get(rev).copied() else {
+            return (" ".to_owned(), 1);
+        };
+        match lm.cmp(&comparator_lm) {
+            cmp::Ordering::Equal => (" ".to_owned(), 1),
+            cmp::Ordering::Greater => (paint(32_i32, "\u{2191}"), 1), // ↑ newer
+            cmp::Ordering::Less => (paint(33_i32, "\u{2193}"), 1),    // ↓ older
+        }
+    };
+    let marks = revs
+        .map(|rev| (rev, render(rev)))
+        .collect::<BTreeMap<&'a str, (String, usize)>>();
+    let mw = marks.values().map(|&(_, vis)| vis).max().unwrap_or(1);
+    (marks, mw)
+}
+
+fn print_groups(
+    groups: &BTreeMap<String, Vec<Entry>>,
+    all_follow: &BTreeMap<String, String>,
+    compares: &HashMap<(String, String), CompareStatus>,
+) {
     const MAX_SOURCES: usize = 5;
 
     // alias -> target, paste-ready under [all_follow]
@@ -1007,14 +1212,8 @@ fn print_groups(groups: &BTreeMap<String, Vec<Entry>>, all_follow: &BTreeMap<Str
     let mut printed = 0_usize;
 
     for (id, entries) in groups {
-        if entries.len() < 2 {
-            continue;
-        }
-        // already aligned by follows: skip
-        let mut revs = entries.iter().map(|entry| entry.rev.as_str());
-        if let Some(first) = revs.next()
-            && revs.all(|rev| rev == first)
-        {
+        // single source, or already aligned by follows: nothing to show
+        if !group_diverges(entries) {
             continue;
         }
 
@@ -1039,17 +1238,26 @@ fn print_groups(groups: &BTreeMap<String, Vec<Entry>>, all_follow: &BTreeMap<Str
             .max()
             .unwrap_or(0);
 
+        let (marks, mw) = group_marks(id, entries, by_rev.keys().copied(), compares);
+
         for (rev, names) in &by_rev {
+            let mark = &marks[rev];
+            let mark_on = format!("{}{}", mark.0, " ".repeat(mw - mark.1));
+            let blank = " ".repeat(mw);
             for (name, sources) in names {
                 let shown = sources.len().min(MAX_SOURCES);
                 for (idx, source) in sources.iter().take(shown).enumerate() {
                     let rev_cell = if idx == 0 { *rev } else { "" };
+                    let mark_cell = if idx == 0 { &mark_on } else { &blank };
                     let name_cell = if idx == 0 { *name } else { "" };
-                    println!("  {rev_cell:rw$}  {name_cell:nw$}  {source}");
+                    println!("  {rev_cell:rw$} {mark_cell} {name_cell:nw$}  {source}");
                 }
                 if sources.len() > shown {
                     let extra = sources.len() - shown;
-                    println!("  {empty:rw$}  {empty:nw$}  ...{extra} more", empty = "");
+                    println!(
+                        "  {empty:rw$} {blank} {empty:nw$}  ...{extra} more",
+                        empty = ""
+                    );
                 }
             }
         }
@@ -1179,13 +1387,19 @@ use `import ./.tack` to use inputs
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{
-        BTreeMap,
-        BTreeSet,
+    use std::{
+        collections::{
+            BTreeMap,
+            BTreeSet,
+        },
+        iter,
     };
 
     use super::{
+        Entry,
+        apply_follows,
         collapse_follow,
+        comparator,
         pick_name,
     };
 
@@ -1198,6 +1412,16 @@ mod tests {
 
     fn set(items: &[&str]) -> BTreeSet<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    fn entry(path: &[&str], name: &str, rev: &str, lm: Option<u64>) -> Entry {
+        Entry {
+            path: path.iter().map(|item| (*item).to_owned()).collect(),
+            name: name.to_owned(),
+            rev: rev.to_owned(),
+            full_rev: rev.to_owned(),
+            lm,
+        }
     }
 
     #[test]
@@ -1243,5 +1467,70 @@ mod tests {
     fn pick_name_falls_back_to_shortest_alias_for_non_github() {
         let aliases = set(&["my-pin", "the-tarball"]);
         assert_eq!(pick_name("tarball:https://x/y", &aliases), "my-pin");
+    }
+
+    #[test]
+    fn comparator_prefers_top_level_even_without_last_modified() {
+        let entries = vec![
+            entry(&["parent"], "aaa", "newer", Some(20)),
+            entry(&[], "top", "top-rev", None),
+        ];
+        assert_eq!(
+            comparator(&entries).map(|entry| (entry.rev.as_str(), entry.lm)),
+            Some(("top-rev", None))
+        );
+    }
+
+    #[test]
+    fn comparator_uses_newest_known_transitive_then_deterministic_fallback() {
+        let entries_with_known_time = vec![
+            entry(&["parent"], "aaa", "unknown", None),
+            entry(&["parent"], "bbb", "older", Some(10)),
+            entry(&["parent"], "ccc", "newer", Some(20)),
+        ];
+        assert_eq!(
+            comparator(&entries_with_known_time).map(|entry| (entry.rev.as_str(), entry.lm)),
+            Some(("newer", Some(20)))
+        );
+
+        let entries_without_times = vec![
+            entry(&["parent"], "bbb", "unknown-b", None),
+            entry(&["parent"], "aaa", "unknown-a", None),
+        ];
+        assert_eq!(
+            comparator(&entries_without_times).map(|entry| (entry.rev.as_str(), entry.lm)),
+            Some(("unknown-a", None))
+        );
+    }
+
+    #[test]
+    fn apply_follows_syncs_rev_full_rev_and_lm_to_target() {
+        let mut groups = BTreeMap::new();
+        groups.insert("github:o/r".to_owned(), vec![
+            entry(&[], "nixpkgs", "newrev", Some(100)),
+            // a transitive input that follows nixpkgs, carrying its own stale rev
+            // and timestamp from before the follow was applied
+            entry(&["dep"], "nixpkgs-lib", "oldrev", Some(50)),
+        ]);
+        let by_name = BTreeMap::new(); // top resolves via [all_follow], not a parent's follows
+        let all_follow = map(&[("nixpkgs-lib", "nixpkgs")]);
+        let top_revs = map(&[("nixpkgs", "newrev")]);
+        let top_full_revs = map(&[("nixpkgs", "newrev-full")]);
+        let top_lms = iter::once(("nixpkgs".to_owned(), 100_u64)).collect();
+
+        apply_follows(
+            &mut groups,
+            &by_name,
+            &all_follow,
+            &top_revs,
+            &top_full_revs,
+            &top_lms,
+        );
+
+        let followed = &groups["github:o/r"][1];
+        assert_eq!(followed.rev, "newrev");
+        assert_eq!(followed.full_rev, "newrev-full");
+        // lm should track the target rather than keeping the stale 50
+        assert_eq!(followed.lm, Some(100));
     }
 }

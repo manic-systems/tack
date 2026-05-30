@@ -9,6 +9,7 @@ use std::{
         Path,
         PathBuf,
     },
+    str::FromStr,
     sync::OnceLock,
 };
 
@@ -472,6 +473,51 @@ fn gh_get(url: &str) -> Result<Value> {
         .body_mut()
         .read_to_string()?;
     Ok(serde_json::from_str(&body)?)
+}
+
+/// direction of `head` relative to `base`, as reported by github's compare
+/// endpoint
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompareStatus {
+    /// head has commits base lacks (head is newer)
+    Ahead,
+    /// head is missing commits base has (head is older)
+    Behind,
+    /// each side has unique commits
+    Diverged,
+    /// same commit
+    Identical,
+}
+
+impl FromStr for CompareStatus {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "ahead" => Self::Ahead,
+            "behind" => Self::Behind,
+            "diverged" => Self::Diverged,
+            "identical" => Self::Identical,
+            _ => return Err(()),
+        })
+    }
+}
+
+/// compare `head` against `base` via github's compare endpoint. returns
+/// [`None`] when the response carries no recognised `status`, which callers
+/// treat as "no answer" and fall back to commit-date ordering
+pub fn compare_status(
+    owner: &str,
+    repo: &str,
+    base: &str,
+    head: &str,
+) -> Result<Option<CompareStatus>> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}");
+    let parsed = gh_get(&url).with_context(|| format!("github compare {owner}/{repo}"))?;
+    Ok(parsed
+        .get("status")
+        .and_then(Value::as_str)
+        .and_then(|status| status.parse().ok()))
 }
 
 fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
