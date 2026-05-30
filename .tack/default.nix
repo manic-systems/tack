@@ -2,43 +2,59 @@
 # tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
 
 let
-  pins = builtins.fromTOML (builtins.readFile ./pins.toml);
-  lock = builtins.fromJSON (builtins.readFile ./pins.lock.json);
+  inherit (builtins)
+    attrNames
+    attrValues
+    filter
+    foldl'
+    fromJSON
+    head
+    isList
+    isString
+    listToAttrs
+    mapAttrs
+    pathExists
+    readFile
+    tail
+    ;
+
+  pins = fromTOML (readFile ./pins.toml);
+  lock = fromJSON (readFile ./pins.lock.json);
   all_follow_raw = pins.all_follow or { };
 
   # flatten `target = [aliases]` rows alongside `alias = "target"` rows
-  all_follow = builtins.foldl' (
+  all_follow = foldl' (
     acc: key:
     let
       val = all_follow_raw.${key};
     in
-    if builtins.isList val then
+    if isList val then
       acc
       // {
         ${key} = key;
       }
-      // builtins.listToAttrs (
+      // listToAttrs (
         map (a: {
           name = a;
           value = key;
         }) val
       )
-    else if builtins.isString val then
+    else if isString val then
       acc // { ${key} = val; }
     else
       acc
-  ) { } (builtins.attrNames all_follow_raw);
+  ) { } (attrNames all_follow_raw);
 
-  fetchPin = name: builtins.fetchTree lock.${name};
+  fetchPin = name: fetchTree lock.${name};
 
   fetchFixed =
     name: entry:
     let
       raw = derivation {
         inherit name;
+        inherit (entry) url;
         builder = "builtin:fetchurl";
         system = "builtin";
-        url = entry.url;
         outputHash = entry.sha256;
         outputHashAlgo = "sha256";
         outputHashMode = "flat";
@@ -53,38 +69,36 @@ let
     in
     if (entry.unpack or "file") == "tarball" then unpacked.outPath + "/" + name else raw.outPath;
 
-  resolveSpec = upLock: spec: if builtins.isList spec then walkPath upLock upLock.root spec else spec;
+  resolveSpec = upLock: spec: if isList spec then walkPath upLock upLock.root spec else spec;
 
   walkPath =
     upLock: nodeName: path:
     if path == [ ] then
       nodeName
     else
-      walkPath upLock (resolveSpec upLock upLock.nodes.${nodeName}.inputs.${builtins.head path}) (
-        builtins.tail path
-      );
+      walkPath upLock (resolveSpec upLock upLock.nodes.${nodeName}.inputs.${head path}) (tail path);
 
   mkCallerInputs =
     upLock: nodeName: rawInputs: levelFollows: deepFollows:
     let
-      overrides = builtins.mapAttrs (_: target: self.${target}) levelFollows;
+      overrides = mapAttrs (_: target: self.${target}) levelFollows;
     in
-    builtins.mapAttrs (
-      n: _decl:
-      if overrides ? ${n} then
-        overrides.${n}
-      else if upLock != null then
-        let
-          ref =
-            (upLock.nodes.${nodeName}.inputs or { }).${n}
-              or (throw "tack/inputs.nix: input '${n}' declared but not in flake.lock node '${nodeName}'");
-          childName = resolveSpec upLock ref;
-          childNode = upLock.nodes.${childName};
-          childSrc = builtins.fetchTree childNode.locked;
-        in
-        if childNode.flake or true then evalTransitive upLock childName childSrc deepFollows else childSrc
-      else
-        throw "tack/inputs.nix: no flake.lock; cannot resolve input '${n}'"
+    mapAttrs (
+      n: _:
+      overrides.${n} or (
+        if upLock != null then
+          let
+            ref =
+              (upLock.nodes.${nodeName}.inputs or { }).${n}
+                or (throw "tack/inputs.nix: input '${n}' declared but not in flake.lock node '${nodeName}'");
+            childName = resolveSpec upLock ref;
+            childNode = upLock.nodes.${childName};
+            childSrc = fetchTree childNode.locked;
+          in
+          if childNode.flake or true then evalTransitive upLock childName childSrc deepFollows else childSrc
+        else
+          throw "tack/inputs.nix: no flake.lock; cannot resolve input '${n}'"
+      )
     ) rawInputs;
 
   evalTransitive =
@@ -97,7 +111,7 @@ let
         outputs
         // sourceInfo
         // {
-          outPath = sourceInfo.outPath;
+          inherit (sourceInfo) outPath;
           inputs = callerInputs;
           inherit outputs;
           inherit sourceInfo;
@@ -112,12 +126,11 @@ let
       flakeDir = sourceInfo.outPath + (if pin ? dir then "/" + pin.dir else "");
       raw = import (flakeDir + "/flake.nix");
       upLockPath = flakeDir + "/flake.lock";
-      upLock =
-        if builtins.pathExists upLockPath then builtins.fromJSON (builtins.readFile upLockPath) else null;
+      upLock = if pathExists upLockPath then fromJSON (readFile upLockPath) else null;
 
       exclude_follow = pin.exclude_follow or [ ];
       explicit_follows = pin.follows or { };
-      all_follow_rules = builtins.removeAttrs all_follow exclude_follow;
+      all_follow_rules = removeAttrs all_follow exclude_follow;
       combined_follows = explicit_follows // all_follow_rules;
 
       rootNode = if upLock != null then upLock.root else null;
@@ -140,13 +153,7 @@ let
   loadPin =
     name: pin:
     let
-      pinType =
-        if pin ? type then
-          pin.type
-        else if pin.flake or true then
-          "flake"
-        else
-          "fetch";
+      pinType = pin.type or (if pin.flake or true then "flake" else "fetch");
       subdir = if pin ? dir then "/" + pin.dir else "";
     in
     if pinType == "fixed" then
@@ -162,26 +169,23 @@ let
   # undeclared lock entries are auto-dedup synthetics only when they are
   # referenced as [all_follow] targets. stale locks left after hand-editing
   # pins.toml are ignored, and can be cleaned with `tack rm <name>`.
-  autoTargets = builtins.listToAttrs (
+  autoTargets = listToAttrs (
     map (target: {
       name = target;
       value = true;
-    }) (builtins.attrValues all_follow)
+    }) (attrValues all_follow)
   );
-  autoNames = builtins.filter (n: !(declared ? ${n}) && autoTargets ? ${n}) (builtins.attrNames lock);
+  autoNames = filter (n: !(declared ? ${n}) && autoTargets ? ${n}) (attrNames lock);
   autoPin =
     name:
     let
       sourceInfo = fetchPin name;
     in
-    if builtins.pathExists (sourceInfo.outPath + "/flake.nix") then
-      evalTopFlake sourceInfo { }
-    else
-      sourceInfo;
+    if pathExists (sourceInfo.outPath + "/flake.nix") then evalTopFlake sourceInfo { } else sourceInfo;
 
   self =
-    (builtins.mapAttrs loadPin declared)
-    // builtins.listToAttrs (
+    (mapAttrs loadPin declared)
+    // listToAttrs (
       map (name: {
         inherit name;
         value = autoPin name;
