@@ -159,11 +159,16 @@ let
 
   declared = pins.inputs or { };
 
-  # any lock entry without a declared [inputs] mate is an auto-dedup synthetic
-  # written by `tack update` for [all_follow] targets that aren't pinned
-  # top-level. fall back to the bare source tree if the fetched tree has no
-  # flake.nix (so `flake = false` consumers get a usable sourceInfo)
-  autoNames = builtins.filter (n: !(declared ? ${n})) (builtins.attrNames lock);
+  # undeclared lock entries are auto-dedup synthetics only when they are
+  # referenced as [all_follow] targets. stale locks left after hand-editing
+  # pins.toml are ignored, and can be cleaned with `tack rm <name>`.
+  autoTargets = builtins.listToAttrs (
+    map (target: {
+      name = target;
+      value = true;
+    }) (builtins.attrValues all_follow)
+  );
+  autoNames = builtins.filter (n: !(declared ? ${n}) && autoTargets ? ${n}) (builtins.attrNames lock);
   autoPin =
     name:
     let

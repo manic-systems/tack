@@ -235,17 +235,33 @@ pub fn add(
 
 pub fn rm(name: &str) -> Result<()> {
     let dir = dir();
-    let mut doc = pins::load(&pins_path(&dir))?;
-    if !pins::remove_input(&mut doc, name) {
+    let (removed_pin, removed_lock) = rm_in_dir(&dir, name)?;
+    if removed_pin {
+        println!("removed {name}");
+    } else if removed_lock {
+        println!("removed stale lock entry {name}");
+    }
+    Ok(())
+}
+
+fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
+    let mut doc = pins::load(&pins_path(dir))?;
+    let removed_pin = pins::remove_input(&mut doc, name);
+
+    let mut lk = lock::load(&lock_path(dir))?;
+    let removed_lock = lk.remove(name).is_some();
+
+    if !removed_pin && !removed_lock {
         bail!("no input '{name}'");
     }
-    pins::save(&pins_path(&dir), &doc)?;
 
-    let mut lk = lock::load(&lock_path(&dir))?;
-    lk.remove(name);
-    lock::save(&lock_path(&dir), &lk)?;
-    println!("removed {name}");
-    Ok(())
+    if removed_pin {
+        pins::save(&pins_path(dir), &doc)?;
+    }
+    if removed_lock {
+        lock::save(&lock_path(dir), &lk)?;
+    }
+    Ok((removed_pin, removed_lock))
 }
 
 pub fn alias(name: &str, template: Option<&str>, remove: bool) -> Result<()> {
@@ -1420,6 +1436,7 @@ mod tests {
             BTreeMap,
             BTreeSet,
         },
+        fs,
         iter,
     };
 
@@ -1429,6 +1446,7 @@ mod tests {
         collapse_follow,
         comparator,
         pick_name,
+        rm_in_dir,
     };
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -1560,5 +1578,36 @@ mod tests {
         assert_eq!(followed.full_rev, "newrev-full");
         // lm should track the target rather than keeping the stale 50
         assert_eq!(followed.lm, Some(100));
+    }
+
+    #[test]
+    fn rm_removes_orphaned_lock_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("pins.toml"), "[inputs]\n").unwrap();
+        fs::write(
+            dir.path().join("pins.lock.json"),
+            r#"{"gone":{"type":"github","owner":"o","repo":"r","rev":"bad","narHash":"sha256-x"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(rm_in_dir(dir.path(), "gone").unwrap(), (false, true));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("pins.toml")).unwrap(),
+            "[inputs]\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("pins.lock.json")).unwrap(),
+            "{}\n"
+        );
+    }
+
+    #[test]
+    fn rm_errors_when_pin_and_lock_are_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("pins.toml"), "[inputs]\n").unwrap();
+        fs::write(dir.path().join("pins.lock.json"), "{}\n").unwrap();
+
+        let err = rm_in_dir(dir.path(), "missing").unwrap_err().to_string();
+        assert_eq!(err, "no input 'missing'");
     }
 }
