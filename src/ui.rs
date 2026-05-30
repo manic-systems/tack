@@ -189,8 +189,8 @@ fn draw(names: &[String], states: &[PinStatus], frame: usize, drawn: bool) {
 fn glyph(st: &PinStatus, frame: usize) -> String {
     let (color, ch) = match *st {
         PinStatus::Fetching => (34_i32, FRAMES[frame % FRAMES.len()]),
-        PinStatus::NoChange => (33_i32, '-'),
-        PinStatus::Updated { .. } => (32_i32, '\u{2713}'), // ✓
+        PinStatus::NoChange => (32_i32, '\u{2713}'), // ✓
+        PinStatus::Updated { .. } => (33_i32, '*'),
         PinStatus::Drift { accepted: true, .. } | PinStatus::FixedDrift { accepted: true, .. } => {
             (33_i32, '~')
         },
