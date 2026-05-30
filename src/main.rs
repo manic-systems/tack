@@ -21,8 +21,14 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
-    match cli::parse()? {
-        Command::Init { force } => commands::init(force),
+    let cmd = cli::parse()?;
+    // every command except the resolver's own fixer (init) and help nags when
+    // the resolver has drifted. do it after a successful command so it trails the
+    // output and never piles onto an unrelated failure
+    let check_resolver = !matches!(cmd, Command::Init { .. } | Command::Help);
+
+    let res = match cmd {
+        Command::Init { force, resolver } => commands::init(force, resolver),
         Command::Update { names, accept } => commands::update(&names, accept),
         Command::Look { names, verbose } => commands::look(&names, verbose),
         Command::Add {
@@ -51,5 +57,10 @@ fn run() -> anyhow::Result<()> {
             commands::help();
             Ok(())
         },
+    };
+
+    if check_resolver && res.is_ok() {
+        commands::warn_stale_resolver();
     }
+    res
 }

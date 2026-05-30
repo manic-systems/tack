@@ -30,16 +30,16 @@ outputs = { self }:
   };
 ```
 
-tack keeps `default.nix` in sync with the running binary while a
-`tack-managed` comment is present at its top; delete that line to fork
-the resolver.
+tack warns when `default.nix` has drifted from the running binary, as long as
+the `tack-managed` comment at its top is present. run `tack init --resolver` to
+update it, or delete that comment to fork the resolver and silence the warning.
 
 legacy `./inputs.nix` at repo root is detected and preserved as-is.
 
 ## commands
 
 ```
-tack init [--force]
+tack init [--force] [--resolver]     scaffold .tack/ (--resolver writes only default.nix)
 tack update [names...] [--accept]    fetch latest, rewrite lock
 tack look [names...] [--verbose|-v]  report pins with newer upstream revs
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
