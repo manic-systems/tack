@@ -44,6 +44,10 @@ pub enum Command {
         rm:       bool,
     },
     Dedup,
+    Undo {
+        list: bool,
+    },
+    Redo,
     Help,
 }
 
@@ -213,6 +217,22 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
                 return Err(arg.unexpected().into());
             }
             Ok(Command::Dedup)
+        },
+        "undo" => {
+            let mut list = false;
+            while let Some(arg) = parser.next()? {
+                match arg {
+                    Long("list") => list = true,
+                    Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
+                }
+            }
+            Ok(Command::Undo { list })
+        },
+        "redo" => {
+            if let Some(arg) = parser.next()? {
+                return Err(arg.unexpected().into());
+            }
+            Ok(Command::Redo)
         },
         _ => Ok(Command::Help),
     }

@@ -39,6 +39,7 @@ use crate::{
         BranchComparison,
         CompareStatus,
     },
+    history,
     lock,
     pins,
     pins::{
@@ -63,7 +64,7 @@ struct UpdateFetch {
     comparison: BranchComparison,
 }
 
-fn dir() -> PathBuf {
+pub fn dir() -> PathBuf {
     if let Some(dir) = env::var_os("TACK_DIR") {
         return PathBuf::from(dir);
     }
@@ -74,16 +75,16 @@ fn dir() -> PathBuf {
     cwd.join(".tack")
 }
 
-fn pins_path(dir: &Path) -> PathBuf {
+pub fn pins_path(dir: &Path) -> PathBuf {
     dir.join("pins.toml")
 }
-fn lock_path(dir: &Path) -> PathBuf {
+pub fn lock_path(dir: &Path) -> PathBuf {
     dir.join("pins.lock.json")
 }
 
 /// resolver is `default.nix` in the modern `.tack/` layout, or `inputs.nix`
 /// when the dir is a repo root carrying the legacy layout
-fn resolver_path(dir: &Path) -> PathBuf {
+pub fn resolver_path(dir: &Path) -> PathBuf {
     let legacy = dir.join("inputs.nix");
     if legacy.exists() {
         return legacy;
@@ -136,7 +137,7 @@ fn short(rev: &str) -> String {
     rev.chars().take(7).collect()
 }
 
-fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     let mut tmp_str = path.as_os_str().to_owned();
     tmp_str.push(".tmp");
     let tmp = PathBuf::from(tmp_str);
@@ -1680,6 +1681,55 @@ fn pick_name(id: &str, aliases: &BTreeSet<String>) -> String {
         .unwrap_or_default()
 }
 
+pub fn undo(list: bool) -> Result<()> {
+    let dir = dir();
+    let store = history::store_dir(&dir);
+    if list {
+        match history::list(&store) {
+            Some(view) => render(&view, 0, view.rows.len().saturating_sub(1)),
+            None => println!("no history"),
+        }
+        return Ok(());
+    }
+    match history::undo(&dir, &store)? {
+        Some(view) => render_window(&view),
+        None => println!("nothing to undo"),
+    }
+    Ok(())
+}
+
+pub fn redo() -> Result<()> {
+    let dir = dir();
+    let store = history::store_dir(&dir);
+    match history::redo(&dir, &store)? {
+        Some(view) => render_window(&view),
+        None => println!("nothing to redo"),
+    }
+    Ok(())
+}
+
+/// a radius-1 window around the new cursor: the redo target, the live state,
+/// the undo target.
+fn render_window(view: &history::View) {
+    let lo = view.cursor.saturating_sub(1);
+    let hi = (view.cursor + 1).min(view.rows.len().saturating_sub(1));
+    render(view, lo, hi);
+}
+
+/// rows `lo..=hi` newest-first, relative times aligned, `>` marking the cursor
+fn render(view: &history::View, lo: usize, hi: usize) {
+    let now = history::now();
+    let times = (lo..=hi)
+        .map(|idx| history::rel_time(now, view.rows[idx].ts))
+        .collect::<Vec<String>>();
+    let width = times.iter().map(String::len).max().unwrap_or(0);
+    for idx in (lo..=hi).rev() {
+        let marker = if idx == view.cursor { '>' } else { ' ' };
+        let when = &times[idx - lo];
+        println!("{marker} {when:width$}  {}", view.rows[idx].label);
+    }
+}
+
 pub fn help() {
     println!(
         "tack: flake-like toml nix pins, lazily fetched and transformed
@@ -1694,6 +1744,8 @@ usage:
   tack rm <name>
   tack alias <name> <template> | tack alias --rm <name>
   tack dedup
+  tack undo [--list]
+  tack redo
 
 pin types: flake (default), fetch (source tree only), fixed (FOD)
 follows keys may be scoped flake:<name> or tack:<name> (no prefix implies both)
