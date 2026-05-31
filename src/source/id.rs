@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use serde_json::Value;
+use crate::lock;
 
 /// Canonical identity of a pin source, parsed from either an expanded URL or a
 /// locked node. Two equal ids are the same upstream for dedup. The canonical
@@ -57,18 +57,14 @@ impl SourceId {
         }
         None
     }
-
-    /// identity of a locked node
-    pub fn from_node(node: &Value) -> Option<Self> {
-        match node.get("type")?.as_str()? {
+    pub fn from_locked(node: &lock::LockedNode) -> Option<Self> {
+        match node.kind() {
             "github" => {
-                Some(Self::github(
-                    node.get("owner")?.as_str()?,
-                    node.get("repo")?.as_str()?,
-                ))
+                let github = node.github()?;
+                Some(Self::github(github.owner, github.repo))
             },
             "git" => {
-                let url = node.get("url")?.as_str()?;
+                let url = node.git()?.url;
                 let cut = url.split('?').next().unwrap_or(url);
                 Some(Self::Git {
                     url: cut.to_lowercase(),
@@ -76,17 +72,17 @@ impl SourceId {
             },
             "tarball" => {
                 Some(Self::Tarball {
-                    url: node.get("url")?.as_str()?.to_lowercase(),
+                    url: node.tarball()?.url.to_lowercase(),
                 })
             },
             "indirect" => {
                 Some(Self::Indirect {
-                    id: node.get("id")?.as_str()?.to_lowercase(),
+                    id: node.indirect()?.id.to_lowercase(),
                 })
             },
             "path" => {
                 Some(Self::Path {
-                    path: node.get("path")?.as_str()?.to_lowercase(),
+                    path: node.path()?.path.to_lowercase(),
                 })
             },
             _ => None,
@@ -146,6 +142,11 @@ mod tests {
     use serde_json::json;
 
     use super::SourceId;
+    use crate::lock;
+
+    fn node(value: serde_json::Value) -> lock::LockedNode {
+        lock::LockedNode::from_value(value).unwrap()
+    }
 
     #[test]
     fn from_url_parses_each_scheme() {
@@ -173,25 +174,29 @@ mod tests {
     #[test]
     fn from_node_parses_each_type() {
         assert_eq!(
-            SourceId::from_node(&json!({"type": "github", "owner": "NixOS", "repo": "Nixpkgs"}))
-                .unwrap()
-                .to_string(),
+            SourceId::from_locked(&node(
+                json!({"type": "github", "owner": "NixOS", "repo": "Nixpkgs"})
+            ))
+            .unwrap()
+            .to_string(),
             "github:nixos/nixpkgs"
         );
         assert_eq!(
-            SourceId::from_node(&json!({"type": "git", "url": "https://x/o/r?ref=main"}))
-                .unwrap()
-                .to_string(),
+            SourceId::from_locked(&node(
+                json!({"type": "git", "url": "https://x/o/r?ref=main"})
+            ))
+            .unwrap()
+            .to_string(),
             "git+https://x/o/r"
         );
         assert_eq!(
-            SourceId::from_node(&json!({"type": "indirect", "id": "nixpkgs"}))
+            SourceId::from_locked(&node(json!({"type": "indirect", "id": "nixpkgs"})))
                 .unwrap()
                 .to_string(),
             "indirect:nixpkgs"
         );
         assert_eq!(
-            SourceId::from_node(&json!({"type": "path", "path": "/p"}))
+            SourceId::from_locked(&node(json!({"type": "path", "path": "/p"})))
                 .unwrap()
                 .to_string(),
             "path:/p"
@@ -201,9 +206,10 @@ mod tests {
     #[test]
     fn url_and_node_agree_for_github_case_insensitively() {
         let from_url = SourceId::from_url("github:nixos/nixpkgs").unwrap();
-        let from_node =
-            SourceId::from_node(&json!({"type": "github", "owner": "NixOS", "repo": "nixpkgs"}))
-                .unwrap();
+        let from_node = SourceId::from_locked(&node(
+            json!({"type": "github", "owner": "NixOS", "repo": "nixpkgs"}),
+        ))
+        .unwrap();
         assert_eq!(from_url.to_string(), from_node.to_string());
     }
 

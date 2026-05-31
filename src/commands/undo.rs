@@ -9,15 +9,15 @@ use super::{
 
 pub fn undo(list: bool) -> Result<()> {
     let project = Project::discover();
-    let store = history::store_dir(&project);
+    let store = history::HistoryStore::for_project(&project);
     if list {
-        match history::list(&store) {
+        match store.list() {
             Some(view) => render::render(&view, 0, view.rows.len().saturating_sub(1)),
             None => println!("no history"),
         }
         return Ok(());
     }
-    match history::undo(&project, &store)? {
+    match store.undo(&project)? {
         Some(view) => render::render_window(&view),
         None => println!("nothing to undo"),
     }
@@ -26,8 +26,8 @@ pub fn undo(list: bool) -> Result<()> {
 
 pub fn redo() -> Result<()> {
     let project = Project::discover();
-    let store = history::store_dir(&project);
-    match history::redo(&project, &store)? {
+    let store = history::HistoryStore::for_project(&project);
+    match store.redo(&project)? {
         Some(view) => render::render_window(&view),
         None => println!("nothing to redo"),
     }

@@ -11,7 +11,6 @@ use super::{
     fetch,
     pins,
     render,
-    shorturl,
 };
 
 pub fn add(
@@ -28,10 +27,10 @@ pub fn add(
     }
     let project = Project::discover();
     let mut doc = project.load_pins()?;
-    if pins::has_input(&doc, name) {
+    if doc.has_input(name) {
         bail!("input '{name}' already exists");
     }
-    pins::add_input(&mut doc, name, url, &pins::AddInputOpts {
+    doc.add_input(name, url, &pins::AddInputOpts {
         pin_type,
         unpack,
         dir: dir_field,
@@ -40,7 +39,8 @@ pub fn add(
     });
     project.save_pins(&doc)?;
 
-    let expanded = shorturl::expand(url, &pins::shorturls(&doc));
+    let shorturls = doc.shorturls();
+    let expanded = shorturls.expand(url);
     let fetched = match pin_type {
         PinType::Fixed => fetch::fetch_fixed_pin(&expanded, unpack),
         PinType::Flake | PinType::Fetch => {
@@ -78,10 +78,10 @@ pub fn rm(name: &str) -> Result<()> {
 pub(in crate::commands) fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
     let project = Project::at(dir.to_owned());
     let mut doc = project.load_pins()?;
-    let removed_pin = pins::remove_input(&mut doc, name);
+    let removed_pin = doc.remove_input(name);
 
     let mut lk = project.load_lock()?;
-    let removed_lock = lk.remove(name).is_some();
+    let removed_lock = lk.remove(name);
 
     if !removed_pin && !removed_lock {
         bail!("no input '{name}'");
@@ -100,7 +100,7 @@ pub fn alias(name: &str, template: Option<&str>, remove: bool) -> Result<()> {
     let project = Project::discover();
     let mut doc = project.load_pins()?;
     if remove {
-        if !pins::remove_alias(&mut doc, name) {
+        if !doc.remove_alias(name) {
             bail!("no alias '{name}'");
         }
         project.save_pins(&doc)?;
@@ -110,7 +110,7 @@ pub fn alias(name: &str, template: Option<&str>, remove: bool) -> Result<()> {
         if !tpl.contains("{path}") {
             bail!("alias template must contain '{{path}}'");
         }
-        pins::set_alias(&mut doc, name, tpl);
+        doc.set_alias(name, tpl);
         project.save_pins(&doc)?;
         println!("alias {name} = {tpl}");
     }

@@ -12,7 +12,6 @@ use std::{
 };
 
 use eyre::Result as EyreResult;
-use toml_edit::DocumentMut;
 
 use crate::{
     lock,
@@ -87,7 +86,7 @@ impl Project {
         self.dir.join("default.nix")
     }
 
-    pub fn load_pins(&self) -> StdResult<DocumentMut, ConfigError> {
+    pub fn load_pins(&self) -> StdResult<pins::PinsDoc, ConfigError> {
         let path = self.pins_path();
         if !path.exists() {
             return Err(ConfigError::Missing(path));
@@ -98,17 +97,17 @@ impl Project {
                 source,
             }
         })?;
-        pins::parse_doc(&raw).map_err(|source| ConfigError::ParseToml { path, source })
+        pins::PinsDoc::parse(&raw).map_err(|source| ConfigError::ParseToml { path, source })
     }
 
-    pub fn save_pins(&self, doc: &DocumentMut) -> EyreResult<()> {
-        pins::save(&self.pins_path(), doc)
+    pub fn save_pins(&self, doc: &pins::PinsDoc) -> EyreResult<()> {
+        doc.save(&self.pins_path())
     }
 
-    pub fn load_lock(&self) -> StdResult<lock::Lock, ConfigError> {
+    pub fn load_lock(&self) -> StdResult<lock::LockFile, ConfigError> {
         let path = self.lock_path();
         if !path.exists() {
-            return Ok(lock::Lock::new());
+            return Ok(lock::LockFile::new());
         }
         let raw = fs::read_to_string(&path).map_err(|source| {
             ConfigError::Read {
@@ -116,11 +115,23 @@ impl Project {
                 source,
             }
         })?;
-        lock::parse(&raw).map_err(|source| ConfigError::ParseLock { path, source })
+        let lock = lock::parse(&raw).map_err(|source| {
+            ConfigError::ParseLock {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        for name in lock.unknown_nodes() {
+            eprintln!(
+                "tack: skipping unrecognized lock entry '{name}' in {} (kept as-is)",
+                path.display()
+            );
+        }
+        Ok(lock)
     }
 
-    pub fn save_lock(&self, lk: &lock::Lock) -> EyreResult<()> {
-        lock::save(&self.lock_path(), lk)
+    pub fn save_lock(&self, lk: &lock::LockFile) -> EyreResult<()> {
+        lk.save(&self.lock_path())
     }
 }
 
