@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
+    fmt,
     fmt::Write as _,
     io::{
         self,
@@ -22,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-use crate::fetch::{
+use crate::fetch::github::{
     BranchComparison,
     CommitLog,
     CompareStatus,
@@ -31,7 +32,9 @@ use crate::fetch::{
 #[derive(Clone)]
 pub enum PinStatus {
     Pending,
-    Fetching,
+    Fetching {
+        frame: usize,
+    },
     NoChange,
     Updated {
         old:        String,
@@ -42,7 +45,7 @@ pub enum PinStatus {
         rev:      String,
         accepted: bool,
     },
-    /// fixed-pin identity moved; old + new sha256 short forms
+    /// fixed-pin identity moved with old + new sha256 short forms
     FixedDrift {
         old:      String,
         new:      String,
@@ -126,7 +129,7 @@ impl Display {
         }
     }
 
-    /// finish + render the per-pin commit log under each Updated entry
+    /// finish + render the per-pin commit log under each updated entry
     pub fn finish_verbose(mut self, logs: &[Option<CommitLog>]) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -139,7 +142,7 @@ impl Display {
             let _ = write!(out, "\x1b[{}A\x1b[J", self.names.len());
             for ((name, status), entry) in self.names.iter().zip(states.iter()).zip(logs.iter()) {
                 let line = StatusLine::new(name, status);
-                let _ = writeln!(out, "{}", line.tty(0));
+                let _ = writeln!(out, "{}", line.tty());
                 if line.is_updated()
                     && let Some(log) = entry.as_ref()
                 {
@@ -190,7 +193,9 @@ impl<'a> CommitLogLines<'a> {
     }
 
     fn write_to(&self, out: &mut dyn io::Write) {
-        for &(ref hash, ref subject) in &self.log.fresh {
+        let mut fresh = self.log.fresh.iter();
+
+        if let Some(&(ref hash, ref subject)) = fresh.next() {
             let _ = writeln!(
                 out,
                 "{}{}    {subject}",
@@ -198,10 +203,21 @@ impl<'a> CommitLogLines<'a> {
                 CommitHash::new(hash).short()
             );
         }
+
+        for &(ref hash, ref subject) in fresh {
+            let _ = writeln!(
+                out,
+                "{}{}    {subject}",
+                self.indent,
+                CommitHash::new(hash).short()
+            );
+        }
+
         if self.log.more {
             let _ = writeln!(out, "{}...", self.indent);
         }
-        if let Some(&(ref hash, ref subject)) = self.log.base.as_ref() {
+
+        if let Some((ref hash, ref subject)) = self.log.base {
             let _ = writeln!(
                 out,
                 "{}{}    {subject}",
@@ -231,13 +247,20 @@ impl<'a> FrameRenderer<'a> {
 
     fn draw(&self) {
         let mut out = String::new();
+
         if self.drawn {
             let _ = write!(out, "\x1b[{}A", self.names.len());
         }
+
         for (name, status) in self.names.iter().zip(self.states) {
             out.push_str("\x1b[2K");
-            let _ = writeln!(out, "{}", StatusLine::new(name, status).tty(self.frame));
+            let _ = writeln!(
+                out,
+                "{}",
+                StatusLine::new(name, status).tty_with_frame(self.frame)
+            );
         }
+
         let mut stdout = io::stdout().lock();
         let _ = stdout.write_all(out.as_bytes());
         let _ = stdout.flush();
@@ -254,10 +277,23 @@ impl<'a> StatusLine<'a> {
         Self { name, status }
     }
 
-    fn tty(&self, frame: usize) -> String {
+    fn tty(&self) -> String {
         format!(
             "[{}] {}{}",
-            StatusGlyph::for_status(self.status, frame).ansi(),
+            StatusGlyph::from(self.status).ansi(),
+            self.name,
+            self.suffix()
+        )
+    }
+
+    fn tty_with_frame(&self, frame: usize) -> String {
+        format!(
+            "[{}] {}{}",
+            StatusGlyph::from(FramedStatus {
+                status: self.status,
+                frame,
+            })
+            .ansi(),
             self.name,
             self.suffix()
         )
@@ -274,10 +310,7 @@ impl<'a> StatusLine<'a> {
                 ref new,
                 comparison,
             } => {
-                format!(
-                    "  {old} -> {new}{}",
-                    ComparisonLabel::new(comparison).suffix()
-                )
+                format!("  {old} -> {new}{}", ComparisonLabel::new(comparison))
             },
             PinStatus::Drift {
                 ref rev,
@@ -310,7 +343,7 @@ impl<'a> StatusLine<'a> {
             },
             PinStatus::Skipped(ref note) => format!("  {note}"),
             PinStatus::Failed(ref msg) => format!("  {msg}"),
-            PinStatus::Pending | PinStatus::Fetching | PinStatus::NoChange => String::new(),
+            PinStatus::Pending | PinStatus::Fetching { .. } | PinStatus::NoChange => String::new(),
         }
     }
 
@@ -324,7 +357,7 @@ impl<'a> StatusLine<'a> {
                 Some(format!(
                     "{}: {old} -> {new}{}",
                     self.name,
-                    ComparisonLabel::new(comparison).suffix()
+                    ComparisonLabel::new(comparison)
                 ))
             },
             PinStatus::NoChange => Some(format!("{}: unchanged", self.name)),
@@ -369,7 +402,7 @@ impl<'a> StatusLine<'a> {
             },
             PinStatus::Skipped(ref note) => Some(format!("{}: {note}", self.name)),
             PinStatus::Failed(ref msg) => Some(format!("{}: FAILED: {msg}", self.name)),
-            PinStatus::Pending | PinStatus::Fetching => None,
+            PinStatus::Pending | PinStatus::Fetching { .. } => None,
         }
     }
 }
@@ -379,10 +412,15 @@ struct StatusGlyph {
     ch:    char,
 }
 
-impl StatusGlyph {
-    const fn for_status(status: &PinStatus, frame: usize) -> Self {
+struct FramedStatus<'a> {
+    status: &'a PinStatus,
+    frame:  usize,
+}
+
+impl From<&PinStatus> for StatusGlyph {
+    fn from(status: &PinStatus) -> Self {
         let (color, ch) = match *status {
-            PinStatus::Fetching => (34_i32, FRAMES[frame % FRAMES.len()]),
+            PinStatus::Fetching { frame } => (34_i32, FRAMES[frame % FRAMES.len()]),
             PinStatus::NoChange => (32_i32, '\u{2713}'),
             PinStatus::Updated { .. } => (33_i32, '*'),
             PinStatus::Drift { accepted: true, .. }
@@ -398,7 +436,29 @@ impl StatusGlyph {
         };
         Self { color, ch }
     }
+}
 
+impl From<FramedStatus<'_>> for StatusGlyph {
+    fn from(value: FramedStatus<'_>) -> Self {
+        match *value.status {
+            PinStatus::Fetching { .. } => {
+                Self {
+                    color: 34_i32,
+                    ch:    FRAMES[value.frame % FRAMES.len()],
+                }
+            },
+            PinStatus::Pending
+            | PinStatus::NoChange
+            | PinStatus::Updated { .. }
+            | PinStatus::Drift { .. }
+            | PinStatus::FixedDrift { .. }
+            | PinStatus::Skipped(_)
+            | PinStatus::Failed(_) => Self::from(value.status),
+        }
+    }
+}
+
+impl StatusGlyph {
     fn ansi(&self) -> String {
         format!("\x1b[{}m{}\x1b[0m", self.color, self.ch)
     }
@@ -412,32 +472,42 @@ impl ComparisonLabel {
     const fn new(comparison: BranchComparison) -> Self {
         Self { comparison }
     }
+}
 
-    const fn suffix(&self) -> &'static str {
-        match self.comparison.status {
+impl fmt::Display for ComparisonLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self.comparison.status {
             Some(CompareStatus::Ahead) => " (ahead)",
             Some(CompareStatus::Behind) => " (behind)",
             Some(CompareStatus::Diverged) => " (diverged)",
             None if self.comparison.expected => " (unverified)",
             Some(CompareStatus::Identical) | None => "",
-        }
+        };
+        f.write_str(text)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        BranchComparison,
+        CompareStatus,
+        ComparisonLabel,
+    };
 
     #[test]
     fn branch_comparison_suffix_marks_unverified_results() {
         assert_eq!(
-            ComparisonLabel::new(BranchComparison::verified(CompareStatus::Ahead)).suffix(),
+            ComparisonLabel::new(BranchComparison::verified(CompareStatus::Ahead)).to_string(),
             " (ahead)"
         );
         assert_eq!(
-            ComparisonLabel::new(BranchComparison::unavailable()).suffix(),
+            ComparisonLabel::new(BranchComparison::unavailable()).to_string(),
             " (unverified)"
         );
-        assert_eq!(ComparisonLabel::new(BranchComparison::none()).suffix(), "");
+        assert_eq!(
+            ComparisonLabel::new(BranchComparison::none()).to_string(),
+            ""
+        );
     }
 }

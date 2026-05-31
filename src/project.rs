@@ -40,25 +40,30 @@ pub enum ConfigError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("read current directory")]
+    CurrentDir {
+        #[source]
+        source: io::Error,
+    },
 }
 
-/// The on-disk tack workspace: a directory and the files it owns.
+/// on-disk tack workspace and the files it owns
 pub struct Project {
     dir: PathBuf,
 }
 
 impl Project {
-    /// Discover the workspace: `$TACK_DIR`, else cwd when it carries the legacy
-    /// `inputs.nix`, else `cwd/.tack`.
-    pub fn discover() -> Self {
+    /// discover the workspace from `$TACK_DIR`, cwd with legacy `inputs.nix`
+    /// or `cwd/.tack`
+    pub fn discover() -> StdResult<Self, ConfigError> {
         if let Some(dir) = env::var_os("TACK_DIR") {
-            return Self::at(PathBuf::from(dir));
+            return Ok(Self::at(PathBuf::from(dir)));
         }
-        let cwd = env::current_dir().expect("cwd");
+        let cwd = env::current_dir().map_err(|source| ConfigError::CurrentDir { source })?;
         if cwd.join("inputs.nix").exists() {
-            return Self::at(cwd);
+            return Ok(Self::at(cwd));
         }
-        Self::at(cwd.join(".tack"))
+        Ok(Self::at(cwd.join(".tack")))
     }
 
     pub const fn at(dir: PathBuf) -> Self {
@@ -77,7 +82,7 @@ impl Project {
         self.dir.join("pins.lock.json")
     }
 
-    /// `inputs.nix` for the legacy repo-root layout, else `default.nix`.
+    /// `inputs.nix` for the legacy repo-root layout, else `default.nix`
     pub fn resolver_path(&self) -> PathBuf {
         let legacy = self.dir.join("inputs.nix");
         if legacy.exists() {
@@ -135,7 +140,7 @@ impl Project {
     }
 }
 
-/// Write `contents` to `path` atomically via a sibling temp + rename.
+/// write `contents` to `path` via a sibling temp + rename
 pub fn write_atomic(path: &Path, contents: &str) -> EyreResult<()> {
     let mut tmp_str = path.as_os_str().to_owned();
     tmp_str.push(".tmp");

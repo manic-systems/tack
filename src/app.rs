@@ -8,10 +8,17 @@ use crate::{
 };
 
 pub fn run(cmd: Command) -> eyre::Result<()> {
-    // every command except the resolver's own fixer (init) and help nags when
-    // the resolver has drifted. do it after a successful command so it trails
-    // the output and never piles onto an unrelated failure.
-    let check_resolver = !matches!(cmd, Command::Init { .. } | Command::Help);
+    if matches!(cmd, Command::Help) {
+        commands::help();
+        return Ok(());
+    }
+
+    let project = Project::discover()?;
+
+    // every command except init and help nags when the resolver drifts.
+    // run after successful commands so it trails the output and never piles onto an
+    // unrelated failure
+    let check_resolver = !matches!(cmd, Command::Init { .. });
 
     let res = match cmd {
         Command::Init {
@@ -28,23 +35,24 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
             } else {
                 "init"
             };
-            recorded(label, move || commands::init(force, resolver, flake))
+            recorded(&project, label, || {
+                commands::init(&project, force, resolver, flake)
+            })
         },
-        Command::Look { names, verbose } => commands::look(&names, verbose),
-        Command::Dedup => commands::dedup(),
-        Command::Undo { list } => commands::undo(list),
-        Command::Redo => commands::redo(),
-        Command::Help => {
-            commands::help();
-            Ok(())
-        },
+        Command::Look { names, verbose } => commands::look(&project, &names, verbose),
+        Command::Dedup => commands::dedup(&project),
+        Command::Undo { list } => commands::undo(&project, list),
+        Command::Redo => commands::redo(&project),
+        Command::Help => Ok(()),
         Command::Update { names, accept } => {
             let label = if names.is_empty() {
                 "update".to_owned()
             } else {
                 format!("update {}", names.join(" "))
             };
-            recorded(&label, move || commands::update(&names, accept))
+            recorded(&project, &label, || {
+                commands::update(&project, &names, accept)
+            })
         },
         Command::Add {
             name,
@@ -56,21 +64,21 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
             follows,
         } => {
             let label = format!("add {name}");
-            recorded(&label, move || {
-                commands::add(
-                    &name,
-                    &url,
+            recorded(&project, &label, || {
+                commands::add(&project, commands::AddRequest {
+                    name: &name,
+                    url: &url,
                     pin_type,
                     unpack,
-                    dir.as_deref(),
+                    dir: dir.as_deref(),
                     submodules,
-                    &follows,
-                )
+                    follows: &follows,
+                })
             })
         },
         Command::Rm { name } => {
             let label = format!("rm {name}");
-            recorded(&label, move || commands::rm(&name))
+            recorded(&project, &label, || commands::rm(&project, &name))
         },
         Command::Alias { name, template, rm } => {
             let label = if rm {
@@ -78,21 +86,24 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
             } else {
                 format!("alias {name}")
             };
-            recorded(&label, move || {
-                commands::alias(&name, template.as_deref(), rm)
+            recorded(&project, &label, || {
+                commands::alias(&project, &name, template.as_deref(), rm)
             })
         },
     };
 
     if check_resolver && res.is_ok() {
-        commands::warn_stale_resolver();
+        commands::warn_stale_resolver(&project);
     }
     res
 }
 
-fn recorded(label: &str, run: impl FnOnce() -> eyre::Result<()>) -> eyre::Result<()> {
-    let project = Project::discover();
-    let outcome = HistoryStore::for_project(&project).record_run(&project, label, run);
+fn recorded(
+    project: &Project,
+    label: &str,
+    run: impl FnOnce() -> eyre::Result<()>,
+) -> eyre::Result<()> {
+    let outcome = HistoryStore::for_project(project).record_run(project, label, run);
     if outcome.captured_external {
         println!("captured external edit");
     }

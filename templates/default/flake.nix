@@ -1,7 +1,7 @@
 {
   description = "";
 
-  # `tack init` populates ./.tack with your pins.
+  # `tack init` populates ./.tack with your pins
   outputs =
     { self, ... }@args:
     let
