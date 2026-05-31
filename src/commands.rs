@@ -436,8 +436,10 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
                 },
                 Ok((node, rev)) => {
                     display.set(i, PinStatus::Updated {
-                        old: old_rev.map_or_else(|| "NEW".into(), short),
-                        new: short(&rev),
+                        old:        old_rev.map_or_else(|| "NEW".into(), short),
+                        new:        short(&rev),
+                        comparison: old_rev
+                            .and_then(|previous| branch_comparison(&expanded, previous, &rev)),
                     });
                     Some(node)
                 },
@@ -476,9 +478,9 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
 
 /// for every `[all_follow]` entry whose target isn't a declared `[inputs]` pin,
 /// walk all top-level flake.locks once, collect every transitive observation
-/// of the aliased name, and write the freshest by `lastModified` to
-/// pins.lock.json under the target. also prunes stale auto-dedup entries that
-/// no longer have a route.
+/// of the aliased name, and write the freshest by branch comparison when
+/// possible, falling back to `lastModified`. also prunes stale auto-dedup
+/// entries that no longer have a route.
 fn write_auto_dedup(
     inputs: &[pins::Input],
     all_follow: &BTreeMap<String, String>,
@@ -565,10 +567,17 @@ fn write_auto_dedup(
         }
     }
 
+    let mut compare_cache = HashMap::new();
     for (target, mut obs) in observations {
-        obs.sort_by_key(|entry| cmp::Reverse(entry.0));
-        if let Some((_, winner)) = obs.into_iter().next()
-            && lock.get(&target) != Some(&winner)
+        if let Some(current) = lock.get(&target) {
+            let lm = last_modified(current)
+                .and_then(|lm| i64::try_from(lm).ok())
+                .unwrap_or(0);
+            obs.insert(0, (lm, current.clone()));
+        }
+        if let Some(winner) = choose_lock_observation(obs, |base, head| {
+            compare_locked_nodes(&mut compare_cache, base, head)
+        }) && lock.get(&target) != Some(&winner)
         {
             lock.insert(target, winner);
             changed = true;
@@ -576,6 +585,67 @@ fn write_auto_dedup(
     }
 
     changed
+}
+
+fn choose_lock_observation(
+    observations: Vec<(i64, Value)>,
+    mut compare: impl FnMut(&Value, &Value) -> Option<CompareStatus>,
+) -> Option<Value> {
+    let mut iter = observations.into_iter();
+    let mut winner = iter.next()?;
+    for candidate in iter {
+        match compare(&winner.1, &candidate.1) {
+            Some(CompareStatus::Ahead) => winner = candidate,
+            Some(CompareStatus::Behind | CompareStatus::Identical) => {},
+            Some(CompareStatus::Diverged) | None => {
+                if candidate.0 > winner.0 {
+                    winner = candidate;
+                }
+            },
+        }
+    }
+    Some(winner.1)
+}
+
+fn compare_locked_nodes(
+    cache: &mut HashMap<(String, String, String, String), Option<CompareStatus>>,
+    base: &Value,
+    head: &Value,
+) -> Option<CompareStatus> {
+    let (owner, repo, base_rev, head_rev) = github_compare_parts(base, head)?;
+    if base_rev == head_rev {
+        return Some(CompareStatus::Identical);
+    }
+    let key = (owner, repo, base_rev, head_rev);
+    if let Some(cached) = cache.get(&key) {
+        return *cached;
+    }
+    let status = fetch::compare_status(&key.0, &key.1, &key.2, &key.3)
+        .ok()
+        .flatten();
+    cache.insert(key, status);
+    status
+}
+
+fn github_compare_parts(base: &Value, head: &Value) -> Option<(String, String, String, String)> {
+    if base.get("type").and_then(Value::as_str)? != "github"
+        || head.get("type").and_then(Value::as_str)? != "github"
+    {
+        return None;
+    }
+    let base_owner = base.get("owner")?.as_str()?;
+    let base_repo = base.get("repo")?.as_str()?;
+    let head_owner = head.get("owner")?.as_str()?;
+    let head_repo = head.get("repo")?.as_str()?;
+    if !base_owner.eq_ignore_ascii_case(head_owner) || !base_repo.eq_ignore_ascii_case(head_repo) {
+        return None;
+    }
+    Some((
+        base_owner.to_owned(),
+        base_repo.to_owned(),
+        base.get("rev")?.as_str()?.to_owned(),
+        head.get("rev")?.as_str()?.to_owned(),
+    ))
 }
 
 pub fn look(names: &[String], verbose: bool) -> Result<()> {
@@ -619,9 +689,13 @@ pub fn look(names: &[String], verbose: bool) -> Result<()> {
                 display.set(i, PinStatus::NoChange);
             },
             Ok(rev) => {
+                let comparison = old
+                    .as_deref()
+                    .and_then(|old_rev| branch_comparison(&expanded, old_rev, &rev));
                 display.set(i, PinStatus::Updated {
                     old: old.as_deref().map_or_else(|| "NEW".into(), short),
                     new: short(&rev),
+                    comparison,
                 });
                 if verbose
                     && let Some(old_rev) = old.as_deref()
@@ -679,6 +753,15 @@ impl Side {
     }
 }
 
+fn branch_comparison(expanded: &str, old_rev: &str, new_rev: &str) -> Option<CompareStatus> {
+    if old_rev == new_rev {
+        return Some(CompareStatus::Identical);
+    }
+    fetch::compare_pin_status(expanded, old_rev, new_rev)
+        .ok()
+        .flatten()
+}
+
 struct Entry {
     /// lineage from top-pin down to the parent tree being scanned
     path:     Vec<String>,
@@ -691,6 +774,15 @@ struct Entry {
     full_rev: String,
     /// `lastModified` of the locked node
     lm:       Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompareJob {
+    id:    String,
+    owner: String,
+    repo:  String,
+    base:  String,
+    head:  String,
 }
 
 struct Finding {
@@ -713,6 +805,9 @@ enum SourceRef {
     Locked(Value),
     Url(String),
 }
+
+const MAX_COMPARE_JOBS: usize = 100;
+const MAX_LIVE_COMPARE_JOBS: usize = 8;
 
 /// build a name → value map over declared inputs plus undeclared lock entries,
 /// pulling each value with `project`. transitive-only names are left in the
@@ -1233,16 +1328,24 @@ fn comparator(entries: &[Entry]) -> Option<&Entry> {
 
 /// a group is worth printing only when its revs disagree
 fn group_diverges(entries: &[Entry]) -> bool {
-    let mut revs = entries.iter().map(|entry| entry.rev.as_str());
+    let mut revs = entries.iter().map(entry_compare_rev);
     revs.next()
         .is_some_and(|first| revs.any(|rev| rev != first))
 }
 
-/// ask github for the direction of every divergent rev against its comparator,
-/// in parallel. keyed by `(group id, abbreviated rev)`. misses are reported
-/// and fall back to commit-date ordering
-fn ahead_behind(groups: &BTreeMap<String, Vec<Entry>>) -> HashMap<(String, String), CompareStatus> {
-    let jobs = groups
+const fn entry_compare_rev(entry: &Entry) -> &str {
+    if entry.full_rev.is_empty() {
+        entry.rev.as_str()
+    } else {
+        entry.full_rev.as_str()
+    }
+}
+
+/// build github compare work for every divergent rev against its comparator.
+/// returned jobs carry full revs for both the network request and the result
+/// map keys; rendering remains separately abbreviated.
+fn compare_jobs(groups: &BTreeMap<String, Vec<Entry>>) -> (Vec<CompareJob>, usize) {
+    let mut jobs = groups
         .iter()
         .filter(|group| group_diverges(group.1))
         .filter_map(|(id, entries)| {
@@ -1255,19 +1358,18 @@ fn ahead_behind(groups: &BTreeMap<String, Vec<Entry>>) -> HashMap<(String, Strin
             let heads = entries
                 .iter()
                 .filter(|entry| {
-                    entry.rev != base.rev
+                    entry.full_rev != base.full_rev
                         && !entry.full_rev.is_empty()
-                        && seen.insert(entry.rev.as_str())
+                        && seen.insert(entry.full_rev.as_str())
                 })
                 .map(|entry| {
-                    (
-                        id.clone(),
-                        owner.to_owned(),
-                        repo.to_owned(),
-                        base.full_rev.clone(),
-                        entry.full_rev.clone(),
-                        entry.rev.clone(),
-                    )
+                    CompareJob {
+                        id:    id.clone(),
+                        owner: owner.to_owned(),
+                        repo:  repo.to_owned(),
+                        base:  base.full_rev.clone(),
+                        head:  entry.full_rev.clone(),
+                    }
                 })
                 .collect::<Vec<_>>();
             Some(heads)
@@ -1275,51 +1377,70 @@ fn ahead_behind(groups: &BTreeMap<String, Vec<Entry>>) -> HashMap<(String, Strin
         .flatten()
         .collect::<Vec<_>>();
 
-    let attempted = jobs.len();
-    let compares = jobs
-        .into_par_iter()
-        .filter_map(|(id, owner, repo, base, head, head_short)| {
-            fetch::compare_status(&owner, &repo, &base, &head)
-                .ok()
-                .flatten()
-                .map(|status| ((id, head_short), status))
-        })
-        .collect::<HashMap<(String, String), CompareStatus>>();
+    let capped = jobs.len().saturating_sub(MAX_COMPARE_JOBS);
+    jobs.truncate(MAX_COMPARE_JOBS);
+    (jobs, capped)
+}
 
-    let dropped = attempted - compares.len();
+/// ask github for the direction of every divergent rev against its comparator,
+/// in bounded parallel batches. keyed by `(group id, full rev)`. misses are
+/// reported and fall back to commit-date ordering.
+fn ahead_behind(groups: &BTreeMap<String, Vec<Entry>>) -> HashMap<(String, String), CompareStatus> {
+    let (jobs, capped) = compare_jobs(groups);
+    let attempted = jobs.len();
+    let mut compares = HashMap::<(String, String), CompareStatus>::new();
+    for chunk in jobs.chunks(MAX_LIVE_COMPARE_JOBS) {
+        compares.extend(
+            chunk
+                .into_par_iter()
+                .filter_map(|job| {
+                    fetch::compare_status(&job.owner, &job.repo, &job.base, &job.head)
+                        .ok()
+                        .flatten()
+                        .map(|status| ((job.id.clone(), job.head.clone()), status))
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    let dropped = capped + attempted - compares.len();
     if dropped > 0 {
         eprintln!(
-            "tack: {dropped} branch comparison(s) unavailable (rate limit or network); falling \
-             back to commit-date order"
+            "tack: {dropped} branch comparison(s) unavailable or capped; falling back to \
+             commit-date order"
         );
     }
     compares
 }
 
-/// per-rev status glyph for a printable group, measured against its comparator.
-/// returns github ahead/behind when we have it, commit-date ordering otherwise,
-/// and the widest glyph, for padding
+/// per-rev status glyph (rendered text + visible width) for a printable group,
+/// measured against its comparator: github ahead/behind when we have it,
+/// commit-date ordering otherwise. also returns the widest glyph, for padding
 fn group_marks<'a>(
     id: &str,
     entries: &'a [Entry],
     revs: impl Iterator<Item = &'a str>,
     compares: &HashMap<(String, String), CompareStatus>,
 ) -> (BTreeMap<&'a str, (String, usize)>, usize) {
+    const CLOCK: &str = "\u{f017}";
+
     let comp_entry = comparator(entries);
     let mut lm_of = BTreeMap::<&str, u64>::new();
     for entry in entries {
         let Some(lm) = entry.lm else {
             continue;
         };
-        let slot = lm_of.entry(entry.rev.as_str()).or_insert(lm);
+        let slot = lm_of.entry(entry_compare_rev(entry)).or_insert(lm);
         *slot = (*slot).max(lm);
     }
     let paint = |code: i32, body: &str| format!("\x1b[{code}m{body}\x1b[0m");
+    let dated =
+        |code: i32, arrow: &str| (format!("{}{}", paint(code, arrow), paint(36_i32, CLOCK)), 2);
     let render = |rev: &str| -> (String, usize) {
         let Some(comp) = comp_entry else {
             return (" ".to_owned(), 1);
         };
-        if rev == comp.rev {
+        if rev == entry_compare_rev(comp) {
             return (paint(36_i32, "="), 1); // = comparator
         }
         if let Some(status) = compares.get(&(id.to_owned(), rev.to_owned())) {
@@ -1344,9 +1465,9 @@ fn group_marks<'a>(
             return (" ".to_owned(), 1);
         };
         match lm.cmp(&comparator_lm) {
-            cmp::Ordering::Equal => (" ".to_owned(), 1),
-            cmp::Ordering::Greater => (paint(32_i32, "\u{2191}"), 1), // ↑ newer
-            cmp::Ordering::Less => (paint(33_i32, "\u{2193}"), 1),    // ↓ older
+            cmp::Ordering::Equal => (paint(36_i32, CLOCK), 1),
+            cmp::Ordering::Greater => dated(32_i32, "\u{2191}"), // ↑ newer by timestamp
+            cmp::Ordering::Less => dated(33_i32, "\u{2193}"),    // ↓ older by timestamp
         }
     };
     let marks = revs
@@ -1354,6 +1475,23 @@ fn group_marks<'a>(
         .collect::<BTreeMap<&'a str, (String, usize)>>();
     let mw = marks.values().map(|&(_, vis)| vis).max().unwrap_or(1);
     (marks, mw)
+}
+
+type SourcesByRev<'a> = BTreeMap<&'a str, (&'a str, BTreeMap<&'a str, Vec<String>>)>;
+
+fn group_sources_by_rev(entries: &[Entry]) -> SourcesByRev<'_> {
+    let mut by_rev = BTreeMap::<&str, (&str, BTreeMap<&str, Vec<String>>)>::new();
+    for entry in entries {
+        let names = &mut by_rev
+            .entry(entry_compare_rev(entry))
+            .or_insert_with(|| (entry.rev.as_str(), BTreeMap::new()))
+            .1;
+        names
+            .entry(entry.name.as_str())
+            .or_default()
+            .push(source_label(&entry.path));
+    }
+    by_rev
 }
 
 fn print_groups(
@@ -1377,34 +1515,29 @@ fn print_groups(
         printed += 1;
         println!("\n{id}  x{}", entries.len());
 
-        // group by rev, then by name within rev
-        let mut by_rev = BTreeMap::<&str, BTreeMap<&str, Vec<String>>>::new();
-        for entry in entries {
-            by_rev
-                .entry(entry.rev.as_str())
-                .or_default()
-                .entry(entry.name.as_str())
-                .or_default()
-                .push(source_label(&entry.path));
-        }
+        let by_rev = group_sources_by_rev(entries);
 
-        let rw = by_rev.keys().map(|rev| rev.len()).max().unwrap_or(0);
+        let rw = by_rev
+            .values()
+            .map(|&(rev, _)| rev.len())
+            .max()
+            .unwrap_or(0);
         let nw = by_rev
             .values()
-            .flat_map(|names| names.keys().map(|name| name.len()))
+            .flat_map(|&(_, ref names)| names.keys().map(|name| name.len()))
             .max()
             .unwrap_or(0);
 
         let (marks, mw) = group_marks(id, entries, by_rev.keys().copied(), compares);
 
-        for (rev, names) in &by_rev {
+        for (rev, &(display_rev, ref names)) in &by_rev {
             let mark = &marks[rev];
             let mark_on = format!("{}{}", mark.0, " ".repeat(mw - mark.1));
             let blank = " ".repeat(mw);
             for (name, sources) in names {
                 let shown = sources.len().min(MAX_SOURCES);
                 for (idx, source) in sources.iter().take(shown).enumerate() {
-                    let rev_cell = if idx == 0 { *rev } else { "" };
+                    let rev_cell = if idx == 0 { display_rev } else { "" };
                     let mark_cell = if idx == 0 { &mark_on } else { &blank };
                     let name_cell = if idx == 0 { *name } else { "" };
                     println!("  {rev_cell:rw$} {mark_cell} {name_cell:nw$}  {source}");
@@ -1551,17 +1684,26 @@ mod tests {
         collections::{
             BTreeMap,
             BTreeSet,
+            HashMap,
         },
         fs,
         iter,
     };
 
+    use serde_json::Value;
+
     use super::{
         Entry,
+        MAX_COMPARE_JOBS,
         Side,
         apply_follows,
+        branch_comparison,
+        choose_lock_observation,
         collapse_follow,
         comparator,
+        compare_jobs,
+        group_diverges,
+        group_marks,
         pick_name,
         rm_in_dir,
         wires_overrides,
@@ -1601,14 +1743,31 @@ mod tests {
     }
 
     fn entry(path: &[&str], name: &str, rev: &str, lm: Option<u64>) -> Entry {
+        entry_full(path, name, rev, rev, lm)
+    }
+
+    fn entry_full(path: &[&str], name: &str, rev: &str, full_rev: &str, lm: Option<u64>) -> Entry {
         Entry {
             path: path.iter().map(|item| (*item).to_owned()).collect(),
             name: name.to_owned(),
             side: Side::Flake,
             rev: rev.to_owned(),
-            full_rev: rev.to_owned(),
+            full_rev: full_rev.to_owned(),
             lm,
         }
+    }
+
+    fn github_node(rev: &str) -> Value {
+        serde_json::json!({
+            "type": "github",
+            "owner": "o",
+            "repo": "r",
+            "rev": rev,
+        })
+    }
+
+    fn node_rev(node: &Value) -> &str {
+        node.get("rev").and_then(Value::as_str).unwrap()
     }
 
     #[test]
@@ -1688,6 +1847,210 @@ mod tests {
             comparator(&entries_without_times).map(|entry| (entry.rev.as_str(), entry.lm)),
             Some(("unknown-a", None))
         );
+    }
+
+    #[test]
+    fn branch_comparison_uses_identity_fast_path_and_skips_unknown_forges() {
+        assert_eq!(
+            branch_comparison("github:o/r", "same", "same"),
+            Some(super::CompareStatus::Identical)
+        );
+        assert_eq!(
+            branch_comparison("git+https://example.invalid/o/r", "old", "new"),
+            None
+        );
+    }
+
+    #[test]
+    fn auto_dedup_prefers_ahead_candidate_despite_older_timestamp() {
+        let winner = choose_lock_observation(
+            vec![(300, github_node("base")), (100, github_node("ahead"))],
+            |base, head| {
+                match (node_rev(base), node_rev(head)) {
+                    ("base", "ahead") => Some(super::CompareStatus::Ahead),
+                    _ => None,
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(node_rev(&winner), "ahead");
+    }
+
+    #[test]
+    fn auto_dedup_keeps_base_when_candidate_is_behind_despite_newer_timestamp() {
+        let winner = choose_lock_observation(
+            vec![(100, github_node("base")), (500, github_node("behind"))],
+            |base, head| {
+                match (node_rev(base), node_rev(head)) {
+                    ("base", "behind") => Some(super::CompareStatus::Behind),
+                    _ => None,
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(node_rev(&winner), "base");
+    }
+
+    #[test]
+    fn auto_dedup_falls_back_to_timestamp_for_diverged_histories() {
+        let winner = choose_lock_observation(
+            vec![(100, github_node("base")), (500, github_node("amended"))],
+            |base, head| {
+                match (node_rev(base), node_rev(head)) {
+                    ("base", "amended") => Some(super::CompareStatus::Diverged),
+                    _ => None,
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(node_rev(&winner), "amended");
+    }
+
+    #[test]
+    fn group_divergence_uses_full_revs_not_display_revs() {
+        let entries = vec![
+            entry_full(
+                &[],
+                "base",
+                "abcdef0",
+                "abcdef0000000000000000000000000000000000",
+                Some(10),
+            ),
+            entry_full(
+                &["dep"],
+                "head",
+                "abcdef0",
+                "abcdef0999999999999999999999999999999999",
+                Some(20),
+            ),
+        ];
+
+        assert!(group_diverges(&entries));
+    }
+
+    #[test]
+    fn compare_jobs_use_full_revs_and_display_short_keys() {
+        let mut groups = BTreeMap::new();
+        groups.insert("github:o/r".to_owned(), vec![
+            entry_full(
+                &[],
+                "base",
+                "1111111",
+                "1111111111111111111111111111111111111111",
+                Some(10),
+            ),
+            entry_full(
+                &["dep"],
+                "head",
+                "2222222",
+                "2222222222222222222222222222222222222222",
+                Some(20),
+            ),
+        ]);
+
+        let (jobs, capped) = compare_jobs(&groups);
+
+        assert_eq!(capped, 0);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].base, "1111111111111111111111111111111111111111");
+        assert_eq!(jobs[0].head, "2222222222222222222222222222222222222222");
+    }
+
+    #[test]
+    fn compare_jobs_are_capped_before_network_work() {
+        let mut entries = vec![entry_full(&[], "base", "base", "base-full", Some(0))];
+        for i in 0..(MAX_COMPARE_JOBS + 5) {
+            entries.push(entry_full(
+                &["dep"],
+                &format!("head-{i:03}"),
+                &format!("h{i:06}"),
+                &format!("head-full-{i:03}"),
+                Some(u64::try_from(i).unwrap() + 1),
+            ));
+        }
+        let mut groups = BTreeMap::new();
+        groups.insert("github:o/r".to_owned(), entries);
+
+        let (jobs, capped) = compare_jobs(&groups);
+
+        assert_eq!(jobs.len(), MAX_COMPARE_JOBS);
+        assert_eq!(capped, 5);
+    }
+
+    #[test]
+    fn group_marks_prefer_branch_status_over_misleading_timestamps() {
+        let entries = vec![
+            entry(&[], "base", "base", Some(500)),
+            entry(&["dep"], "head", "head", Some(100)),
+        ];
+        let compares = HashMap::from([(
+            ("github:o/r".to_owned(), "head".to_owned()),
+            super::CompareStatus::Ahead,
+        )]);
+
+        let (marks, width) = group_marks(
+            "github:o/r",
+            &entries,
+            entries.iter().map(|entry| entry.rev.as_str()),
+            &compares,
+        );
+        let mark = &marks["head"];
+
+        assert_eq!(width, 1);
+        assert_eq!(mark.1, 1);
+        assert!(mark.0.contains('\u{2191}'));
+        assert!(!mark.0.contains('\u{f017}'));
+    }
+
+    #[test]
+    fn group_marks_show_diverged_branch_status_without_clock() {
+        let entries = vec![
+            entry(&[], "base", "base", Some(100)),
+            entry(&["dep"], "head", "head", Some(200)),
+        ];
+        let compares = HashMap::from([(
+            ("github:o/r".to_owned(), "head".to_owned()),
+            super::CompareStatus::Diverged,
+        )]);
+
+        let (marks, width) = group_marks(
+            "github:o/r",
+            &entries,
+            entries.iter().map(|entry| entry.rev.as_str()),
+            &compares,
+        );
+        let mark = &marks["head"];
+
+        assert_eq!(width, 2);
+        assert_eq!(mark.1, 2);
+        assert!(mark.0.contains('\u{2191}'));
+        assert!(mark.0.contains('\u{2193}'));
+        assert!(!mark.0.contains('\u{f017}'));
+    }
+
+    #[test]
+    fn group_marks_distinguish_timestamp_fallback_with_clock() {
+        let entries = vec![
+            entry(&[], "base", "base", Some(100)),
+            entry(&["dep"], "head", "head", Some(200)),
+        ];
+        let compares = HashMap::new();
+
+        let (marks, width) = group_marks(
+            "github:o/r",
+            &entries,
+            entries.iter().map(|entry| entry.rev.as_str()),
+            &compares,
+        );
+        let mark = &marks["head"];
+
+        assert_eq!(width, 2);
+        assert_eq!(mark.1, 2);
+        assert!(mark.0.contains('\u{2191}'));
+        assert!(mark.0.contains('\u{f017}'));
     }
 
     #[test]
