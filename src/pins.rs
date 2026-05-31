@@ -80,7 +80,7 @@ impl Unpack {
         }
     }
 
-    /// guess from a URL extension; tarball-family wins, otherwise file
+    /// guess from a url extension, tarball-family wins, otherwise file
     pub fn detect(url: &str) -> Self {
         let no_query = url.split('?').next().unwrap_or(url);
         let path = no_query.split('#').next().unwrap_or(no_query);
@@ -114,6 +114,7 @@ impl FromStr for Unpack {
     }
 }
 
+#[derive(Debug)]
 pub struct Input {
     pub name:       String,
     pub url:        String,
@@ -128,8 +129,8 @@ pub struct Input {
 }
 
 impl Input {
-    fn from_item(name: &str, item: &Item) -> Result<Self> {
-        let entry = item
+    fn from_item(name: &str, input_item: &Item) -> Result<Self> {
+        let entry = input_item
             .as_table_like()
             .with_context(|| format!("input '{name}' is not a table"))?;
         let url = entry
@@ -160,28 +161,38 @@ impl Input {
         if pin_type != PinType::Fixed && unpack.is_some() {
             bail!("input '{name}': unpack is only valid for type = \"fixed\"");
         }
-        let follows = entry
-            .get("follows")
-            .and_then(Item::as_table_like)
-            .map(|tbl| {
-                tbl.iter()
-                    .filter_map(|(child, target)| {
-                        target
-                            .as_str()
-                            .map(|val| (child.to_owned(), val.to_owned()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let excludes = entry
-            .get("exclude_follow")
-            .and_then(Item::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|excl| excl.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let follows = match entry.get("follows") {
+            Some(follows_item) => {
+                let tbl = follows_item
+                    .as_table_like()
+                    .with_context(|| format!("input '{name}': follows must be a table"))?;
+                let mut follows = BTreeMap::new();
+                for (child, target_item) in tbl.iter() {
+                    let target = target_item.as_str().with_context(|| {
+                        format!("input '{name}': follows.{child} must be a string")
+                    })?;
+                    follows.insert(child.to_owned(), target.to_owned());
+                }
+                follows
+            },
+            None => BTreeMap::new(),
+        };
+        let excludes = match entry.get("exclude_follow") {
+            Some(exclude_item) => {
+                let arr = exclude_item.as_array().with_context(|| {
+                    format!("input '{name}': exclude_follow must be an array of strings")
+                })?;
+                let mut excludes = BTreeSet::new();
+                for (index, exclude_member) in arr.iter().enumerate() {
+                    let exclude = exclude_member.as_str().with_context(|| {
+                        format!("input '{name}': exclude_follow[{index}] must be a string")
+                    })?;
+                    excludes.insert(exclude.to_owned());
+                }
+                excludes
+            },
+            None => BTreeSet::new(),
+        };
         Ok(Self {
             name: name.to_owned(),
             url: url.to_owned(),
@@ -226,7 +237,7 @@ impl PinsDoc {
         ShortUrls::new(templates)
     }
 
-    pub fn all_follows(&self) -> BTreeMap<String, String> {
+    pub fn all_follows(&self) -> Result<BTreeMap<String, String>> {
         AllFollowTable::from_doc(&self.doc).aliases()
     }
 
@@ -291,45 +302,50 @@ impl PinsDoc {
 
 /// the global `[all_follow]` table flattened to child name -> target name
 ///
-/// two value shapes are accepted under the same table:
-/// * `alias = "target"` - `alias` follows `target`
-/// * `target = [a, b, ...]` - `target`, `a`, `b`, ... all follow `target`,
-///   useful when several transitive names share a single canonical target
+/// two value shapes are accepted under the same table
+/// * `alias = "target"` makes `alias` follow `target`
+/// * `target = [a, b, ...]` makes every listed alias follow `target`
 struct AllFollowTable<'a> {
-    table: Option<&'a Table>,
+    item: Option<&'a Item>,
 }
 
 impl<'a> AllFollowTable<'a> {
     fn from_doc(doc: &'a DocumentMut) -> Self {
         Self {
-            table: doc.get("all_follow").and_then(Item::as_table),
+            item: doc.get("all_follow"),
         }
     }
 
-    fn aliases(&self) -> BTreeMap<String, String> {
-        let Some(table) = self.table else {
-            return BTreeMap::new();
+    fn aliases(&self) -> Result<BTreeMap<String, String>> {
+        let Some(item) = self.item else {
+            return Ok(BTreeMap::new());
         };
+        let table = item
+            .as_table_like()
+            .with_context(|| "all_follow must be a table")?;
         let mut out = BTreeMap::new();
-        for (key, value) in table {
+        for (key, value) in table.iter() {
             if let Some(target) = value.as_str() {
                 out.insert(key.to_owned(), target.to_owned());
             } else if let Some(arr) = value.as_array() {
-                // key is its own target, plus every array member follows it too
+                // key is its own target, and every array member follows it too
                 out.insert(key.to_owned(), key.to_owned());
-                for el in arr {
-                    if let Some(alias) = el.as_str() {
-                        out.insert(alias.to_owned(), key.to_owned());
-                    }
+                for (index, el) in arr.iter().enumerate() {
+                    let alias = el
+                        .as_str()
+                        .with_context(|| format!("all_follow.{key}[{index}] must be a string"))?;
+                    out.insert(alias.to_owned(), key.to_owned());
                 }
+            } else {
+                bail!("all_follow.{key} must be a string or array of strings");
             }
         }
-        out
+        Ok(out)
     }
 }
 
-/// project a follows alias onto the flake side, for the flake.lock walk in
-/// dedup synthesis: `dep`/`flake:dep` -> `dep`, `tack:dep` -> dropped.
+/// project a follows alias onto the flake side for the flake.lock walk
+/// `dep` and `flake:dep` are kept, `tack:dep` is dropped
 #[derive(Clone, Copy)]
 pub struct FollowAlias<'a> {
     raw: &'a str,
@@ -403,7 +419,7 @@ mod tests {
     #[test]
     fn all_follows_string_form() {
         let doc = doc("[all_follow]\nnixpkgs = \"nixpkgs\"\ncrane = \"my-crane\"\n");
-        let map = doc.all_follows();
+        let map = doc.all_follows().unwrap();
         assert_eq!(map.get("nixpkgs").map(String::as_str), Some("nixpkgs"));
         assert_eq!(map.get("crane").map(String::as_str), Some("my-crane"));
         assert_eq!(map.len(), 2);
@@ -412,7 +428,7 @@ mod tests {
     #[test]
     fn all_follows_array_form_implies_key_alias() {
         let doc = doc("[all_follow]\ngit-hooks = [\"git-hooks-nix\"]\n");
-        let map = doc.all_follows();
+        let map = doc.all_follows().unwrap();
         // both key and array members alias to key
         assert_eq!(map.get("git-hooks").map(String::as_str), Some("git-hooks"));
         assert_eq!(
@@ -426,7 +442,7 @@ mod tests {
     fn all_follows_mixed_forms_coexist() {
         let raw = "[all_follow]\nnixpkgs = \"nixpkgs\"\nxwl = [\"xwl-stable\", \"xwl-unstable\"]\n";
         let doc = doc(raw);
-        let map = doc.all_follows();
+        let map = doc.all_follows().unwrap();
         assert_eq!(map.get("nixpkgs").map(String::as_str), Some("nixpkgs"));
         assert_eq!(map.get("xwl").map(String::as_str), Some("xwl"));
         assert_eq!(map.get("xwl-stable").map(String::as_str), Some("xwl"));
@@ -436,7 +452,7 @@ mod tests {
     #[test]
     fn all_follows_empty_array_is_self_map() {
         let doc = doc("[all_follow]\nfoo = []\n");
-        let map = doc.all_follows();
+        let map = doc.all_follows().unwrap();
         assert_eq!(map.get("foo").map(String::as_str), Some("foo"));
         assert_eq!(map.len(), 1);
     }
@@ -444,7 +460,7 @@ mod tests {
     #[test]
     fn all_follows_missing_table_is_empty() {
         let doc = doc("[inputs]\n");
-        assert!(doc.all_follows().is_empty());
+        assert!(doc.all_follows().unwrap().is_empty());
     }
 
     #[test]
@@ -452,7 +468,7 @@ mod tests {
         let raw =
             "[all_follow]\n\"flake:dep\" = \"replacement\"\n\"tack:other\" = \"x\"\nbare = \"y\"\n";
         let doc = doc(raw);
-        let map = doc.all_follows();
+        let map = doc.all_follows().unwrap();
 
         // scoping is preserved raw, but consumers project per side
         assert_eq!(
@@ -461,6 +477,20 @@ mod tests {
         );
         assert_eq!(map.get("tack:other").map(String::as_str), Some("x"));
         assert_eq!(map.get("bare").map(String::as_str), Some("y"));
+    }
+
+    #[test]
+    fn all_follows_rejects_wrong_value_type() {
+        let doc = doc("[all_follow]\nfoo = 3\n");
+        let err = doc.all_follows().unwrap_err().to_string();
+        assert!(err.contains("all_follow.foo must be a string or array of strings"));
+    }
+
+    #[test]
+    fn all_follows_rejects_wrong_array_member_type() {
+        let doc = doc("[all_follow]\nfoo = [\"bar\", 3]\n");
+        let err = doc.all_follows().unwrap_err().to_string();
+        assert!(err.contains("all_follow.foo[1] must be a string"));
     }
 
     #[test]
@@ -501,5 +531,29 @@ flake = false
         assert_eq!(by_name["archive"].pin_type, PinType::Fixed);
         assert_eq!(by_name["archive"].unpack, Some(Unpack::Tarball));
         assert_eq!(by_name["legacy"].pin_type, PinType::Fetch);
+    }
+
+    #[test]
+    fn inputs_reject_malformed_follows() {
+        let doc = doc(r#"
+[inputs.bad]
+url = "github:o/r"
+
+[inputs.bad.follows]
+dep = 3
+"#);
+        let err = doc.inputs().unwrap_err().to_string();
+        assert!(err.contains("input 'bad': follows.dep must be a string"));
+    }
+
+    #[test]
+    fn inputs_reject_malformed_exclude_follow() {
+        let doc = doc(r#"
+[inputs.bad]
+url = "github:o/r"
+exclude_follow = ["dep", 3]
+"#);
+        let err = doc.inputs().unwrap_err().to_string();
+        assert!(err.contains("input 'bad': exclude_follow[1] must be a string"));
     }
 }

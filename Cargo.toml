@@ -13,22 +13,22 @@ name = "tack"
 path = "src/main.rs"
 
 [dependencies]
-color-eyre    = "0.6"
-data-encoding = "2.10.0"
+color-eyre    = "0.6.5"
+data-encoding = "2.11.0"
 etcetera      = "0.11.0"
-eyre          = "0.6"
+eyre          = "0.6.12"
 flate2        = "1.1.9"
-git2          = "0.21"
+git2          = "0.21.0"
+hmac-sha256   = "1.1.14"
 lexopt        = "0.3.2"
 native-tls    = "0.2.18"
 rayon         = "1.12.0"
-serde         = { features = [ "derive" ], version = "1.0" }
+serde         = { features = [ "derive" ], version = "1.0.228" }
 serde_json    = "1.0.150"
-sha2          = "0.11.0"
 tar           = { default-features = false, version = "0.4.46" }
 tempfile      = "3.27.0"
+thiserror     = "2.0.18"
 toml_edit     = "0.25.12"
-thiserror     = "2"
 ureq          = { default-features = false, features = [ "native-tls" ], version = "3.3.0" }
 xz2           = "0.1.7"
 

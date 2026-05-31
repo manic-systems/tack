@@ -36,7 +36,7 @@ rustPlatform.buildRustPackage {
     zlib
   ];
 
-  # link nixpkgs c libs, no vendored copies.
+  # link nixpkgs c libs without vendored copies
   env = {
     LIBGIT2_NO_VENDOR = 1;
     OPENSSL_NO_VENDOR = 1;

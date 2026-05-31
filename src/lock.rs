@@ -9,11 +9,12 @@ use std::{
 use eyre::Result;
 use serde::{
     Deserialize,
+    Deserializer,
     Serialize,
 };
 use serde_json::Value;
 
-/// The on-disk lock file: input name -> locked node.
+/// on-disk lock file keyed by input name
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockFile {
     nodes:       BTreeMap<String, LockedNode>,
@@ -109,6 +110,39 @@ impl Serialize for NodeRepr<'_> {
     }
 }
 
+/// nix flake.lock document exposed as locked nodes tack can compare
+#[derive(Debug, Deserialize)]
+pub struct FlakeLock {
+    #[serde(default = "default_root")]
+    root:  String,
+    #[serde(default)]
+    nodes: BTreeMap<String, FlakeNode>,
+}
+
+impl FlakeLock {
+    pub fn parse(raw: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(raw)
+    }
+
+    pub fn locked_nodes(&self) -> impl Iterator<Item = (&str, &LockedNode)> {
+        let root = self.root.as_str();
+        self.nodes.iter().filter_map(move |(name, node)| {
+            if name == root {
+                return None;
+            }
+            Some((name.as_str(), node.locked.as_ref()?))
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct FlakeNode {
+    #[serde(default, deserialize_with = "deserialize_locked_node")]
+    locked: Option<LockedNode>,
+}
+
+type ExtraFields = BTreeMap<String, Value>;
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum LockedNode {
@@ -122,6 +156,8 @@ pub enum LockedNode {
         nar_hash:      Option<String>,
         #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
         last_modified: Option<i64>,
+        #[serde(flatten)]
+        extra:         ExtraFields,
     },
     #[serde(rename = "gitlab")]
     Gitlab {
@@ -138,6 +174,8 @@ pub enum LockedNode {
         nar_hash:      Option<String>,
         #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
         last_modified: Option<i64>,
+        #[serde(flatten)]
+        extra:         ExtraFields,
     },
     #[serde(rename = "git")]
     Git {
@@ -152,6 +190,8 @@ pub enum LockedNode {
         last_modified: Option<i64>,
         #[serde(default, skip_serializing_if = "is_false")]
         submodules:    bool,
+        #[serde(flatten)]
+        extra:         ExtraFields,
     },
     #[serde(rename = "tarball")]
     Tarball {
@@ -160,6 +200,8 @@ pub enum LockedNode {
         nar_hash:      Option<String>,
         #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
         last_modified: Option<i64>,
+        #[serde(flatten)]
+        extra:         ExtraFields,
     },
     #[serde(rename = "fixed")]
     Fixed {
@@ -169,11 +211,21 @@ pub enum LockedNode {
         sha256: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         unpack: Option<String>,
+        #[serde(flatten)]
+        extra:  ExtraFields,
     },
     #[serde(rename = "indirect")]
-    Indirect { id: String },
+    Indirect {
+        id:    String,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
     #[serde(rename = "path")]
-    Path { path: String },
+    Path {
+        path:  String,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
 }
 
 #[expect(
@@ -204,6 +256,7 @@ impl LockedNode {
             rev:           Some(rev.into()),
             nar_hash:      Some(nar_hash.into()),
             last_modified: Some(last_modified),
+            extra:         BTreeMap::new(),
         }
     }
 
@@ -228,6 +281,7 @@ impl LockedNode {
             nar_hash: Some(nar_hash.into()),
             last_modified: Some(last_modified),
             submodules,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -240,6 +294,7 @@ impl LockedNode {
             url:           url.into(),
             nar_hash:      Some(nar_hash.into()),
             last_modified: Some(last_modified),
+            extra:         BTreeMap::new(),
         }
     }
 
@@ -253,6 +308,7 @@ impl LockedNode {
             url:    Some(url.into()),
             sha256: Some(sha256.into()),
             unpack: Some(unpack.into()),
+            extra:  BTreeMap::new(),
         }
     }
 
@@ -311,74 +367,22 @@ impl LockedNode {
         }?;
         u64::try_from(value).ok()
     }
-
-    pub fn github(&self) -> Option<GithubNode<'_>> {
-        let Self::Github {
-            owner, repo, rev, ..
-        } = self
-        else {
-            return None;
-        };
-        Some(GithubNode {
-            owner,
-            repo,
-            rev: rev.as_deref(),
-        })
-    }
-
-    pub fn gitlab(&self) -> Option<GitlabNode<'_>> {
-        let Self::Gitlab {
-            owner, repo, host, ..
-        } = self
-        else {
-            return None;
-        };
-        Some(GitlabNode { owner, repo, host })
-    }
-
-    pub fn git(&self) -> Option<GitNode<'_>> {
-        let Self::Git {
-            url,
-            reff,
-            rev,
-            submodules,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        Some(GitNode {
-            url,
-            reff: reff.as_deref(),
-            rev: rev.as_deref(),
-            submodules: *submodules,
-        })
-    }
-
-    pub fn tarball(&self) -> Option<TarballNode<'_>> {
-        let Self::Tarball { url, .. } = self else {
-            return None;
-        };
-        Some(TarballNode { url })
-    }
-
-    pub fn indirect(&self) -> Option<IndirectNode<'_>> {
-        let Self::Indirect { id } = self else {
-            return None;
-        };
-        Some(IndirectNode { id })
-    }
-
-    pub fn path(&self) -> Option<PathNode<'_>> {
-        let Self::Path { path } = self else {
-            return None;
-        };
-        Some(PathNode { path })
-    }
 }
 
 fn default_gitlab_host() -> String {
     "gitlab.com".to_owned()
+}
+
+fn default_root() -> String {
+    "root".to_owned()
+}
+
+fn deserialize_locked_node<'de, D>(deserializer: D) -> Result<Option<LockedNode>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let locked = Option::<Value>::deserialize(deserializer)?;
+    Ok(locked.and_then(|value| LockedNode::from_value(value).ok()))
 }
 
 fn is_default_gitlab_host(host: &str) -> bool {
@@ -391,43 +395,6 @@ fn is_default_gitlab_host(host: &str) -> bool {
 )]
 const fn is_false(value: &bool) -> bool {
     !*value
-}
-
-#[derive(Clone, Copy)]
-pub struct GithubNode<'a> {
-    pub owner: &'a str,
-    pub repo:  &'a str,
-    pub rev:   Option<&'a str>,
-}
-
-#[derive(Clone, Copy)]
-pub struct GitlabNode<'a> {
-    pub owner: &'a str,
-    pub repo:  &'a str,
-    pub host:  &'a str,
-}
-
-#[derive(Clone, Copy)]
-pub struct GitNode<'a> {
-    pub url:        &'a str,
-    pub reff:       Option<&'a str>,
-    pub rev:        Option<&'a str>,
-    pub submodules: bool,
-}
-
-#[derive(Clone, Copy)]
-pub struct TarballNode<'a> {
-    pub url: &'a str,
-}
-
-#[derive(Clone, Copy)]
-pub struct IndirectNode<'a> {
-    pub id: &'a str,
-}
-
-#[derive(Clone, Copy)]
-pub struct PathNode<'a> {
-    pub path: &'a str,
 }
 
 /// parse pins.lock.json from an in-memory string
@@ -445,6 +412,7 @@ mod tests {
     };
 
     use super::{
+        FlakeLock,
         LockFile,
         LockedNode,
     };
@@ -594,35 +562,75 @@ mod tests {
     }
 
     #[test]
-    fn typed_views_cover_flake_lock_node_shapes() {
+    fn typed_nodes_cover_flake_lock_node_shapes() {
         let gitlab = node(json!({"type": "gitlab", "owner": "o", "repo": "r"}));
-        assert_eq!(gitlab.gitlab().unwrap().host, "gitlab.com");
-        assert_eq!(
-            node(json!({"type": "indirect", "id": "nixpkgs"}))
-                .indirect()
-                .unwrap()
-                .id,
-            "nixpkgs"
-        );
-        assert_eq!(
-            node(json!({"type": "path", "path": "/p"}))
-                .path()
-                .unwrap()
-                .path,
-            "/p"
-        );
+        assert!(matches!(
+            gitlab,
+            LockedNode::Gitlab { ref host, .. } if host == "gitlab.com"
+        ));
+        assert!(matches!(
+            node(json!({"type": "indirect", "id": "nixpkgs"})),
+            LockedNode::Indirect { ref id, .. } if id == "nixpkgs"
+        ));
+        assert!(matches!(
+            node(json!({"type": "path", "path": "/p"})),
+            LockedNode::Path { ref path, .. } if path == "/p"
+        ));
     }
 
     #[test]
-    fn audit_roundtrip_drops_unknown_fields_and_reorders() {
-        // a github node pinned to a branch (ref), plus a field tack does not model
+    fn flake_lock_locked_nodes_skip_root_and_unknown_locked_nodes() {
+        let raw = r#"{
+            "root": "root",
+            "nodes": {
+                "root": {},
+                "empty": {},
+                "future": {"locked": {"type": "future", "x": 1}},
+                "nixpkgs": {
+                    "locked": {
+                        "type": "github",
+                        "owner": "NixOS",
+                        "repo": "nixpkgs",
+                        "rev": "abc"
+                    }
+                }
+            }
+        }"#;
+
+        let doc = FlakeLock::parse(raw).unwrap();
+        let nodes = doc
+            .locked_nodes()
+            .map(|(name, node)| {
+                let repo = match *node {
+                    LockedNode::Github { ref repo, .. } => Some(repo.to_owned()),
+                    LockedNode::Gitlab { .. }
+                    | LockedNode::Git { .. }
+                    | LockedNode::Tarball { .. }
+                    | LockedNode::Fixed { .. }
+                    | LockedNode::Indirect { .. }
+                    | LockedNode::Path { .. } => None,
+                };
+                (name.to_owned(), repo)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(nodes, vec![(
+            "nixpkgs".to_owned(),
+            Some("nixpkgs".to_owned())
+        )]);
+    }
+
+    #[test]
+    fn roundtrip_preserves_extra_lock_fields() {
+        // github node pinned to a branch plus a field tack does not model
         let raw = r#"{"type":"github","owner":"o","repo":"r","ref":"nixos-unstable","rev":"abc","narHash":"sha256-z","lastModified":1700,"revCount":42}"#;
         let n = LockedNode::from_value(serde_json::from_str(raw).unwrap()).unwrap();
         let back = serde_json::to_string(&n).unwrap();
         println!("IN : {raw}");
         println!("OUT: {back}");
-        assert!(!back.contains("revCount"), "revCount survived");
-        assert!(!back.contains("\"ref\""), "ref survived");
+        let back_json: Value = serde_json::from_str(&back).unwrap();
+        assert_eq!(back_json.get("ref"), Some(&json!("nixos-unstable")));
+        assert_eq!(back_json.get("revCount"), Some(&json!(42_i64)));
     }
 
     #[test]

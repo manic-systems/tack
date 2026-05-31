@@ -1,60 +1,28 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    cmp,
     collections::{
         BTreeMap,
-        BTreeSet,
-        HashMap,
         HashSet,
     },
-    env,
     fs,
-    iter,
-    mem,
-    path::Path,
     result::Result as StdResult,
-    sync::{
-        Mutex,
-        atomic::{
-            AtomicUsize,
-            Ordering,
-        },
-    },
 };
 
-use eyre::{
-    Result,
-    bail,
-};
+use eyre::Result;
 
 use crate::{
-    fetch,
-    fetch::{
-        BranchComparison,
-        CompareStatus,
+    fetch::http::FetchError,
+    lock::{
+        self,
+        LockedNode,
     },
-    history,
-    lock,
-    pins,
     pins::{
+        self,
         PinType,
         Unpack,
     },
-    project::{
-        self,
-        Project,
-    },
-    render,
-    source::{
-        Source,
-        forge::Forge,
-        id::SourceId,
-    },
-    ui::{
-        Display,
-        PinStatus,
-    },
+    project::Project,
 };
 
 const STARTER_TOML: &str = include_str!("../../assets/pins.toml");
@@ -62,11 +30,10 @@ const RESOLVER_NIX: &str = include_str!("../../.tack/default.nix");
 const SCAFFOLD_FLAKE: &str = include_str!("../../templates/default/flake.nix");
 const MARKER: &str = "# tack-managed resolver.";
 
-/// warn when the resolver still carries tack's marker but has drifted from the
-/// bundled template. this is silent for forked resolvers who've stripped the
-/// marker and when uninitialised, so it never nags people who own their copy.
-pub fn warn_stale_resolver() {
-    let path = Project::discover().resolver_path();
+/// warn when the resolver carries tack's marker but drifted from the template
+/// silent for forked resolvers and uninitialized projects
+pub fn warn_stale_resolver(project: &Project) {
+    let path = project.resolver_path();
     if let Ok(current) = fs::read_to_string(&path)
         && current.contains(MARKER)
         && current != RESOLVER_NIX
@@ -78,69 +45,70 @@ pub fn warn_stale_resolver() {
     }
 }
 
-pub mod dedup;
+mod dedup;
 mod edit;
 mod init;
 mod undo;
 mod update;
 
-pub fn init(force: bool, resolver_only: bool, flake: bool) -> Result<()> {
-    init::init(force, resolver_only, flake)
+pub fn init(project: &Project, force: bool, resolver_only: bool, flake: bool) -> Result<()> {
+    init::init(project, force, resolver_only, flake)
 }
 
-pub fn add(
-    name: &str,
-    url: &str,
-    pin_type: PinType,
-    unpack: Option<Unpack>,
-    dir_field: Option<&str>,
-    submodules: bool,
-    follows: &[(String, String)],
-) -> Result<()> {
-    edit::add(name, url, pin_type, unpack, dir_field, submodules, follows)
+#[derive(Clone, Copy)]
+pub struct AddRequest<'a> {
+    pub name:       &'a str,
+    pub url:        &'a str,
+    pub pin_type:   PinType,
+    pub unpack:     Option<Unpack>,
+    pub dir:        Option<&'a str>,
+    pub submodules: bool,
+    pub follows:    &'a [(String, String)],
 }
 
-pub fn rm(name: &str) -> Result<()> {
-    edit::rm(name)
+pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
+    edit::add(project, request)
 }
 
-pub fn alias(name: &str, template: Option<&str>, remove: bool) -> Result<()> {
-    edit::alias(name, template, remove)
+pub fn rm(project: &Project, name: &str) -> Result<()> {
+    edit::rm(project, name)
 }
 
-pub fn update(names: &[String], accept: bool) -> Result<()> {
-    update::update(names, accept)
+pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool) -> Result<()> {
+    edit::alias(project, name, template, remove)
 }
 
-pub fn look(names: &[String], verbose: bool) -> Result<()> {
-    update::look(names, verbose)
+pub fn update(project: &Project, names: &[String], accept: bool) -> Result<()> {
+    update::update(project, names, accept)
 }
 
-pub fn dedup() -> Result<()> {
-    dedup::dedup()
+pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<()> {
+    update::look(project, names, verbose)
 }
 
-pub fn undo(list: bool) -> Result<()> {
-    undo::undo(list)
+pub fn dedup(project: &Project) -> Result<()> {
+    dedup::dedup(project)
 }
 
-pub fn redo() -> Result<()> {
-    undo::redo()
+pub fn undo(project: &Project, list: bool) -> Result<()> {
+    undo::undo(project, list)
+}
+
+pub fn redo(project: &Project) -> Result<()> {
+    undo::redo(project)
 }
 
 pub fn help() {
     init::help();
 }
 
-/// Disposition of a swallowed fetch result. Expected degraded-operation misses
-/// vanish silently; fixable or suspicious failures return a cause string for
-/// the caller to aggregate after any parallel batch or live spinner.
-pub(in crate::commands) fn tolerate<T>(
-    result: StdResult<T, fetch::FetchError>,
-) -> (Option<T>, Option<String>) {
+/// disposition of a swallowed fetch result
+/// expected degraded-operation misses vanish silently
+/// fixable or suspicious failures return a cause string for later aggregation
+fn tolerate<T>(result: StdResult<T, FetchError>) -> (Option<T>, Option<String>) {
     match result {
         Ok(value) => (Some(value), None),
-        Err(fetch::FetchError::NotFound { .. } | fetch::FetchError::Transport(_)) => (None, None),
+        Err(FetchError::NotFound { .. } | FetchError::Transport(_)) => (None, None),
         Err(err) => (None, Some(err.to_string())),
     }
 }
@@ -162,7 +130,7 @@ fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Inpu
 fn top_map<T>(
     inputs: &[pins::Input],
     lock: &lock::LockFile,
-    project: impl Fn(&lock::LockedNode) -> Option<T>,
+    project: impl Fn(&LockedNode) -> Option<T>,
 ) -> BTreeMap<String, T> {
     let declared = inputs
         .iter()
@@ -188,7 +156,6 @@ use self::{
     dedup::{
         Entry,
         MAX_COMPARE_JOBS,
-        Mark,
         Side,
         apply_follows,
         classify,
@@ -219,7 +186,6 @@ mod tests {
         Entry,
         LockObservation,
         MAX_COMPARE_JOBS,
-        Mark,
         Side,
         apply_follows,
         classify,
@@ -233,8 +199,12 @@ mod tests {
         wires_overrides,
     };
     use crate::{
-        fetch,
-        lock,
+        fetch::{
+            github::CompareStatus,
+            http::FetchError,
+        },
+        lock::LockedNode,
+        report::Mark,
         source::id::SourceId,
     };
 
@@ -256,26 +226,26 @@ mod tests {
     #[test]
     fn tolerate_swallows_absent_and_transport_silently() {
         assert_eq!(
-            tolerate::<()>(Err(fetch::FetchError::NotFound { what: "x".into() })).1,
+            tolerate::<()>(Err(FetchError::NotFound { what: "x".into() })).1,
             None
         );
         assert_eq!(
-            tolerate::<()>(Err(fetch::FetchError::Transport("down".into()))).1,
+            tolerate::<()>(Err(FetchError::Transport("down".into()))).1,
             None
         );
     }
 
     #[test]
-    fn tolerate_surfaces_auth_and_upstream() {
+    fn tolerate_surfaces_auth_and_github() {
         assert!(
-            tolerate::<()>(Err(fetch::FetchError::Auth {
+            tolerate::<()>(Err(FetchError::Auth {
                 what: "no token".into(),
             }))
             .1
             .is_some()
         );
         assert!(
-            tolerate::<()>(Err(fetch::FetchError::Upstream("weird".into())))
+            tolerate::<()>(Err(FetchError::Github("weird".into())))
                 .1
                 .is_some()
         );
@@ -303,22 +273,27 @@ mod tests {
         entry_full(path, name, rev, rev, lm)
     }
 
-    fn entry_full(path: &[&str], name: &str, rev: &str, full_rev: &str, lm: Option<u64>) -> Entry {
+    fn entry_full(
+        path: &[&str],
+        name: &str,
+        _display_rev: &str,
+        rev: &str,
+        lm: Option<u64>,
+    ) -> Entry {
         Entry {
             path: path.iter().map(|item| (*item).to_owned()).collect(),
             name: name.to_owned(),
             side: Side::Flake,
             rev: rev.to_owned(),
-            full_rev: full_rev.to_owned(),
             lm,
         }
     }
 
-    fn github_node(rev: &str) -> lock::LockedNode {
-        lock::LockedNode::new_github("o", "r", rev, "sha256-n", 0)
+    fn github_node(rev: &str) -> LockedNode {
+        LockedNode::new_github("o", "r", rev, "sha256-n", 0)
     }
 
-    fn node_rev(node: &lock::LockedNode) -> &str {
+    fn node_rev(node: &LockedNode) -> &str {
         node.rev().unwrap()
     }
 
@@ -393,7 +368,7 @@ mod tests {
             ],
             |base, head| {
                 match (node_rev(base), node_rev(head)) {
-                    ("base", "ahead") => Some(super::CompareStatus::Ahead),
+                    ("base", "ahead") => Some(CompareStatus::Ahead),
                     _ => None,
                 }
             },
@@ -412,7 +387,7 @@ mod tests {
             ],
             |base, head| {
                 match (node_rev(base), node_rev(head)) {
-                    ("base", "behind") => Some(super::CompareStatus::Behind),
+                    ("base", "behind") => Some(CompareStatus::Behind),
                     _ => None,
                 }
             },
@@ -431,7 +406,7 @@ mod tests {
             ],
             |base, head| {
                 match (node_rev(base), node_rev(head)) {
-                    ("base", "amended") => Some(super::CompareStatus::Diverged),
+                    ("base", "amended") => Some(CompareStatus::Diverged),
                     _ => None,
                 }
             },
@@ -442,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn group_divergence_uses_full_revs_not_display_revs() {
+    fn group_divergence_uses_semantic_revs() {
         let entries = vec![
             entry_full(
                 &[],
@@ -464,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_jobs_use_full_revs_and_display_short_keys() {
+    fn compare_jobs_use_semantic_revs() {
         let mut groups = BTreeMap::new();
         groups.insert(source_id("github:o/r"), vec![
             entry_full(
@@ -519,8 +494,7 @@ mod tests {
             entry(&[], "base", "base", Some(500)),
             entry(&["dep"], "head", "head", Some(100)),
         ];
-        let compares =
-            HashMap::from([((id.clone(), "head".to_owned()), super::CompareStatus::Ahead)]);
+        let compares = HashMap::from([((id.clone(), "head".to_owned()), CompareStatus::Ahead)]);
 
         let mark = classify(
             &id,
@@ -540,10 +514,7 @@ mod tests {
             entry(&[], "base", "base", Some(100)),
             entry(&["dep"], "head", "head", Some(200)),
         ];
-        let compares = HashMap::from([(
-            (id.clone(), "head".to_owned()),
-            super::CompareStatus::Diverged,
-        )]);
+        let compares = HashMap::from([((id.clone(), "head".to_owned()), CompareStatus::Diverged)]);
 
         let mark = classify(
             &id,
@@ -563,7 +534,7 @@ mod tests {
             entry(&[], "base", "base", Some(100)),
             entry(&["dep"], "head", "head", Some(200)),
         ];
-        let compares = HashMap::<(SourceId, String), super::CompareStatus>::new();
+        let compares = HashMap::<(SourceId, String), CompareStatus>::new();
 
         let mark = classify(
             &id,
@@ -577,33 +548,24 @@ mod tests {
     }
 
     #[test]
-    fn apply_follows_syncs_rev_full_rev_and_lm_to_target() {
+    fn apply_follows_syncs_rev_and_lm_to_target() {
         let id = source_id("github:o/r");
         let mut groups = BTreeMap::new();
         groups.insert(id.clone(), vec![
-            entry(&[], "nixpkgs", "newrev", Some(100)),
-            // a transitive input that follows nixpkgs, carrying its own stale rev
-            // and timestamp from before the follow was applied
+            entry(&[], "nixpkgs", "newrev-full", Some(100)),
+            // a transitive input that follows nixpkgs, carrying its own stale rev and timestamp
+            // from before the follow was applied
             entry(&["dep"], "nixpkgs-lib", "oldrev", Some(50)),
         ]);
         let by_name = BTreeMap::new(); // top resolves via [all_follow], not a parent's follows
         let all_follow = map(&[("nixpkgs-lib", "nixpkgs")]);
-        let top_revs = map(&[("nixpkgs", "newrev")]);
-        let top_full_revs = map(&[("nixpkgs", "newrev-full")]);
+        let top_revs = map(&[("nixpkgs", "newrev-full")]);
         let top_lms = iter::once(("nixpkgs".to_owned(), 100_u64)).collect();
 
-        apply_follows(
-            &mut groups,
-            &by_name,
-            &all_follow,
-            &top_revs,
-            &top_full_revs,
-            &top_lms,
-        );
+        apply_follows(&mut groups, &by_name, &all_follow, &top_revs, &top_lms);
 
         let followed = &groups[&id][1];
-        assert_eq!(followed.rev, "newrev");
-        assert_eq!(followed.full_rev, "newrev-full");
+        assert_eq!(followed.rev, "newrev-full");
         // lm should track the target rather than keeping the stale 50
         assert_eq!(followed.lm, Some(100));
     }
@@ -620,34 +582,18 @@ mod tests {
             Some(50),
         )]);
         let by_name = BTreeMap::new();
-        let top_revs = map(&[("replacement", "newrev")]);
-        let top_full_revs = map(&[("replacement", "newrev-full")]);
+        let top_revs = map(&[("replacement", "newrev-full")]);
         let top_lms = iter::once(("replacement".to_owned(), 100_u64)).collect();
 
         // a `flake:`-scoped rule must not touch a tack-side entry
         let flake_rule = map(&[("flake:dep", "replacement")]);
-        apply_follows(
-            &mut groups,
-            &by_name,
-            &flake_rule,
-            &top_revs,
-            &top_full_revs,
-            &top_lms,
-        );
+        apply_follows(&mut groups, &by_name, &flake_rule, &top_revs, &top_lms);
         assert_eq!(groups[&id][0].rev, "oldrev");
 
         // the matching `tack:`-scoped rule aligns it onto the target
         let tack_rule = map(&[("tack:dep", "replacement")]);
-        apply_follows(
-            &mut groups,
-            &by_name,
-            &tack_rule,
-            &top_revs,
-            &top_full_revs,
-            &top_lms,
-        );
-        assert_eq!(groups[&id][0].rev, "newrev");
-        assert_eq!(groups[&id][0].full_rev, "newrev-full");
+        apply_follows(&mut groups, &by_name, &tack_rule, &top_revs, &top_lms);
+        assert_eq!(groups[&id][0].rev, "newrev-full");
         assert_eq!(groups[&id][0].lm, Some(100));
     }
 
