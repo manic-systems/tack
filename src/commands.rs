@@ -47,6 +47,11 @@ use crate::{
         Unpack,
     },
     shorturl,
+    source::{
+        Source,
+        forge::Forge,
+        id::SourceId,
+    },
     ui::{
         Display,
         PinStatus,
@@ -308,7 +313,11 @@ pub fn add(
     let expanded = shorturl::expand(url, &pins::shorturls(&doc));
     let fetched = match pin_type {
         PinType::Fixed => fetch::fetch_fixed_pin(&expanded, unpack),
-        PinType::Flake | PinType::Fetch => fetch::fetch_pin(&expanded, submodules),
+        PinType::Flake | PinType::Fetch => {
+            expanded
+                .parse::<Source>()
+                .and_then(|source| fetch::fetch_pin(&source, submodules))
+        },
     };
     match fetched {
         Ok((node, rev)) => {
@@ -398,7 +407,7 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
             display.set(i, PinStatus::Fetching);
             let expanded = shorturl::expand(&inp.url, &shorturls);
             let old = lk.get(&inp.name);
-            let old_rev = old.and_then(lock::rev_of);
+            let old_rev = old.and_then(|n| lock::Node::from(n).rev());
             let fetched = fetch_for_update(inp, &expanded, old_rev);
             match fetched {
                 // for fixed pins sha256 is the identity; any mismatch is drift
@@ -421,10 +430,7 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
                 },
                 Ok(UpdateFetch { node, rev, .. }) if old_rev == Some(rev.as_str()) => {
                     // same rev, if hash moved, upstream changed under a stable rev
-                    let drifted = matches!(
-                        (old.and_then(lock::hash_of), lock::hash_of(&node)),
-                        (Some(prev), Some(curr)) if prev != curr
-                    );
+                    let drifted = hash_drifted(old, &node);
                     if drifted {
                         display.set(i, PinStatus::Drift {
                             rev:      short(&rev),
@@ -486,6 +492,16 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
     Ok(())
 }
 
+fn hash_drifted(old: Option<&Value>, node: &Value) -> bool {
+    matches!(
+        (
+            old.and_then(|n| lock::Node::from(n).hash()),
+            lock::Node::from(node).hash()
+        ),
+        (Some(prev), Some(curr)) if prev != curr
+    )
+}
+
 fn fetch_for_update(
     inp: &pins::Input,
     expanded: &str,
@@ -502,7 +518,8 @@ fn fetch_for_update(
             })
         },
         PinType::Flake | PinType::Fetch => {
-            fetch::fetch_pin_compared(expanded, inp.submodules, old_rev).map(|fetched| {
+            let source = expanded.parse::<Source>()?;
+            fetch::fetch_pin_compared(&source, inp.submodules, old_rev).map(|fetched| {
                 UpdateFetch {
                     node:       fetched.node,
                     rev:        fetched.rev,
@@ -607,7 +624,8 @@ fn write_auto_dedup(
     let mut compare_cache = HashMap::new();
     for (target, mut obs) in observations {
         if let Some(current) = lock.get(&target) {
-            let lm = last_modified(current)
+            let lm = lock::Node::from(current)
+                .last_modified()
                 .and_then(|lm| i64::try_from(lm).ok())
                 .unwrap_or(0);
             obs.insert(0, (lm, current.clone()));
@@ -665,9 +683,8 @@ fn compare_locked_nodes(
 }
 
 fn github_compare_parts(base: &Value, head: &Value) -> Option<(String, String, String, String)> {
-    if base.get("type").and_then(Value::as_str)? != "github"
-        || head.get("type").and_then(Value::as_str)? != "github"
-    {
+    let (base_node, head_node) = (lock::Node::from(base), lock::Node::from(head));
+    if base_node.kind()? != "github" || head_node.kind()? != "github" {
         return None;
     }
     let base_owner = base.get("owner")?.as_str()?;
@@ -680,8 +697,8 @@ fn github_compare_parts(base: &Value, head: &Value) -> Option<(String, String, S
     Some((
         base_owner.to_owned(),
         base_repo.to_owned(),
-        base.get("rev")?.as_str()?.to_owned(),
-        head.get("rev")?.as_str()?.to_owned(),
+        base_node.rev()?.to_owned(),
+        head_node.rev()?.to_owned(),
     ))
 }
 
@@ -720,8 +737,18 @@ pub fn look(names: &[String], verbose: bool) -> Result<()> {
         }
         display.set(i, PinStatus::Fetching);
         let expanded = shorturl::expand(&inp.url, &shorturls);
-        let old = lk.get(&inp.name).and_then(lock::rev_of).map(str::to_owned);
-        match fetch::current_rev_compared(&expanded, old.as_deref()) {
+        let source = match expanded.parse::<Source>() {
+            Ok(source) => source,
+            Err(err) => {
+                display.set(i, PinStatus::Failed(format!("{err:#}")));
+                return;
+            },
+        };
+        let old = lk
+            .get(&inp.name)
+            .and_then(|n| lock::Node::from(n).rev())
+            .map(str::to_owned);
+        match fetch::current_rev_compared(&source, old.as_deref()) {
             Ok(current) if old.as_deref() == Some(current.rev.as_str()) => {
                 display.set(i, PinStatus::NoChange);
             },
@@ -734,7 +761,7 @@ pub fn look(names: &[String], verbose: bool) -> Result<()> {
                 if verbose
                     && let Some(old_rev) = old.as_deref()
                     && let Ok(Some(log)) =
-                        fetch::commits_between(&expanded, old_rev, &current.rev, LOG_LIMIT)
+                        fetch::commits_between(&source, old_rev, &current.rev, LOG_LIMIT)
                 {
                     *logs[i].lock().unwrap() = Some(log);
                 }
@@ -803,7 +830,7 @@ struct Entry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CompareJob {
-    id:    String,
+    id:    SourceId,
     owner: String,
     repo:  String,
     base:  String,
@@ -811,7 +838,7 @@ struct CompareJob {
 }
 
 struct Finding {
-    identity: String,
+    identity: SourceId,
     entry:    Entry,
 }
 
@@ -899,7 +926,7 @@ fn follow_target(
 /// align each followed entry onto its target, which provides rev, full rev and
 /// `lastModified`.
 fn apply_follows(
-    groups: &mut BTreeMap<String, Vec<Entry>>,
+    groups: &mut BTreeMap<SourceId, Vec<Entry>>,
     by_name: &BTreeMap<&str, &pins::Input>,
     all_follow: &BTreeMap<String, String>,
     top_revs: &BTreeMap<String, String>,
@@ -945,18 +972,24 @@ pub fn dedup() -> Result<()> {
         .map(|inp| (inp.name.as_str(), inp))
         .collect::<BTreeMap<&str, &pins::Input>>();
 
-    let top_revs = top_map(&inputs, &lock, rev_for_display);
-    let top_full_revs = top_map(&inputs, &lock, rev_full);
-    let top_lms = top_map(&inputs, &lock, last_modified);
+    let top_revs = top_map(&inputs, &lock, |n| {
+        lock::Node::from(n).full_rev().map(short)
+    });
+    let top_full_revs = top_map(&inputs, &lock, |n| {
+        lock::Node::from(n).full_rev().map(str::to_owned)
+    });
+    let top_lms = top_map(&inputs, &lock, |n| lock::Node::from(n).last_modified());
 
-    let mut groups = BTreeMap::<String, Vec<Entry>>::new();
+    let mut groups = BTreeMap::<SourceId, Vec<Entry>>::new();
 
     for inp in &inputs {
         let expanded = shorturl::expand(&inp.url, &shorturls);
-        if let Some(id) = canonical_identity(&expanded) {
+        if let Some(id) = SourceId::from_url(&expanded) {
             let rev = top_revs.get(&inp.name).cloned().unwrap_or_default();
             let full_rev = top_full_revs.get(&inp.name).cloned().unwrap_or_default();
-            let lm = lock.get(&inp.name).and_then(last_modified);
+            let lm = lock
+                .get(&inp.name)
+                .and_then(|n| lock::Node::from(n).last_modified());
             groups.entry(id).or_default().push(Entry {
                 path: vec![],
                 name: inp.name.clone(),
@@ -1041,7 +1074,10 @@ fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
     let tmp = tempfile::tempdir()?;
     let root = match item.source {
         SourceRef::Locked(ref node) => fetch::fetch_locked_tree_into(node, tmp.path())?,
-        SourceRef::Url(ref url) => fetch::fetch_tree_into(url, item.submodules, tmp.path())?,
+        SourceRef::Url(ref url) => {
+            let source = url.parse::<Source>()?;
+            fetch::fetch_tree_into(&source, item.submodules, tmp.path())?
+        },
     };
     Ok(scan_tree(&root, &item.path))
 }
@@ -1049,97 +1085,39 @@ fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
 /// `authoritative = true` means a 404 on every probe is final, and `false`
 /// means the caller should fall back to clone
 fn try_raw_files(node: &Value) -> Option<(Option<String>, Option<String>, Option<String>)> {
-    let (_, authoritative) = forge_base(node)?;
+    let forge = Forge::from_node(node)?;
+    let rev = lock::Node::from(node).rev();
+    let probe = |file| {
+        let revision = rev?;
+        fetch_forge_file(&forge, revision, file)
+    };
     let triple = (
-        try_raw_file(node, "flake.lock"),
-        try_raw_file(node, ".tack/pins.toml"),
-        try_raw_file(node, ".tack/pins.lock.json"),
+        probe("flake.lock"),
+        probe(".tack/pins.toml"),
+        probe(".tack/pins.lock.json"),
     );
-    if !authoritative && triple.0.is_none() && triple.1.is_none() && triple.2.is_none() {
+    if !forge.authoritative() && triple.0.is_none() && triple.1.is_none() && triple.2.is_none() {
         None
     } else {
         Some(triple)
     }
 }
 
+fn fetch_forge_file(forge: &Forge, rev: &str, file: &str) -> Option<String> {
+    let raw = forge.raw_file_url(rev, file);
+    let body = fetch::raw(&raw.url).ok()?;
+    match raw.decoder {
+        Some(decode) => decode(&body).ok(),
+        None => Some(body),
+    }
+}
+
 /// fetch one file from a locked node via raw http. returns [`None`] on unknown
 /// host or http error
 fn try_raw_file(node: &Value, file: &str) -> Option<String> {
-    let (base, _) = forge_base(node)?;
-    let rev = node.get("rev").and_then(Value::as_str)?;
-    let (url, decoder) = forge_raw(&base, rev, file);
-    let body = fetch::raw(&url).ok()?;
-    if let Some(decode) = decoder {
-        decode(&body).ok()
-    } else {
-        Some(body)
-    }
-}
-
-/// (base url, authoritative) for raw-file probes. authoritative = true means
-/// a 404 is definitive
-fn forge_base(node: &Value) -> Option<(String, bool)> {
-    match node.get("type").and_then(Value::as_str)? {
-        "github" => {
-            let owner = node.get("owner").and_then(Value::as_str)?;
-            let repo = node.get("repo").and_then(Value::as_str)?;
-            Some((
-                format!("https://raw.githubusercontent.com/{owner}/{repo}"),
-                true,
-            ))
-        },
-        "gitlab" => {
-            let owner = node.get("owner").and_then(Value::as_str)?;
-            let repo = node.get("repo").and_then(Value::as_str)?;
-            let host = node
-                .get("host")
-                .and_then(Value::as_str)
-                .unwrap_or("gitlab.com");
-            Some((format!("https://{host}/{owner}/{repo}"), true))
-        },
-        "git" => {
-            let url = node.get("url").and_then(Value::as_str)?;
-            Some((url.strip_suffix(".git").unwrap_or(url).to_owned(), false))
-        },
-        _ => None,
-    }
-}
-
-/// body decoder applied after the http get
-type Decoder = fn(&str) -> Result<String>;
-
-/// map a repo base url + rev + file path to (raw-file url, optional decoder)
-fn forge_raw(base: &str, rev: &str, file: &str) -> (String, Option<Decoder>) {
-    let host = base
-        .split("://")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .unwrap_or("");
-    if host == "raw.githubusercontent.com" {
-        (format!("{base}/{rev}/{file}"), None)
-    } else if host == "gitlab.com" || host.starts_with("gitlab.") {
-        (format!("{base}/-/raw/{rev}/{file}"), None)
-    } else if host == "bitbucket.org" {
-        (format!("{base}/raw/{rev}/{file}"), None)
-    } else if host.starts_with("cgit.") || host == "git.kernel.org" {
-        (format!("{base}/plain/{file}?id={rev}"), None)
-    } else if host.ends_with(".googlesource.com") || host.starts_with("gerrit.") {
-        // gerrit/gitiles returns base64-encoded text under ?format=TEXT
-        (
-            format!("{base}/+/{rev}/{file}?format=TEXT"),
-            Some(decode_b64),
-        )
-    } else {
-        // forgejo / gitea / codeberg / unknown self-hosted
-        (format!("{base}/raw/commit/{rev}/{file}"), None)
-    }
-}
-
-fn decode_b64(body: &str) -> Result<String> {
-    let bytes = data_encoding::BASE64
-        .decode(body.trim().as_bytes())
-        .map_err(|err| anyhow::anyhow!("base64 decode: {err}"))?;
-    String::from_utf8(bytes).map_err(|err| anyhow::anyhow!("utf-8 decode: {err}"))
+    let forge = Forge::from_node(node)?;
+    let rev = lock::Node::from(node).rev()?;
+    fetch_forge_file(&forge, rev, file)
 }
 
 fn scan_tree(root: &Path, path: &[String]) -> ScanResult {
@@ -1176,16 +1154,22 @@ fn scan_files(
                 let Some(locked) = node.get("locked") else {
                     continue;
                 };
-                if let Some(id) = node_identity(locked) {
+                if let Some(id) = SourceId::from_node(locked) {
                     findings.push(Finding {
                         identity: id,
                         entry:    Entry {
                             path:     path.to_vec(),
                             name:     strip_disambiguator(key).to_owned(),
                             side:     Side::Flake,
-                            rev:      rev_for_display(locked).unwrap_or_default(),
-                            full_rev: rev_full(locked).unwrap_or_default(),
-                            lm:       last_modified(locked),
+                            rev:      lock::Node::from(locked)
+                                .full_rev()
+                                .map(short)
+                                .unwrap_or_default(),
+                            full_rev: lock::Node::from(locked)
+                                .full_rev()
+                                .map(str::to_owned)
+                                .unwrap_or_default(),
+                            lm:       lock::Node::from(locked).last_modified(),
                         },
                     });
                 }
@@ -1203,7 +1187,7 @@ fn scan_files(
         let tshort = pins::shorturls(&doc);
         for tinp in &tinputs {
             let expanded = shorturl::expand(&tinp.url, &tshort);
-            if let Some(id) = canonical_identity(&expanded) {
+            if let Some(id) = SourceId::from_url(&expanded) {
                 findings.push(Finding {
                     identity: id,
                     entry:    Entry {
@@ -1212,10 +1196,15 @@ fn scan_files(
                         side:     Side::Tack,
                         rev:      tlock
                             .get(&tinp.name)
-                            .and_then(rev_for_display)
+                            .and_then(|n| lock::Node::from(n).full_rev().map(short))
                             .unwrap_or_default(),
-                        full_rev: tlock.get(&tinp.name).and_then(rev_full).unwrap_or_default(),
-                        lm:       tlock.get(&tinp.name).and_then(last_modified),
+                        full_rev: tlock
+                            .get(&tinp.name)
+                            .and_then(|n| lock::Node::from(n).full_rev().map(str::to_owned))
+                            .unwrap_or_default(),
+                        lm:       tlock
+                            .get(&tinp.name)
+                            .and_then(|n| lock::Node::from(n).last_modified()),
                     },
                 });
             }
@@ -1242,72 +1231,13 @@ fn scan_files(
     }
 }
 
-fn canonical_identity(expanded: &str) -> Option<String> {
-    let no_query = expanded.split('?').next().unwrap_or(expanded);
-    let path = no_query.split('#').next().unwrap_or(no_query);
-    let id = if let Some(body) = path.strip_prefix("github:") {
-        let mut segs = body.split('/');
-        let owner = segs.next()?;
-        let repo = segs.next()?;
-        if owner.is_empty() || repo.is_empty() {
-            return None;
-        }
-        format!("github:{owner}/{repo}")
-    } else if let Some(rest) = path.strip_prefix("git+") {
-        format!("git+{rest}")
-    } else if path.starts_with("http://") || path.starts_with("https://") {
-        format!("tarball:{path}")
-    } else {
-        return None;
-    };
-    Some(id.to_lowercase())
-}
-
-fn node_identity(locked: &Value) -> Option<String> {
-    let ty = locked.get("type")?.as_str()?;
-    let id = match ty {
-        "github" => {
-            let owner = locked.get("owner")?.as_str()?;
-            let repo = locked.get("repo")?.as_str()?;
-            format!("github:{owner}/{repo}")
-        },
-        "git" => {
-            let url = locked.get("url")?.as_str()?;
-            let cut = url.split('?').next().unwrap_or(url);
-            format!("git+{cut}")
-        },
-        "tarball" => format!("tarball:{}", locked.get("url")?.as_str()?),
-        "indirect" => format!("indirect:{}", locked.get("id")?.as_str()?),
-        "path" => format!("path:{}", locked.get("path")?.as_str()?),
-        _ => return None,
-    };
-    Some(id.to_lowercase())
-}
-
 fn source_key(source: &SourceRef) -> String {
     match *source {
-        SourceRef::Locked(ref node) => node_identity(node).unwrap_or_else(|| node.to_string()),
+        SourceRef::Locked(ref node) => {
+            SourceId::from_node(node).map_or_else(|| node.to_string(), |id| id.to_string())
+        },
         SourceRef::Url(ref url) => url.clone(),
     }
-}
-
-fn last_modified(node: &Value) -> Option<u64> {
-    node.get("lastModified").and_then(Value::as_u64)
-}
-
-fn rev_for_display(node: &Value) -> Option<String> {
-    rev_full(node).as_deref().map(short)
-}
-
-/// the locked node's identifying string, untruncated: `rev`, else `url`, else
-/// `sha256`. [`rev_for_display`] is just this passed through [`short`].
-fn rev_full(node: &Value) -> Option<String> {
-    for key in ["rev", "url", "sha256"] {
-        if let Some(val) = node.get(key).and_then(Value::as_str) {
-            return Some(val.to_owned());
-        }
-    }
-    None
 }
 
 /// flake.lock disambiguates same-named nodes as `name_2`, `name_3`, ...;
@@ -1369,7 +1299,7 @@ const fn entry_compare_rev(entry: &Entry) -> &str {
 /// build github compare work for every divergent rev against its comparator.
 /// returned jobs carry full revs for both the network request and the result
 /// map keys; rendering remains separately abbreviated.
-fn compare_jobs(groups: &BTreeMap<String, Vec<Entry>>) -> (Vec<CompareJob>, usize) {
+fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<CompareJob>, usize) {
     let mut jobs = groups
         .iter()
         .filter(|group| group_diverges(group.1))
@@ -1378,7 +1308,7 @@ fn compare_jobs(groups: &BTreeMap<String, Vec<Entry>>) -> (Vec<CompareJob>, usiz
             if base.full_rev.is_empty() {
                 return None; // nothing concrete to compare against
             }
-            let (owner, repo) = id.strip_prefix("github:")?.split_once('/')?;
+            let (owner, repo) = id.github_parts()?;
             let mut seen = HashSet::new();
             let heads = entries
                 .iter()
@@ -1410,10 +1340,12 @@ fn compare_jobs(groups: &BTreeMap<String, Vec<Entry>>) -> (Vec<CompareJob>, usiz
 /// ask github for the direction of every divergent rev against its comparator,
 /// in bounded parallel batches. keyed by `(group id, full rev)`. misses are
 /// reported and fall back to commit-date ordering.
-fn ahead_behind(groups: &BTreeMap<String, Vec<Entry>>) -> HashMap<(String, String), CompareStatus> {
+fn ahead_behind(
+    groups: &BTreeMap<SourceId, Vec<Entry>>,
+) -> HashMap<(SourceId, String), CompareStatus> {
     let (jobs, capped) = compare_jobs(groups);
     let attempted = jobs.len();
-    let mut compares = HashMap::<(String, String), CompareStatus>::new();
+    let mut compares = HashMap::<(SourceId, String), CompareStatus>::new();
     for chunk in jobs.chunks(MAX_LIVE_COMPARE_JOBS) {
         compares.extend(
             chunk
@@ -1442,10 +1374,10 @@ fn ahead_behind(groups: &BTreeMap<String, Vec<Entry>>) -> HashMap<(String, Strin
 /// measured against its comparator: github ahead/behind when we have it,
 /// commit-date ordering otherwise. also returns the widest glyph, for padding
 fn group_marks<'a>(
-    id: &str,
+    id: &SourceId,
     entries: &'a [Entry],
     revs: impl Iterator<Item = &'a str>,
-    compares: &HashMap<(String, String), CompareStatus>,
+    compares: &HashMap<(SourceId, String), CompareStatus>,
 ) -> (BTreeMap<&'a str, (String, usize)>, usize) {
     // a plain "~" marks a date-based guess
     const APPROX: &str = "~";
@@ -1473,7 +1405,7 @@ fn group_marks<'a>(
         if rev == entry_compare_rev(comp) {
             return (paint(36_i32, "="), 1); // = comparator
         }
-        if let Some(status) = compares.get(&(id.to_owned(), rev.to_owned())) {
+        if let Some(status) = compares.get(&(id.clone(), rev.to_owned())) {
             // real direction from github's merge-base comparison
             match *status {
                 CompareStatus::Ahead => return (paint(32_i32, "\u{2191}"), 1), // ↑ newer
@@ -1525,9 +1457,9 @@ fn group_sources_by_rev(entries: &[Entry]) -> SourcesByRev<'_> {
 }
 
 fn print_groups(
-    groups: &BTreeMap<String, Vec<Entry>>,
+    groups: &BTreeMap<SourceId, Vec<Entry>>,
     all_follow: &BTreeMap<String, String>,
-    compares: &HashMap<(String, String), CompareStatus>,
+    compares: &HashMap<(SourceId, String), CompareStatus>,
 ) {
     const MAX_SOURCES: usize = 5;
 
@@ -1668,10 +1600,8 @@ fn collapse_follow(follow: &BTreeMap<String, String>) -> Vec<(String, String)> {
 
 /// suggested top-level name for a transitive-only group. this uses the github
 /// repo basename when available, else the shortest alias seen
-fn pick_name(id: &str, aliases: &BTreeSet<String>) -> String {
-    if let Some(rest) = id.strip_prefix("github:")
-        && let Some((_, repo)) = rest.split_once('/')
-    {
+fn pick_name(id: &SourceId, aliases: &BTreeSet<String>) -> String {
+    if let Some((_, repo)) = id.github_parts() {
         return repo.trim_end_matches(".nix").replace('.', "-");
     }
     aliases
@@ -1788,6 +1718,7 @@ mod tests {
         rm_in_dir,
         wires_overrides,
     };
+    use crate::source::id::SourceId;
 
     #[test]
     fn wires_overrides_ignores_comments() {
@@ -1850,6 +1781,10 @@ mod tests {
         node.get("rev").and_then(Value::as_str).unwrap()
     }
 
+    fn source_id(str: &str) -> SourceId {
+        SourceId::from_url(str).unwrap()
+    }
+
     #[test]
     fn collapse_single_alias_uses_string_form() {
         let lines = collapse_follow(&map(&[("nixpkgs", "nixpkgs")]));
@@ -1880,11 +1815,17 @@ mod tests {
     #[test]
     fn pick_name_strips_dot_nix_and_flattens_dots() {
         assert_eq!(
-            pick_name("github:cachix/git-hooks.nix", &set(&["git-hooks"])),
+            pick_name(
+                &source_id("github:cachix/git-hooks.nix"),
+                &set(&["git-hooks"])
+            ),
             "git-hooks"
         );
         assert_eq!(
-            pick_name("github:nix-community/nixpkgs.lib", &set(&["nixpkgs-lib"])),
+            pick_name(
+                &source_id("github:nix-community/nixpkgs.lib"),
+                &set(&["nixpkgs-lib"])
+            ),
             "nixpkgs-lib"
         );
     }
@@ -1892,7 +1833,7 @@ mod tests {
     #[test]
     fn pick_name_falls_back_to_shortest_alias_for_non_github() {
         let aliases = set(&["my-pin", "the-tarball"]);
-        assert_eq!(pick_name("tarball:https://x/y", &aliases), "my-pin");
+        assert_eq!(pick_name(&source_id("https://x/y"), &aliases), "my-pin");
     }
 
     #[test]
@@ -2002,7 +1943,7 @@ mod tests {
     #[test]
     fn compare_jobs_use_full_revs_and_display_short_keys() {
         let mut groups = BTreeMap::new();
-        groups.insert("github:o/r".to_owned(), vec![
+        groups.insert(source_id("github:o/r"), vec![
             entry_full(
                 &[],
                 "base",
@@ -2040,7 +1981,7 @@ mod tests {
             ));
         }
         let mut groups = BTreeMap::new();
-        groups.insert("github:o/r".to_owned(), entries);
+        groups.insert(source_id("github:o/r"), entries);
 
         let (jobs, capped) = compare_jobs(&groups);
 
@@ -2050,17 +1991,16 @@ mod tests {
 
     #[test]
     fn group_marks_prefer_branch_status_over_misleading_timestamps() {
+        let id = source_id("github:o/r");
         let entries = vec![
             entry(&[], "base", "base", Some(500)),
             entry(&["dep"], "head", "head", Some(100)),
         ];
-        let compares = HashMap::from([(
-            ("github:o/r".to_owned(), "head".to_owned()),
-            super::CompareStatus::Ahead,
-        )]);
+        let compares =
+            HashMap::from([((id.clone(), "head".to_owned()), super::CompareStatus::Ahead)]);
 
         let (marks, width) = group_marks(
-            "github:o/r",
+            &id,
             &entries,
             entries.iter().map(|entry| entry.rev.as_str()),
             &compares,
@@ -2075,17 +2015,18 @@ mod tests {
 
     #[test]
     fn group_marks_show_diverged_branch_status_without_marker() {
+        let id = source_id("github:o/r");
         let entries = vec![
             entry(&[], "base", "base", Some(100)),
             entry(&["dep"], "head", "head", Some(200)),
         ];
         let compares = HashMap::from([(
-            ("github:o/r".to_owned(), "head".to_owned()),
+            (id.clone(), "head".to_owned()),
             super::CompareStatus::Diverged,
         )]);
 
         let (marks, width) = group_marks(
-            "github:o/r",
+            &id,
             &entries,
             entries.iter().map(|entry| entry.rev.as_str()),
             &compares,
@@ -2101,6 +2042,7 @@ mod tests {
 
     #[test]
     fn group_marks_distinguish_timestamp_fallback_with_marker() {
+        let id = source_id("github:o/r");
         let entries = vec![
             entry(&[], "base", "base", Some(100)),
             entry(&["dep"], "head", "head", Some(200)),
@@ -2108,7 +2050,7 @@ mod tests {
         let compares = HashMap::new();
 
         let (marks, width) = group_marks(
-            "github:o/r",
+            &id,
             &entries,
             entries.iter().map(|entry| entry.rev.as_str()),
             &compares,
@@ -2123,8 +2065,9 @@ mod tests {
 
     #[test]
     fn apply_follows_syncs_rev_full_rev_and_lm_to_target() {
+        let id = source_id("github:o/r");
         let mut groups = BTreeMap::new();
-        groups.insert("github:o/r".to_owned(), vec![
+        groups.insert(id.clone(), vec![
             entry(&[], "nixpkgs", "newrev", Some(100)),
             // a transitive input that follows nixpkgs, carrying its own stale rev
             // and timestamp from before the follow was applied
@@ -2145,7 +2088,7 @@ mod tests {
             &top_lms,
         );
 
-        let followed = &groups["github:o/r"][1];
+        let followed = &groups[&id][1];
         assert_eq!(followed.rev, "newrev");
         assert_eq!(followed.full_rev, "newrev-full");
         // lm should track the target rather than keeping the stale 50
@@ -2155,8 +2098,9 @@ mod tests {
     #[test]
     fn apply_follows_honors_scoped_all_follow_per_side() {
         // an upstream tack pin `dep`, recorded as a tack-side finding
+        let id = source_id("github:o/r");
         let mut groups = BTreeMap::new();
-        groups.insert("github:o/r".to_owned(), vec![tack_entry(
+        groups.insert(id.clone(), vec![tack_entry(
             &["parent"],
             "dep",
             "oldrev",
@@ -2177,7 +2121,7 @@ mod tests {
             &top_full_revs,
             &top_lms,
         );
-        assert_eq!(groups["github:o/r"][0].rev, "oldrev");
+        assert_eq!(groups[&id][0].rev, "oldrev");
 
         // the matching `tack:`-scoped rule aligns it onto the target
         let tack_rule = map(&[("tack:dep", "replacement")]);
@@ -2189,9 +2133,9 @@ mod tests {
             &top_full_revs,
             &top_lms,
         );
-        assert_eq!(groups["github:o/r"][0].rev, "newrev");
-        assert_eq!(groups["github:o/r"][0].full_rev, "newrev-full");
-        assert_eq!(groups["github:o/r"][0].lm, Some(100));
+        assert_eq!(groups[&id][0].rev, "newrev");
+        assert_eq!(groups[&id][0].full_rev, "newrev-full");
+        assert_eq!(groups[&id][0].lm, Some(100));
     }
 
     #[test]

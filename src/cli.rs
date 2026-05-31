@@ -124,11 +124,7 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
                             .value()?
                             .string()
                             .map_err(|_| anyhow::anyhow!("bad unpack"))?;
-                        unpack = Some(match value.as_str() {
-                            "tarball" => Unpack::Tarball,
-                            "file" => Unpack::File,
-                            other => bail!("unknown unpack '{other}' (expected tarball|file)"),
-                        });
+                        unpack = Some(value.parse::<Unpack>()?);
                     },
                     Long("submodules") => submodules = true,
                     Long("dir") => {

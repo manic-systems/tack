@@ -8,6 +8,7 @@ mod lock;
 mod nar;
 mod pins;
 mod shorturl;
+mod source;
 mod ui;
 
 use std::process;

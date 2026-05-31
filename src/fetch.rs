@@ -49,6 +49,7 @@ use xz2::read::XzDecoder;
 use crate::{
     nar,
     pins::Unpack,
+    source::Source,
 };
 
 fn agent() -> &'static Agent {
@@ -65,74 +66,6 @@ fn github_token() -> Option<String> {
     env::var("GITHUB_TOKEN")
         .or_else(|_| env::var("GH_TOKEN"))
         .ok()
-}
-
-enum Target {
-    Github {
-        owner: String,
-        repo:  String,
-        reff:  Option<String>,
-        rev:   Option<String>,
-    },
-    Git {
-        url:  String,
-        reff: Option<String>,
-        rev:  Option<String>,
-    },
-    Tarball {
-        url: String,
-    },
-}
-
-#[expect(
-    clippy::similar_names,
-    reason = "ref and rev are user-facing URL fields"
-)]
-fn parse(expanded: &str) -> Result<Target> {
-    if let Some(body) = expanded.strip_prefix("github:") {
-        let (path, query_ref, query_rev) = split_query(body);
-        let segs = path.split('/').collect::<Vec<&str>>();
-        if segs.len() < 2 {
-            bail!("malformed github url: {expanded}");
-        }
-        let reff = query_ref.or_else(|| (segs.len() > 2).then(|| segs[2..].join("/")));
-        return Ok(Target::Github {
-            owner: segs[0].to_owned(),
-            repo: segs[1].to_owned(),
-            reff,
-            rev: query_rev,
-        });
-    }
-    if let Some(rest) = expanded.strip_prefix("git+") {
-        let (url, reff, rev) = split_query(rest);
-        return Ok(Target::Git {
-            url: url.to_owned(),
-            reff,
-            rev,
-        });
-    }
-    if expanded.starts_with("https://") || expanded.starts_with("http://") {
-        return Ok(Target::Tarball {
-            url: expanded.to_owned(),
-        });
-    }
-    bail!("unsupported url scheme: {expanded}")
-}
-
-/// pull out ref= and rev=
-fn split_query(str: &str) -> (&str, Option<String>, Option<String>) {
-    let Some((path, query)) = str.split_once('?') else {
-        return (str, None, None);
-    };
-    let (mut reff, mut rev) = (None, None);
-    for kv in query.split('&') {
-        if let Some(value) = kv.strip_prefix("ref=") {
-            reff = Some(value.to_owned());
-        } else if let Some(value) = kv.strip_prefix("rev=") {
-            rev = Some(value.to_owned());
-        }
-    }
-    (path, reff, rev)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,38 +103,41 @@ pub struct CurrentRev {
 }
 
 /// upstream rev plus, when possible, branch topology against `old_rev`.
-pub fn current_rev_compared(expanded: &str, old_rev: Option<&str>) -> Result<CurrentRev> {
-    match parse(expanded)? {
-        Target::Github {
-            owner,
-            repo,
-            reff,
-            rev: pinned,
+pub fn current_rev_compared(source: &Source, old_rev: Option<&str>) -> Result<CurrentRev> {
+    match *source {
+        Source::Github {
+            ref owner,
+            ref repo,
+            ref reff,
+            rev: ref pinned,
         } => {
-            if let Some(rev) = pinned {
-                let comparison = if old_rev == Some(rev.as_str()) {
+            if let Some(pinned_rev) = pinned.as_deref() {
+                let comparison = if old_rev == Some(pinned_rev) {
                     BranchComparison::verified(CompareStatus::Identical)
                 } else {
                     BranchComparison::none()
                 };
-                return Ok(CurrentRev { rev, comparison });
+                return Ok(CurrentRev {
+                    rev: pinned_rev.to_owned(),
+                    comparison,
+                });
             }
             let ref_str = reff.as_deref().unwrap_or("HEAD");
             if let Some(previous_rev) = old_rev
-                && let Ok(resolved) = gh_ref_compare(&owner, &repo, reff.as_deref(), previous_rev)
+                && let Ok(resolved) = gh_ref_compare(owner, repo, reff.as_deref(), previous_rev)
             {
-                let filled = backfill_comparison(&owner, &repo, previous_rev, resolved);
+                let filled = backfill_comparison(owner, repo, previous_rev, resolved);
                 return Ok(CurrentRev {
                     rev:        filled.rev,
                     comparison: filled.comparison,
                 });
             }
-            let (rev, _) = gh_commit(&owner, &repo, ref_str)?;
+            let (rev, _) = gh_commit(owner, repo, ref_str)?;
             let comparison = old_rev.map_or_else(BranchComparison::none, |previous_rev| {
                 if previous_rev == rev.as_str() {
                     BranchComparison::verified(CompareStatus::Identical)
                 } else {
-                    compare_status(&owner, &repo, previous_rev, &rev)
+                    compare_status(owner, repo, previous_rev, &rev)
                         .ok()
                         .flatten()
                         .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
@@ -209,20 +145,20 @@ pub fn current_rev_compared(expanded: &str, old_rev: Option<&str>) -> Result<Cur
             });
             Ok(CurrentRev { rev, comparison })
         },
-        Target::Git {
-            url,
-            reff,
-            rev: pinned,
+        Source::Git {
+            ref url,
+            ref reff,
+            rev: ref pinned,
         } => {
             // a pinned rev never moves; report it without touching the network
-            if let Some(pinned_rev) = pinned {
-                let comparison = if old_rev == Some(pinned_rev.as_str()) {
+            if let Some(pinned_rev) = pinned.as_deref() {
+                let comparison = if old_rev == Some(pinned_rev) {
                     BranchComparison::verified(CompareStatus::Identical)
                 } else {
                     BranchComparison::none()
                 };
                 return Ok(CurrentRev {
-                    rev: pinned_rev,
+                    rev: pinned_rev.to_owned(),
                     comparison,
                 });
             }
@@ -246,20 +182,20 @@ pub fn current_rev_compared(expanded: &str, old_rev: Option<&str>) -> Result<Cur
             }
             bail!("ref {want} not found on {url}")
         },
-        Target::Tarball { url } => {
+        Source::Tarball { ref url } => {
             let resp = agent()
-                .head(&url)
+                .head(url.as_str())
                 .header("User-Agent", "tack")
                 .call()
                 .or_else(|_| {
                     agent()
-                        .get(&url)
+                        .get(url.as_str())
                         .header("User-Agent", "tack")
                         .call()
                         .map_err(Box::new)
                 })
                 .with_context(|| format!("probe {url}"))?;
-            let rev = immutable_url_of(&resp, &url);
+            let rev = immutable_url_of(&resp, url);
             let comparison = if old_rev == Some(rev.as_str()) {
                 BranchComparison::verified(CompareStatus::Identical)
             } else {
@@ -366,42 +302,46 @@ pub fn fetch_locked_tree_into(node: &Value, dir: &Path) -> Result<PathBuf> {
 
 /// fetch a tree by parsed URL into `dir`; no narhash, no metadata.
 /// used when traversing tack transitives that have no committed lock.
-pub fn fetch_tree_into(expanded: &str, submodules: bool, dir: &Path) -> Result<PathBuf> {
-    match parse(expanded)? {
-        Target::Github {
-            owner,
-            repo,
-            reff,
-            rev: pinned,
+pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<PathBuf> {
+    match *source {
+        Source::Github {
+            ref owner,
+            ref repo,
+            ref reff,
+            rev: ref pinned,
         } => {
-            let tree_rev = if let Some(pinned_rev) = pinned {
-                pinned_rev
+            let tree_rev = if let Some(pinned_rev) = pinned.as_deref() {
+                pinned_rev.to_owned()
             } else {
                 let ref_str = reff.as_deref().unwrap_or("HEAD");
-                gh_commit(&owner, &repo, ref_str)?.0
+                gh_commit(owner, repo, ref_str)?.0
             };
-            download_github_tarball(&owner, &repo, &tree_rev, dir)
+            download_github_tarball(owner, repo, &tree_rev, dir)
         },
-        Target::Git { url, reff, rev } => {
-            git_checkout(&url, reff.as_deref(), rev.as_deref(), submodules, dir)?;
+        Source::Git {
+            ref url,
+            ref reff,
+            ref rev,
+        } => {
+            git_checkout(url, reff.as_deref(), rev.as_deref(), submodules, dir)?;
             let _ = fs::remove_dir_all(dir.join(".git"));
             Ok(dir.to_owned())
         },
-        Target::Tarball { url } => {
+        Source::Tarball { ref url } => {
             let mut resp = agent()
-                .get(&url)
+                .get(url.as_str())
                 .header("User-Agent", "tack")
                 .call()
                 .with_context(|| format!("GET {url}"))?;
-            let format = detect_tar_format(&url).with_context(|| format!("tarball {url}"))?;
+            let format = detect_tar_format(url).with_context(|| format!("tarball {url}"))?;
             unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
         },
     }
 }
 
 /// fetch the tree, return (locked node, rev)
-pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
-    fetch_pin_compared(expanded, submodules, None).map(|fetched| (fetched.node, fetched.rev))
+pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(Value, String)> {
+    fetch_pin_compared(source, submodules, None).map(|fetched| (fetched.node, fetched.rev))
 }
 
 pub struct FetchedPin {
@@ -412,25 +352,25 @@ pub struct FetchedPin {
 
 /// fetch the tree, returning branch topology against `old_rev` when available.
 pub fn fetch_pin_compared(
-    expanded: &str,
+    source: &Source,
     submodules: bool,
     old_rev: Option<&str>,
 ) -> Result<FetchedPin> {
-    match parse(expanded)? {
-        Target::Github {
-            owner,
-            repo,
-            reff,
-            rev: pinned,
-        } => fetch_github_pin_compared(&owner, &repo, reff.as_deref(), pinned, old_rev),
-        Target::Git {
-            url,
-            reff,
-            rev: rev_arg,
+    match *source {
+        Source::Github {
+            ref owner,
+            ref repo,
+            ref reff,
+            rev: ref pinned,
+        } => fetch_github_pin_compared(owner, repo, reff.as_deref(), pinned.clone(), old_rev),
+        Source::Git {
+            ref url,
+            ref reff,
+            rev: ref rev_arg,
         } => {
             let dir = tempfile::tempdir()?;
             let (rev, last_modified, refname) = git_checkout(
-                &url,
+                url,
                 reff.as_deref(),
                 rev_arg.as_deref(),
                 submodules,
@@ -455,13 +395,13 @@ pub fn fetch_pin_compared(
                 comparison: BranchComparison::none(),
             })
         },
-        Target::Tarball { url } => {
+        Source::Tarball { ref url } => {
             let mut resp = agent()
-                .get(&url)
+                .get(url.as_str())
                 .header("User-Agent", "tack")
                 .call()
                 .with_context(|| format!("GET {url}"))?;
-            let immutable_url = immutable_url_of(&resp, &url);
+            let immutable_url = immutable_url_of(&resp, url);
             let last_modified = resp
                 .headers()
                 .get("Last-Modified")
@@ -469,7 +409,7 @@ pub fn fetch_pin_compared(
                 .and_then(|header| epoch_from_http_date(header).ok())
                 .unwrap_or(0);
             let format = detect_tar_format(&immutable_url)
-                .or_else(|_| detect_tar_format(&url))
+                .or_else(|_| detect_tar_format(url))
                 .with_context(|| format!("tarball {url}"))?;
 
             let dir = tempfile::tempdir()?;
@@ -961,12 +901,17 @@ pub struct CommitLog {
 /// fresh commits between `old` and `new` revs, capped at `limit`. [`None`] for
 /// non-github targets (no clone-free way to do this yet).
 pub fn commits_between(
-    expanded: &str,
+    source: &Source,
     old: &str,
     new: &str,
     limit: usize,
 ) -> Result<Option<CommitLog>> {
-    let Target::Github { owner, repo, .. } = parse(expanded)? else {
+    let &Source::Github {
+        ref owner,
+        ref repo,
+        ..
+    } = source
+    else {
         return Ok(None);
     };
     let url = format!("https://api.github.com/repos/{owner}/{repo}/compare/{old}...{new}");
@@ -1213,47 +1158,17 @@ const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 }
 
 #[cfg(test)]
-#[expect(clippy::panic, reason = "panic is the test-failure coping mechanism")]
 mod tests {
     use super::*;
 
     #[test]
-    fn git_rev_query() {
-        match parse("git+https://example.com/o/r?ref=main&rev=abc123").unwrap() {
-            Target::Git { url, reff, rev } => {
-                assert_eq!(url, "https://example.com/o/r");
-                assert_eq!(reff.as_deref(), Some("main"));
-                assert_eq!(rev.as_deref(), Some("abc123"));
-            },
-            Target::Github { .. } | Target::Tarball { .. } => panic!("expected git target"),
-        }
-        match parse("git+ssh://git@example.com/o/r?rev=deadbeef").unwrap() {
-            Target::Git { reff, rev, .. } => {
-                assert_eq!(reff, None);
-                assert_eq!(rev.as_deref(), Some("deadbeef"));
-            },
-            Target::Github { .. } | Target::Tarball { .. } => panic!("expected git target"),
-        }
-    }
-
-    #[test]
-    fn github_rev_is_committish() {
-        match parse("github:o/r?rev=abc123").unwrap() {
-            Target::Github { reff, rev, .. } => {
-                assert_eq!(reff, None);
-                assert_eq!(rev.as_deref(), Some("abc123"));
-            },
-            Target::Git { .. } | Target::Tarball { .. } => panic!("expected github target"),
-        }
-    }
-
-    #[test]
     fn github_pinned_rev_skips_branch_comparison() {
-        let mismatched = current_rev_compared("github:o/r?rev=abc123", Some("old")).unwrap();
+        let source = "github:o/r?rev=abc123".parse::<Source>().unwrap();
+        let mismatched = current_rev_compared(&source, Some("old")).unwrap();
         assert_eq!(mismatched.rev, "abc123");
         assert_eq!(mismatched.comparison, BranchComparison::none());
 
-        let identical = current_rev_compared("github:o/r?rev=abc123", Some("abc123")).unwrap();
+        let identical = current_rev_compared(&source, Some("abc123")).unwrap();
         assert_eq!(identical.rev, "abc123");
         assert_eq!(
             identical.comparison,
@@ -1392,23 +1307,6 @@ mod tests {
             local_compare(&repo, base, amended_with_newer_timestamp),
             CompareStatus::Diverged
         );
-    }
-
-    #[test]
-    fn https_url_is_tarball() {
-        match parse("https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz").unwrap() {
-            Target::Tarball { url } => {
-                assert_eq!(
-                    url,
-                    "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz"
-                );
-            },
-            Target::Github { .. } | Target::Git { .. } => panic!("expected tarball target"),
-        }
-        match parse("http://example.com/release.tar.gz").unwrap() {
-            Target::Tarball { .. } => {},
-            Target::Github { .. } | Target::Git { .. } => panic!("expected tarball target"),
-        }
     }
 
     #[test]
