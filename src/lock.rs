@@ -6,10 +6,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{
-    Context as _,
-    Result,
-};
+use eyre::Result;
 use serde_json::Value;
 
 /// name -> locked node; btreemap keeps the file sorted
@@ -70,17 +67,9 @@ impl<'a> Node<'a> {
     }
 }
 
-pub fn load(path: &Path) -> Result<Lock> {
-    if !path.exists() {
-        return Ok(Lock::new());
-    }
-    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    parse(&raw).with_context(|| format!("parse {}", path.display()))
-}
-
 /// parse pins.lock.json from an in-memory string
-pub fn parse(raw: &str) -> Result<Lock> {
-    serde_json::from_str(raw).context("parse pins.lock.json")
+pub fn parse(raw: &str) -> Result<Lock, serde_json::Error> {
+    serde_json::from_str(raw)
 }
 
 pub fn save(path: &Path, lock: &Lock) -> Result<()> {

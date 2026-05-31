@@ -3,19 +3,45 @@
 use std::{
     env,
     fs,
+    io,
     path::{
         Path,
         PathBuf,
     },
+    result::Result as StdResult,
 };
 
-use anyhow::Result;
+use eyre::Result as EyreResult;
 use toml_edit::DocumentMut;
 
 use crate::{
     lock,
     pins,
 };
+
+#[derive(thiserror::Error, Debug)]
+pub enum ConfigError {
+    #[error("no pins.toml at {0} (run \u{60}tack init\u{60})")]
+    Missing(PathBuf),
+    #[error("read {path}")]
+    Read {
+        path:   PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("parse {path}")]
+    ParseToml {
+        path:   PathBuf,
+        #[source]
+        source: toml_edit::TomlError,
+    },
+    #[error("parse {path}")]
+    ParseLock {
+        path:   PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
 
 /// The on-disk tack workspace: a directory and the files it owns.
 pub struct Project {
@@ -61,25 +87,45 @@ impl Project {
         self.dir.join("default.nix")
     }
 
-    pub fn load_pins(&self) -> Result<DocumentMut> {
-        pins::load(&self.pins_path())
+    pub fn load_pins(&self) -> StdResult<DocumentMut, ConfigError> {
+        let path = self.pins_path();
+        if !path.exists() {
+            return Err(ConfigError::Missing(path));
+        }
+        let raw = fs::read_to_string(&path).map_err(|source| {
+            ConfigError::Read {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        pins::parse_doc(&raw).map_err(|source| ConfigError::ParseToml { path, source })
     }
 
-    pub fn save_pins(&self, doc: &DocumentMut) -> Result<()> {
+    pub fn save_pins(&self, doc: &DocumentMut) -> EyreResult<()> {
         pins::save(&self.pins_path(), doc)
     }
 
-    pub fn load_lock(&self) -> Result<lock::Lock> {
-        lock::load(&self.lock_path())
+    pub fn load_lock(&self) -> StdResult<lock::Lock, ConfigError> {
+        let path = self.lock_path();
+        if !path.exists() {
+            return Ok(lock::Lock::new());
+        }
+        let raw = fs::read_to_string(&path).map_err(|source| {
+            ConfigError::Read {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        lock::parse(&raw).map_err(|source| ConfigError::ParseLock { path, source })
     }
 
-    pub fn save_lock(&self, lk: &lock::Lock) -> Result<()> {
+    pub fn save_lock(&self, lk: &lock::Lock) -> EyreResult<()> {
         lock::save(&self.lock_path(), lk)
     }
 }
 
 /// Write `contents` to `path` atomically via a sibling temp + rename.
-pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+pub fn write_atomic(path: &Path, contents: &str) -> EyreResult<()> {
     let mut tmp_str = path.as_os_str().to_owned();
     tmp_str.push(".tmp");
     let tmp = PathBuf::from(tmp_str);
@@ -92,7 +138,10 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 mod tests {
     use std::fs;
 
-    use super::Project;
+    use super::{
+        ConfigError,
+        Project,
+    };
 
     #[test]
     fn modern_layout_paths_hang_off_dir() {
@@ -100,6 +149,14 @@ mod tests {
         assert!(project.pins_path().ends_with(".tack/pins.toml"));
         assert!(project.lock_path().ends_with(".tack/pins.lock.json"));
         assert!(project.resolver_path().ends_with("default.nix"));
+    }
+
+    #[test]
+    fn missing_pins_is_a_missing_config_error() {
+        let project = Project::at("/definitely/not/here".into());
+        let err = project.load_pins().unwrap_err();
+
+        assert!(matches!(err, ConfigError::Missing(_)));
     }
 
     #[test]

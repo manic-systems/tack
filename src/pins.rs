@@ -15,9 +15,10 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::{
-    Context as _,
+use eyre::{
+    ContextCompat as _,
     Result,
+    WrapErr as _,
     bail,
 };
 use toml_edit::{
@@ -51,7 +52,7 @@ impl Display for PinType {
 }
 
 impl FromStr for PinType {
-    type Err = anyhow::Error;
+    type Err = eyre::Report;
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
@@ -100,7 +101,7 @@ impl Display for Unpack {
 }
 
 impl FromStr for Unpack {
-    type Err = anyhow::Error;
+    type Err = eyre::Report;
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
@@ -125,16 +126,13 @@ pub struct Input {
 }
 
 pub fn load(path: &Path) -> Result<DocumentMut> {
-    if !path.exists() {
-        bail!("no pins.toml at {} (run `tack init`)", path.display());
-    }
-    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    parse_doc(&raw).with_context(|| format!("parse {}", path.display()))
+    let raw = fs::read_to_string(path).wrap_err_with(|| format!("read {}", path.display()))?;
+    parse_doc(&raw).wrap_err_with(|| format!("parse {}", path.display()))
 }
 
 /// parse pins.toml from an in-memory string
-pub fn parse_doc(raw: &str) -> Result<DocumentMut> {
-    raw.parse().context("parse pins.toml")
+pub fn parse_doc(raw: &str) -> Result<DocumentMut, toml_edit::TomlError> {
+    raw.parse()
 }
 
 pub fn save(path: &Path, doc: &DocumentMut) -> Result<()> {
@@ -210,7 +208,7 @@ pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
         let pin_type = match entry.get("type").and_then(Item::as_str) {
             Some(typ) => {
                 typ.parse::<PinType>()
-                    .with_context(|| format!("input '{name}'"))?
+                    .wrap_err_with(|| format!("input '{name}'"))?
             },
             None => {
                 match entry.get("flake").and_then(Item::as_bool) {
@@ -225,7 +223,7 @@ pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
             .map(|unpack| {
                 unpack
                     .parse::<Unpack>()
-                    .with_context(|| format!("input '{name}'"))
+                    .wrap_err_with(|| format!("input '{name}'"))
             })
             .transpose()?;
         if pin_type != PinType::Fixed && unpack.is_some() {

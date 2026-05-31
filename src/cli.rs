@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use anyhow::{
-    Context as _,
+use eyre::{
+    ContextCompat as _,
     Result,
     bail,
+    eyre,
 };
 
 use crate::pins::{
@@ -60,11 +61,7 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
     use lexopt::prelude::*;
 
     let sub = match parser.next()? {
-        Some(Value(value)) => {
-            value
-                .string()
-                .map_err(|_| anyhow::anyhow!("invalid subcommand"))?
-        },
+        Some(Value(value)) => value.string().map_err(|_| eyre!("invalid subcommand"))?,
         Some(Long("help") | Short('h')) | None => return Ok(Command::Help),
         Some(arg) => return Err(arg.unexpected().into()),
     };
@@ -97,7 +94,7 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
                     Long("accept") if sub == "update" => accept = true,
                     Long("verbose") | Short('v') if sub == "look" => verbose = true,
                     Value(value) => {
-                        names.push(value.string().map_err(|_| anyhow::anyhow!("bad name"))?);
+                        names.push(value.string().map_err(|_| eyre!("bad name"))?);
                     },
                     Short(_) | Long(_) => return Err(arg.unexpected().into()),
                 }
@@ -120,32 +117,19 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
                     Long("fetch" | "no-flake") => pin_type = PinType::Fetch,
                     Long("fixed") => pin_type = PinType::Fixed,
                     Long("unpack") => {
-                        let value = parser
-                            .value()?
-                            .string()
-                            .map_err(|_| anyhow::anyhow!("bad unpack"))?;
+                        let value = parser.value()?.string().map_err(|_| eyre!("bad unpack"))?;
                         unpack = Some(value.parse::<Unpack>()?);
                     },
                     Long("submodules") => submodules = true,
                     Long("dir") => {
-                        dir = Some(
-                            parser
-                                .value()?
-                                .string()
-                                .map_err(|_| anyhow::anyhow!("bad dir"))?,
-                        );
+                        dir = Some(parser.value()?.string().map_err(|_| eyre!("bad dir"))?);
                     },
                     Long("follows") => {
-                        let string = parser
-                            .value()?
-                            .string()
-                            .map_err(|_| anyhow::anyhow!("bad follows"))?;
+                        let string = parser.value()?.string().map_err(|_| eyre!("bad follows"))?;
                         follows.push(parse_follows(&string));
                     },
                     Value(value) => {
-                        let str = value
-                            .string()
-                            .map_err(|_| anyhow::anyhow!("bad argument"))?;
+                        let str = value.string().map_err(|_| eyre!("bad argument"))?;
                         if name.is_none() {
                             name = Some(str);
                         } else if url.is_none() {
@@ -172,7 +156,7 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
             while let Some(arg) = parser.next()? {
                 match arg {
                     Value(value) if name.is_none() => {
-                        name = Some(value.string().map_err(|_| anyhow::anyhow!("bad name"))?);
+                        name = Some(value.string().map_err(|_| eyre!("bad name"))?);
                     },
                     Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
                 }
@@ -188,9 +172,7 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
                 match arg {
                     Long("rm") => rm = true,
                     Value(value) => {
-                        let str = value
-                            .string()
-                            .map_err(|_| anyhow::anyhow!("bad argument"))?;
+                        let str = value.string().map_err(|_| eyre!("bad argument"))?;
                         if name_arg.is_none() {
                             name_arg = Some(str);
                         } else if template.is_none() {

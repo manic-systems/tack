@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use anyhow::Result;
+use std::error::Error;
+
 use serde_json::Value;
 
 /// Body decoder applied after a raw-file HTTP get.
-pub type Decoder = fn(&str) -> Result<String>;
+pub type DecoderError = Box<dyn Error + Send + Sync>;
+pub type Decoder = fn(&str) -> Result<String, DecoderError>;
 
 /// A resolved raw-file request.
 pub struct RawFile {
@@ -114,11 +116,11 @@ impl Forge {
     }
 }
 
-fn decode_b64(body: &str) -> Result<String> {
+fn decode_b64(body: &str) -> Result<String, DecoderError> {
     let bytes = data_encoding::BASE64
         .decode(body.trim().as_bytes())
-        .map_err(|err| anyhow::anyhow!("base64 decode: {err}"))?;
-    String::from_utf8(bytes).map_err(|err| anyhow::anyhow!("utf-8 decode: {err}"))
+        .map_err(|err| Box::new(err) as DecoderError)?;
+    String::from_utf8(bytes).map_err(|err| Box::new(err) as DecoderError)
 }
 
 #[cfg(test)]

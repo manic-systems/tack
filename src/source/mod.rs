@@ -5,7 +5,7 @@ pub mod id;
 
 use std::str::FromStr;
 
-use anyhow::{
+use eyre::{
     Result,
     bail,
 };
@@ -30,7 +30,7 @@ pub enum Source {
 }
 
 impl FromStr for Source {
-    type Err = anyhow::Error;
+    type Err = eyre::Report;
 
     #[expect(
         clippy::similar_names,
