@@ -2,6 +2,7 @@
 
 use std::{
     env,
+    error::Error,
     fs,
     io::Read,
     ops::Range,
@@ -9,16 +10,18 @@ use std::{
         Path,
         PathBuf,
     },
+    result::Result as StdResult,
     str::FromStr,
     sync::OnceLock,
     time::Duration,
 };
 
-use anyhow::{
-    Context as _,
+use eyre::{
+    ContextCompat as _,
     Result,
-    anyhow,
+    WrapErr as _,
     bail,
+    eyre,
 };
 use flate2::read::GzDecoder;
 use git2::{
@@ -66,6 +69,64 @@ fn github_token() -> Option<String> {
     env::var("GITHUB_TOKEN")
         .or_else(|_| env::var("GH_TOKEN"))
         .ok()
+}
+
+type FetchResult<T> = StdResult<T, FetchError>;
+
+/// Why a github query or raw-file probe failed. Callers that fall back on
+/// degraded operations match on this to tolerate expected failures while
+/// surfacing the ones a user must fix.
+#[derive(thiserror::Error, Debug)]
+pub enum FetchError {
+    /// A ref, commit, repo, or file that genuinely is not there.
+    #[error("{what} not found")]
+    NotFound { what: String },
+    /// GitHub rejected or lacked credentials.
+    #[error("github auth: {what}")]
+    Auth { what: String },
+    /// Could not reach the host, or the host returned a transient server error.
+    #[error("network: {0}")]
+    Transport(String),
+    /// A fetched raw-file body could not be decoded.
+    #[error("decoding {what}")]
+    Decode {
+        what:   String,
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
+    /// Upstream returned a response shape this version of tack does not know.
+    #[error("unexpected upstream response: {0}")]
+    Upstream(String),
+}
+
+fn http_error(status: u16, what: &str) -> FetchError {
+    match status {
+        401 | 403 => {
+            FetchError::Auth {
+                what: what.to_owned(),
+            }
+        },
+        404 => {
+            FetchError::NotFound {
+                what: what.to_owned(),
+            }
+        },
+        other => FetchError::Transport(format!("{what}: HTTP {other}")),
+    }
+}
+
+/// classify a ureq error. ureq surfaces non-2xx responses as
+/// [`ureq::Error::StatusCode`] by default, so auth/not-found classification has
+/// to happen here too, not only on a returned response.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "ureq::Error is #[non_exhaustive]"
+)]
+fn from_ureq(err: ureq::Error, what: &str) -> FetchError {
+    match err {
+        ureq::Error::StatusCode(code) => http_error(code, what),
+        other => FetchError::Transport(format!("{what}: {other}")),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,7 +255,7 @@ pub fn current_rev_compared(source: &Source, old_rev: Option<&str>) -> Result<Cu
                         .call()
                         .map_err(Box::new)
                 })
-                .with_context(|| format!("probe {url}"))?;
+                .wrap_err_with(|| format!("probe {url}"))?;
             let rev = immutable_url_of(&resp, url);
             let comparison = if old_rev == Some(rev.as_str()) {
                 BranchComparison::verified(CompareStatus::Identical)
@@ -217,13 +278,13 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<(Value, Stri
         .get(url)
         .header("User-Agent", "tack")
         .call()
-        .with_context(|| format!("GET {url}"))?;
+        .wrap_err_with(|| format!("GET {url}"))?;
     let immutable_url = immutable_url_of(&resp, url);
     let mut bytes = Vec::new();
     resp.body_mut()
         .as_reader()
         .read_to_end(&mut bytes)
-        .with_context(|| format!("read body of {url}"))?;
+        .wrap_err_with(|| format!("read body of {url}"))?;
     let sha256 = nar::hash_bytes(&bytes);
     // detect from the user-supplied URL first; the immutable URL may have lost
     // the extension via a redirect (e.g. github archives -> codeload)
@@ -292,8 +353,8 @@ pub fn fetch_locked_tree_into(node: &Value, dir: &Path) -> Result<PathBuf> {
                 .get(url)
                 .header("User-Agent", "tack")
                 .call()
-                .with_context(|| format!("GET {url}"))?;
-            let format = detect_tar_format(url).with_context(|| format!("tarball {url}"))?;
+                .wrap_err_with(|| format!("GET {url}"))?;
+            let format = detect_tar_format(url).wrap_err_with(|| format!("tarball {url}"))?;
             unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
         },
         other => bail!("cannot inspect tree for lock type '{other}'"),
@@ -332,8 +393,8 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
                 .get(url.as_str())
                 .header("User-Agent", "tack")
                 .call()
-                .with_context(|| format!("GET {url}"))?;
-            let format = detect_tar_format(url).with_context(|| format!("tarball {url}"))?;
+                .wrap_err_with(|| format!("GET {url}"))?;
+            let format = detect_tar_format(url).wrap_err_with(|| format!("tarball {url}"))?;
             unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
         },
     }
@@ -400,7 +461,7 @@ pub fn fetch_pin_compared(
                 .get(url.as_str())
                 .header("User-Agent", "tack")
                 .call()
-                .with_context(|| format!("GET {url}"))?;
+                .wrap_err_with(|| format!("GET {url}"))?;
             let immutable_url = immutable_url_of(&resp, url);
             let last_modified = resp
                 .headers()
@@ -410,7 +471,7 @@ pub fn fetch_pin_compared(
                 .unwrap_or(0);
             let format = detect_tar_format(&immutable_url)
                 .or_else(|_| detect_tar_format(url))
-                .with_context(|| format!("tarball {url}"))?;
+                .wrap_err_with(|| format!("tarball {url}"))?;
 
             let dir = tempfile::tempdir()?;
             let root = unpack_tar_stream(resp.body_mut().as_reader(), format, dir.path())?;
@@ -583,22 +644,22 @@ where
     archive.set_preserve_permissions(true);
     archive
         .unpack(into)
-        .with_context(|| format!("unpack into {}", into.display()))?;
+        .wrap_err_with(|| format!("unpack into {}", into.display()))?;
     let mut dirs = fs::read_dir(into)?
         .filter_map(|entry| entry.ok().map(|item| item.path()))
         .filter(|path| path.is_dir());
-    let root = dirs.next().ok_or_else(|| anyhow!("empty tarball"))?;
+    let root = dirs.next().ok_or_else(|| eyre!("empty tarball"))?;
     if dirs.next().is_some() {
         bail!("unexpected multiple top-level dirs in tarball");
     }
     Ok(root)
 }
 
-fn gh_get(url: &str) -> Result<Value> {
+fn gh_get(url: &str) -> FetchResult<Value> {
     gh_get_with_timeout(url, None)
 }
 
-fn gh_get_with_timeout(url: &str, timeout_limit: Option<Duration>) -> Result<Value> {
+fn gh_get_with_timeout(url: &str, timeout_limit: Option<Duration>) -> FetchResult<Value> {
     let mut req = agent()
         .get(url)
         .header("User-Agent", "tack")
@@ -609,16 +670,25 @@ fn gh_get_with_timeout(url: &str, timeout_limit: Option<Duration>) -> Result<Val
     if let Some(timeout) = timeout_limit {
         req = req.config().timeout_global(Some(timeout)).build();
     }
-    let body = req
-        .call()
-        .with_context(|| format!("github api {url}"))?
+    let mut resp = req.call().map_err(|err| from_ureq(err, url))?;
+    let status = resp.status();
+    if status != 200 {
+        return Err(http_error(status.as_u16(), url));
+    }
+    let body = resp
         .body_mut()
-        .read_to_string()?;
-    Ok(serde_json::from_str(&body)?)
+        .read_to_string()
+        .map_err(|err| FetchError::Transport(format!("read github api {url}: {err}")))?;
+    serde_json::from_str(&body)
+        .map_err(|err| FetchError::Upstream(format!("github api {url}: invalid json: {err}")))
 }
 
-fn gh_graphql(query: &str, variables: &Value) -> Result<Value> {
-    let token = github_token().context("github graphql requires GITHUB_TOKEN or GH_TOKEN")?;
+fn gh_graphql(query: &str, variables: &Value) -> FetchResult<Value> {
+    let token = github_token().ok_or_else(|| {
+        FetchError::Auth {
+            what: "GITHUB_TOKEN or GH_TOKEN not set".to_owned(),
+        }
+    })?;
     let payload = json!({
         "query": query,
         "variables": variables,
@@ -634,19 +704,50 @@ fn gh_graphql(query: &str, variables: &Value) -> Result<Value> {
         .timeout_global(Some(Duration::from_secs(2)))
         .build()
         .send(payload)
-        .context("github graphql")?;
-    let body = resp.body_mut().read_to_string()?;
-    let parsed = serde_json::from_str::<Value>(&body)?;
-    if let Some(message) = parsed
+        .map_err(|err| from_ureq(err, "github graphql"))?;
+    let status = resp.status();
+    if status != 200 {
+        return Err(http_error(status.as_u16(), "github graphql"));
+    }
+    let body = resp
+        .body_mut()
+        .read_to_string()
+        .map_err(|err| FetchError::Transport(format!("read github graphql: {err}")))?;
+    let parsed = serde_json::from_str::<Value>(&body)
+        .map_err(|err| FetchError::Upstream(format!("github graphql invalid json: {err}")))?;
+    if let Some(error) = parsed
         .get("errors")
         .and_then(Value::as_array)
         .and_then(|errors| errors.first())
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
     {
-        bail!("github graphql: {message}");
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("github graphql error");
+        if graphql_error_is_auth(error) {
+            return Err(FetchError::Auth {
+                what: message.to_owned(),
+            });
+        }
+        return Err(FetchError::Upstream(format!("github graphql: {message}")));
     }
     Ok(parsed)
+}
+
+fn graphql_error_is_auth(error: &Value) -> bool {
+    error
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| matches!(kind, "FORBIDDEN" | "UNAUTHORIZED"))
+        || error
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                let lower = message.to_ascii_lowercase();
+                lower.contains("bad credentials")
+                    || lower.contains("forbidden")
+                    || lower.contains("unauthorized")
+            })
 }
 
 /// direction of `head` relative to `base`, as reported by github's compare
@@ -751,7 +852,7 @@ fn gh_ref_compare(
     repo: &str,
     reff: Option<&str>,
     old_rev: &str,
-) -> Result<ResolvedGithubRef> {
+) -> FetchResult<ResolvedGithubRef> {
     let (query, variables) = reff.map_or_else(
         || {
             (
@@ -778,16 +879,16 @@ fn gh_ref_compare(
     parse_gh_ref_compare(&gh_graphql(query, &variables)?)
 }
 
-fn parse_gh_ref_compare(parsed: &Value) -> Result<ResolvedGithubRef> {
+fn parse_gh_ref_compare(parsed: &Value) -> FetchResult<ResolvedGithubRef> {
     let ref_node = parsed
         .get("data")
         .and_then(|data| data.get("repository"))
         .and_then(|repo| repo.get("targetRef"))
         .filter(|node| !node.is_null())
-        .context("github graphql response missing ref")?;
-    let target = ref_node
-        .get("target")
-        .context("github graphql response missing ref target")?;
+        .ok_or_else(|| FetchError::Upstream("github graphql response missing ref".to_owned()))?;
+    let target = ref_node.get("target").ok_or_else(|| {
+        FetchError::Upstream("github graphql response missing ref target".to_owned())
+    })?;
     let (rev, last_modified) = target_commit(target)?;
     let comparison = ref_node
         .get("compare")
@@ -825,7 +926,7 @@ fn backfill_comparison(
     }
 }
 
-fn target_commit(target: &Value) -> Result<(String, i64)> {
+fn target_commit(target: &Value) -> FetchResult<(String, i64)> {
     let commit = target
         .get("target")
         .filter(|inner| inner.get("committedDate").is_some())
@@ -833,13 +934,19 @@ fn target_commit(target: &Value) -> Result<(String, i64)> {
     let rev = commit
         .get("oid")
         .and_then(Value::as_str)
-        .context("github graphql response missing commit oid")?
+        .ok_or_else(|| {
+            FetchError::Upstream("github graphql response missing commit oid".to_owned())
+        })?
         .to_owned();
     let date = commit
         .get("committedDate")
         .and_then(Value::as_str)
-        .context("github graphql response missing commit date")?;
-    Ok((rev, epoch_from_iso(date)?))
+        .ok_or_else(|| {
+            FetchError::Upstream("github graphql response missing commit date".to_owned())
+        })?;
+    let epoch = epoch_from_iso(date)
+        .map_err(|err| FetchError::Upstream(format!("bad github commit date: {err}")))?;
+    Ok((rev, epoch))
 }
 
 fn graphql_ref_compare_status(status: &str) -> Option<CompareStatus> {
@@ -862,10 +969,9 @@ pub fn compare_status(
     repo: &str,
     base: &str,
     head: &str,
-) -> Result<Option<CompareStatus>> {
+) -> FetchResult<Option<CompareStatus>> {
     let url = gh_compare_url(owner, repo, base, head);
-    let parsed = gh_get_with_timeout(&url, Some(Duration::from_secs(5)))
-        .with_context(|| format!("github compare {owner}/{repo}"))?;
+    let parsed = gh_get_with_timeout(&url, Some(Duration::from_secs(5)))?;
     Ok(parsed
         .get("status")
         .and_then(Value::as_str)
@@ -876,17 +982,24 @@ fn gh_compare_url(owner: &str, repo: &str, base: &str, head: &str) -> String {
     format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}?per_page=1")
 }
 
-fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
+fn gh_commit(owner: &str, repo: &str, reff: &str) -> FetchResult<(String, i64)> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{reff}");
-    let parsed = gh_get(&url).with_context(|| format!("github api {owner}/{repo}@{reff}"))?;
+    let parsed = gh_get(&url)?;
     let rev = parsed["sha"]
         .as_str()
-        .ok_or_else(|| anyhow!("no sha in github response for {owner}/{repo}@{reff}"))?
+        .ok_or_else(|| {
+            FetchError::Upstream(format!(
+                "no sha in github response for {owner}/{repo}@{reff}"
+            ))
+        })?
         .to_owned();
     let date = parsed["commit"]["committer"]["date"]
         .as_str()
-        .ok_or_else(|| anyhow!("no commit date for {owner}/{repo}@{reff}"))?;
-    Ok((rev, epoch_from_iso(date)?))
+        .ok_or_else(|| FetchError::Upstream(format!("no commit date for {owner}/{repo}@{reff}")))?;
+    let epoch = epoch_from_iso(date).map_err(|err| {
+        FetchError::Upstream(format!("bad commit date for {owner}/{repo}@{reff}: {err}"))
+    })?;
+    Ok((rev, epoch))
 }
 
 pub struct CommitLog {
@@ -905,7 +1018,7 @@ pub fn commits_between(
     old: &str,
     new: &str,
     limit: usize,
-) -> Result<Option<CommitLog>> {
+) -> FetchResult<Option<CommitLog>> {
     let &Source::Github {
         ref owner,
         ref repo,
@@ -944,21 +1057,26 @@ fn commit_pair(node: &Value) -> Option<(String, String)> {
 }
 
 /// get a text resource
-pub fn raw(url: &str) -> Result<String> {
+pub fn raw(url: &str) -> FetchResult<String> {
     let mut resp = agent()
         .get(url)
         .header("User-Agent", "tack")
         .call()
-        .with_context(|| format!("GET {url}"))?;
+        .map_err(|err| from_ureq(err, url))?;
     let status = resp.status();
     if status != 200 {
-        bail!("GET {url}: {status}");
+        return Err(http_error(status.as_u16(), url));
     }
     let mut body = String::new();
     resp.body_mut()
         .as_reader()
         .read_to_string(&mut body)
-        .with_context(|| format!("read body of {url}"))?;
+        .map_err(|err| {
+            FetchError::Decode {
+                what:   url.to_owned(),
+                source: Box::new(err),
+            }
+        })?;
     Ok(body)
 }
 
@@ -968,7 +1086,7 @@ fn download_github_tarball(owner: &str, repo: &str, rev: &str, into: &Path) -> R
         .get(&url)
         .header("User-Agent", "tack")
         .call()
-        .with_context(|| format!("download {url}"))?;
+        .wrap_err_with(|| format!("download {url}"))?;
     unpack_tar_stream(resp.body_mut().as_reader(), TarFormat::Gz, into)
 }
 
@@ -998,14 +1116,14 @@ fn git_checkout(
     }
     remote
         .fetch(&[&refname], Some(&mut fo), None)
-        .with_context(|| format!("fetch {refname} from {url}"))?;
+        .wrap_err_with(|| format!("fetch {refname} from {url}"))?;
 
     let commit = match requested_rev {
         Some(pinned) => {
             repo.revparse_single(pinned)
-                .with_context(|| format!("rev '{pinned}' not reachable from {refname} on {url}"))?
+                .wrap_err_with(|| format!("rev '{pinned}' not reachable from {refname} on {url}"))?
                 .peel_to_commit()
-                .with_context(|| format!("'{pinned}' is not a commit"))?
+                .wrap_err_with(|| format!("'{pinned}' is not a commit"))?
         },
         None => repo.find_reference("FETCH_HEAD")?.peel_to_commit()?,
     };
@@ -1095,12 +1213,12 @@ fn epoch_from_http_date(input: &str) -> Result<i64> {
     let slice = |range: Range<usize>| -> Result<&str> {
         input
             .get(range)
-            .with_context(|| format!("bad http date: {input}"))
+            .wrap_err_with(|| format!("bad http date: {input}"))
     };
     let parse_num = |range: Range<usize>| -> Result<i64> {
         slice(range)?
             .parse()
-            .with_context(|| format!("bad http date: {input}"))
+            .wrap_err_with(|| format!("bad http date: {input}"))
     };
     let day = parse_num(5..7)?;
     let month = match slice(8..11)? {
@@ -1134,9 +1252,9 @@ fn epoch_from_iso(input: &str) -> Result<i64> {
     let parse_num = |range: Range<usize>| -> Result<i64> {
         input
             .get(range)
-            .with_context(|| format!("bad timestamp: {input}"))?
+            .wrap_err_with(|| format!("bad timestamp: {input}"))?
             .parse()
-            .with_context(|| format!("bad timestamp: {input}"))
+            .wrap_err_with(|| format!("bad timestamp: {input}"))
     };
     let (year, month, day) = (parse_num(0..4)?, parse_num(5..7)?, parse_num(8..10)?);
     let (hh, mi, ss) = (parse_num(11..13)?, parse_num(14..16)?, parse_num(17..19)?);
@@ -1265,6 +1383,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn status_classification_separates_auth_absent_and_transport() {
+        assert!(matches!(http_error(403, "x"), FetchError::Auth { .. }));
+        assert!(matches!(http_error(401, "x"), FetchError::Auth { .. }));
+        assert!(matches!(http_error(404, "x"), FetchError::NotFound { .. }));
+        assert!(matches!(http_error(503, "x"), FetchError::Transport(_)));
+    }
+
+    // ureq surfaces non-2xx as Error::StatusCode, so the auth/not-found
+    // classification must survive the error path, not only a returned response
+    #[test]
+    fn ureq_status_errors_classify_like_responses() {
+        assert!(matches!(
+            from_ureq(ureq::Error::StatusCode(403), "x"),
+            FetchError::Auth { .. }
+        ));
+        assert!(matches!(
+            from_ureq(ureq::Error::StatusCode(404), "x"),
+            FetchError::NotFound { .. }
+        ));
+        assert!(matches!(
+            from_ureq(ureq::Error::StatusCode(503), "x"),
+            FetchError::Transport(_)
+        ));
+    }
+
     fn commit(repo: &Repository, parent_ids: &[git2::Oid], message: &str, time: i64) -> git2::Oid {
         let sig = git2::Signature::new("tack", "tack@example.invalid", &git2::Time::new(time, 0))
             .unwrap();
@@ -1373,8 +1517,8 @@ mod tests {
             epoch_from_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap(),
             784_111_777
         );
-        epoch_from_http_date("bogus").unwrap_err();
-        epoch_from_http_date("Sun, 06 Foo 1994 08:49:37 GMT").unwrap_err();
+        let _ = epoch_from_http_date("bogus").unwrap_err();
+        let _ = epoch_from_http_date("Sun, 06 Foo 1994 08:49:37 GMT").unwrap_err();
     }
 
     // our tarball nar hash must equal nix's narHash for this rev

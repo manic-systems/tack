@@ -16,11 +16,11 @@ use std::{
     },
 };
 
-use anyhow::{
-    Context as _,
-    Result,
-};
 use data_encoding::BASE64;
+use eyre::{
+    Result,
+    WrapErr as _,
+};
 use sha2::{
     Digest as _,
     Sha256,
@@ -41,7 +41,7 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
 }
 
 fn emit_node(hash: &mut Sha256, path: &mut PathBuf) -> Result<()> {
-    let meta = fs::symlink_metadata(&path).with_context(|| format!("stat {}", path.display()))?;
+    let meta = fs::symlink_metadata(&path).wrap_err_with(|| format!("stat {}", path.display()))?;
     emit_bytes(hash, b"(");
     if meta.is_symlink() {
         let target = fs::read_link(&path)?;
@@ -96,7 +96,7 @@ fn emit_contents(hasher: &mut Sha256, path: &Path, len: u64) -> Result<()> {
         total += read as u64;
     }
     if total != len {
-        anyhow::bail!("{} changed size during hashing", path.display());
+        eyre::bail!("{} changed size during hashing", path.display());
     }
     pad(hasher, len);
     Ok(())

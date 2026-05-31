@@ -13,9 +13,10 @@ name = "tack"
 path = "src/main.rs"
 
 [dependencies]
-anyhow        = "1.0.102"
+color-eyre    = "0.6"
 data-encoding = "2.10.0"
 etcetera      = "0.11.0"
+eyre          = "0.6"
 flate2        = "1.1.9"
 git2          = "0.21"
 lexopt        = "0.3.2"
@@ -26,6 +27,7 @@ sha2          = "0.11.0"
 tar           = { default-features = false, version = "0.4.46" }
 tempfile      = "3.27.0"
 toml_edit     = "0.25.12"
+thiserror     = "2"
 ureq          = { default-features = false, features = [ "native-tls" ], version = "3.3.0" }
 xz2           = "0.1.7"
 

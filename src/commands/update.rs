@@ -9,6 +9,7 @@ use rayon::prelude::{
 use super::{
     AtomicUsize,
     BTreeMap,
+    BTreeSet,
     BranchComparison,
     CompareStatus,
     Display,
@@ -34,6 +35,7 @@ use super::{
     render,
     select,
     shorturl,
+    tolerate,
 };
 
 struct UpdateFetch {
@@ -131,13 +133,15 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
         }
     }
     let all_follow = pins::all_follows(&doc);
-    if write_auto_dedup(&all, &all_follow, &mut lk) {
+    let (auto_changed, surfaced) = write_auto_dedup(&all, &all_follow, &mut lk);
+    if auto_changed {
         changed = true;
     }
     if changed {
         project.save_lock(&lk)?;
     }
     display.finish();
+    print_surfaced_fetch_causes(&surfaced);
 
     if drift.into_inner() > 0 {
         bail!(
@@ -146,6 +150,12 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn print_surfaced_fetch_causes(surfaced: &BTreeSet<String>) {
+    for cause in surfaced {
+        eprintln!("tack: {cause}");
+    }
 }
 
 fn hash_drifted(old: Option<&Value>, node: &Value) -> bool {
@@ -195,7 +205,7 @@ fn write_auto_dedup(
     inputs: &[pins::Input],
     all_follow: &BTreeMap<String, String>,
     lock: &mut lock::Lock,
-) -> bool {
+) -> (bool, BTreeSet<String>) {
     let input_names = inputs
         .iter()
         .map(|i| i.name.as_str())
@@ -227,11 +237,13 @@ fn write_auto_dedup(
         lock.remove(&key);
         changed = true;
     }
+    let mut surfaced = BTreeSet::new();
 
     if aliases.is_empty() {
-        return changed;
+        return (changed, surfaced);
     }
 
+    let probe_causes = Mutex::new(BTreeSet::<String>::new());
     let batches = {
         let lock_ro: &lock::Lock = lock;
         inputs
@@ -239,8 +251,12 @@ fn write_auto_dedup(
             .filter(|inp| inp.pin_type == PinType::Flake)
             .filter_map(|inp| {
                 let node = lock_ro.get(&inp.name)?;
-                let raw = try_raw_file(node, "flake.lock")?;
-                let parsed = serde_json::from_str::<Value>(&raw).ok()?;
+                let (maybe_raw, maybe_cause) = tolerate(try_raw_file(node, "flake.lock"));
+                if let Some(cause) = maybe_cause {
+                    probe_causes.lock().unwrap().insert(cause);
+                }
+                let raw_body = maybe_raw.flatten()?;
+                let parsed = serde_json::from_str::<Value>(&raw_body).ok()?;
                 let root_key = parsed
                     .get("root")
                     .and_then(Value::as_str)
@@ -269,6 +285,7 @@ fn write_auto_dedup(
             })
             .collect::<Vec<Vec<(String, i64, Value)>>>()
     };
+    surfaced.extend(probe_causes.into_inner().unwrap());
 
     let mut observations = BTreeMap::<String, Vec<(i64, Value)>>::new();
     for batch in batches {
@@ -287,7 +304,7 @@ fn write_auto_dedup(
             obs.insert(0, (lm, current.clone()));
         }
         if let Some(winner) = choose_lock_observation(obs, |base, head| {
-            compare_locked_nodes(&mut compare_cache, base, head)
+            compare_locked_nodes(&mut compare_cache, &mut surfaced, base, head)
         }) && lock.get(&target) != Some(&winner)
         {
             lock.insert(target, winner);
@@ -295,7 +312,7 @@ fn write_auto_dedup(
         }
     }
 
-    changed
+    (changed, surfaced)
 }
 
 pub(in crate::commands) fn choose_lock_observation(
@@ -320,6 +337,7 @@ pub(in crate::commands) fn choose_lock_observation(
 
 fn compare_locked_nodes(
     cache: &mut HashMap<(String, String, String, String), Option<CompareStatus>>,
+    surfaced: &mut BTreeSet<String>,
     base: &Value,
     head: &Value,
 ) -> Option<CompareStatus> {
@@ -331,9 +349,12 @@ fn compare_locked_nodes(
     if let Some(cached) = cache.get(&key) {
         return *cached;
     }
-    let status = fetch::compare_status(&key.0, &key.1, &key.2, &key.3)
-        .ok()
-        .flatten();
+    let (maybe_status, maybe_cause) =
+        tolerate(fetch::compare_status(&key.0, &key.1, &key.2, &key.3));
+    if let Some(cause) = maybe_cause {
+        surfaced.insert(cause);
+    }
+    let status = maybe_status.flatten();
     cache.insert(key, status);
     status
 }
@@ -414,6 +435,9 @@ pub fn look(names: &[String], verbose: bool) -> Result<()> {
                     new:        render::short(&current.rev),
                     comparison: current.comparison,
                 });
+                // Commit logs are an adjunct to the already-rendered rev status,
+                // so keep them best-effort rather than surfacing fetch probes
+                // while the spinner owns the display.
                 if verbose
                     && let Some(old_rev) = old.as_deref()
                     && let Ok(Some(log)) =
