@@ -18,7 +18,6 @@ use super::{
     Result,
     Source,
     SourceId,
-    Value,
     cmp,
     fetch,
     fs,
@@ -26,10 +25,10 @@ use super::{
     mem,
     pins,
     render,
-    shorturl,
     tolerate,
     top_map,
 };
+use crate::flake_lock::FlakeLock;
 
 /// which side of an upstream a finding came from. a `flake:`/`tack:`-scoped
 /// follow only matches its own side, though a bare follow matches both.
@@ -133,12 +132,34 @@ struct TackTransitive {
 }
 
 enum SourceRef {
-    Locked(Value),
+    Locked(lock::LockedNode),
     Url(String),
 }
 
-type RawProbeSet = (Option<String>, Option<String>, Option<String>);
-type RawProbeOutcome = (Option<RawProbeSet>, BTreeSet<String>);
+impl SourceRef {
+    fn key(&self) -> String {
+        match *self {
+            Self::Locked(ref node) => {
+                SourceId::from_locked(node).map_or_else(
+                    || format!("{}:{}", node.kind(), node.full_rev().unwrap_or("")),
+                    |id| id.to_string(),
+                )
+            },
+            Self::Url(ref url) => url.clone(),
+        }
+    }
+}
+
+struct RawProbeFiles {
+    flake_lock: Option<String>,
+    tack_pins:  Option<String>,
+    tack_lock:  Option<String>,
+}
+
+struct RawProbeOutcome {
+    files:    Option<RawProbeFiles>,
+    surfaced: BTreeSet<String>,
+}
 
 pub(in crate::commands) const MAX_COMPARE_JOBS: usize = 100;
 const MAX_LIVE_COMPARE_JOBS: usize = 8;
@@ -214,32 +235,28 @@ pub fn dedup() -> Result<()> {
     let project = Project::discover();
     let doc = project.load_pins()?;
     let lock = project.load_lock()?;
-    let inputs = pins::inputs(&doc)?;
-    let shorturls = pins::shorturls(&doc);
-    let all_follow = pins::all_follows(&doc);
+    let inputs = doc.inputs()?;
+    let shorturls = doc.shorturls();
+    let all_follow = doc.all_follows();
     let by_name = inputs
         .iter()
         .map(|inp| (inp.name.as_str(), inp))
         .collect::<BTreeMap<&str, &pins::Input>>();
 
-    let top_revs = top_map(&inputs, &lock, |n| {
-        lock::Node::from(n).full_rev().map(render::short)
-    });
-    let top_full_revs = top_map(&inputs, &lock, |n| {
-        lock::Node::from(n).full_rev().map(str::to_owned)
-    });
-    let top_lms = top_map(&inputs, &lock, |n| lock::Node::from(n).last_modified());
+    let top_revs = top_map(&inputs, &lock, |n| n.full_rev().map(render::short));
+    let top_full_revs = top_map(&inputs, &lock, |n| n.full_rev().map(str::to_owned));
+    let top_lms = top_map(&inputs, &lock, lock::LockedNode::last_modified);
 
     let mut groups = BTreeMap::<SourceId, Vec<Entry>>::new();
 
     for inp in &inputs {
-        let expanded = shorturl::expand(&inp.url, &shorturls);
+        let expanded = shorturls.expand(&inp.url);
         if let Some(id) = SourceId::from_url(&expanded) {
             let rev = top_revs.get(&inp.name).cloned().unwrap_or_default();
             let full_rev = top_full_revs.get(&inp.name).cloned().unwrap_or_default();
             let lm = lock
                 .get(&inp.name)
-                .and_then(|n| lock::Node::from(n).last_modified());
+                .and_then(lock::LockedNode::last_modified);
             groups.entry(id).or_default().push(Entry {
                 path: vec![],
                 name: inp.name.clone(),
@@ -254,13 +271,14 @@ pub fn dedup() -> Result<()> {
     let mut frontier = inputs
         .iter()
         .filter_map(|inp| {
+            if inp.pin_type != PinType::Flake {
+                return None;
+            }
             let node = lock.get(&inp.name)?;
-            (inp.pin_type == PinType::Flake).then(|| {
-                TackTransitive {
-                    path:       vec![inp.name.clone()],
-                    source:     SourceRef::Locked(node.clone()),
-                    submodules: inp.submodules,
-                }
+            Some(TackTransitive {
+                path:       vec![inp.name.clone()],
+                source:     SourceRef::Locked(node.clone()),
+                submodules: inp.submodules,
             })
         })
         .collect::<Vec<TackTransitive>>();
@@ -272,7 +290,7 @@ pub fn dedup() -> Result<()> {
     while !frontier.is_empty() {
         let results = mem::take(&mut frontier)
             .into_iter()
-            .filter(|item| visited.insert(source_key(&item.source)))
+            .filter(|item| visited.insert(item.source.key()))
             .collect::<Vec<_>>()
             .into_par_iter()
             .map(|item| (item.path.clone(), fetch_and_scan(&item)))
@@ -311,18 +329,19 @@ pub fn dedup() -> Result<()> {
 
 fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
     // fetch only the 3 files scan needs via http if the source's forge supports it
-    if let SourceRef::Locked(ref node) = item.source
-        && let (Some((flake_lock, tack_pins, tack_lock)), surfaced) = try_raw_files(node)
-    {
-        for cause in &surfaced {
-            eprintln!("tack: {cause}");
+    if let SourceRef::Locked(ref node) = item.source {
+        let outcome = try_raw_files(node);
+        if let Some(files) = outcome.files {
+            for cause in &outcome.surfaced {
+                eprintln!("tack: {cause}");
+            }
+            return Ok(scan_files(
+                files.flake_lock.as_deref(),
+                files.tack_pins.as_deref(),
+                files.tack_lock.as_deref(),
+                &item.path,
+            ));
         }
-        return Ok(scan_files(
-            flake_lock.as_deref(),
-            tack_pins.as_deref(),
-            tack_lock.as_deref(),
-            &item.path,
-        ));
     }
 
     let tmp = tempfile::tempdir()?;
@@ -338,12 +357,18 @@ fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
 
 /// `authoritative = true` means a 404 on every probe is final, and `false`
 /// means the caller should fall back to clone
-fn try_raw_files(node: &Value) -> RawProbeOutcome {
-    let Some(forge) = Forge::from_node(node) else {
-        return (None, BTreeSet::new());
+fn try_raw_files(node: &lock::LockedNode) -> RawProbeOutcome {
+    let Some(forge) = Forge::from_locked(node) else {
+        return RawProbeOutcome {
+            files:    None,
+            surfaced: BTreeSet::new(),
+        };
     };
-    let Some(rev) = lock::Node::from(node).rev() else {
-        return (None, BTreeSet::new());
+    let Some(rev) = node.rev() else {
+        return RawProbeOutcome {
+            files:    None,
+            surfaced: BTreeSet::new(),
+        };
     };
     let mut surfaced = BTreeSet::new();
     let mut probe = |file| {
@@ -353,15 +378,25 @@ fn try_raw_files(node: &Value) -> RawProbeOutcome {
         }
         value
     };
-    let triple = (
-        probe("flake.lock"),
-        probe(".tack/pins.toml"),
-        probe(".tack/pins.lock.json"),
-    );
-    if !forge.authoritative() && triple.0.is_none() && triple.1.is_none() && triple.2.is_none() {
-        (None, surfaced)
+    let files = RawProbeFiles {
+        flake_lock: probe("flake.lock"),
+        tack_pins:  probe(".tack/pins.toml"),
+        tack_lock:  probe(".tack/pins.lock.json"),
+    };
+    if !forge.authoritative()
+        && files.flake_lock.is_none()
+        && files.tack_pins.is_none()
+        && files.tack_lock.is_none()
+    {
+        RawProbeOutcome {
+            files: None,
+            surfaced,
+        }
     } else {
-        (Some(triple), surfaced)
+        RawProbeOutcome {
+            files: Some(files),
+            surfaced,
+        }
     }
 }
 
@@ -384,13 +419,13 @@ fn fetch_forge_file(forge: &Forge, rev: &str, file: &str) -> Result<String, fetc
 /// Fetch one file from a locked node via raw http. Unknown hosts or missing
 /// revs simply ask the caller to skip the raw path.
 pub(in crate::commands) fn try_raw_file(
-    node: &Value,
+    node: &lock::LockedNode,
     file: &str,
 ) -> Result<Option<String>, fetch::FetchError> {
-    let Some(forge) = Forge::from_node(node) else {
+    let Some(forge) = Forge::from_locked(node) else {
         return Ok(None);
     };
-    let Some(rev) = lock::Node::from(node).rev() else {
+    let Some(rev) = node.rev() else {
         return Ok(None);
     };
     fetch_forge_file(&forge, rev, file).map(Some)
@@ -419,50 +454,35 @@ fn scan_files(
     let mut transitive = Vec::<TackTransitive>::new();
 
     if let Some(raw) = flake_lock
-        && let Ok(json) = serde_json::from_str::<Value>(raw)
+        && let Ok(doc) = FlakeLock::parse(raw)
     {
-        let root_key = json.get("root").and_then(Value::as_str).unwrap_or("root");
-        if let Some(nodes) = json.get("nodes").and_then(Value::as_object) {
-            for (key, node) in nodes {
-                if key == root_key {
-                    continue;
-                }
-                let Some(locked) = node.get("locked") else {
-                    continue;
-                };
-                if let Some(id) = SourceId::from_node(locked) {
-                    findings.push(Finding {
-                        identity: id,
-                        entry:    Entry {
-                            path:     path.to_vec(),
-                            name:     strip_disambiguator(key).to_owned(),
-                            side:     Side::Flake,
-                            rev:      lock::Node::from(locked)
-                                .full_rev()
-                                .map(render::short)
-                                .unwrap_or_default(),
-                            full_rev: lock::Node::from(locked)
-                                .full_rev()
-                                .map(str::to_owned)
-                                .unwrap_or_default(),
-                            lm:       lock::Node::from(locked).last_modified(),
-                        },
-                    });
-                }
+        for (key, locked) in doc.locked_nodes() {
+            if let Some(id) = SourceId::from_locked(locked) {
+                findings.push(Finding {
+                    identity: id,
+                    entry:    Entry {
+                        path:     path.to_vec(),
+                        name:     strip_disambiguator(key).to_owned(),
+                        side:     Side::Flake,
+                        rev:      locked.full_rev().map(render::short).unwrap_or_default(),
+                        full_rev: locked.full_rev().map(str::to_owned).unwrap_or_default(),
+                        lm:       locked.last_modified(),
+                    },
+                });
             }
         }
     }
 
     if let Some(raw) = tack_pins
-        && let Ok(doc) = pins::parse_doc(raw)
-        && let Ok(tinputs) = pins::inputs(&doc)
+        && let Ok(doc) = pins::PinsDoc::parse(raw)
+        && let Ok(tinputs) = doc.inputs()
     {
         let tlock = tack_lock
             .and_then(|str| lock::parse(str).ok())
             .unwrap_or_default();
-        let tshort = pins::shorturls(&doc);
+        let tshort = doc.shorturls();
         for tinp in &tinputs {
-            let expanded = shorturl::expand(&tinp.url, &tshort);
+            let expanded = tshort.expand(&tinp.url);
             if let Some(id) = SourceId::from_url(&expanded) {
                 findings.push(Finding {
                     identity: id,
@@ -472,15 +492,15 @@ fn scan_files(
                         side:     Side::Tack,
                         rev:      tlock
                             .get(&tinp.name)
-                            .and_then(|n| lock::Node::from(n).full_rev().map(render::short))
+                            .and_then(|n| n.full_rev().map(render::short))
                             .unwrap_or_default(),
                         full_rev: tlock
                             .get(&tinp.name)
-                            .and_then(|n| lock::Node::from(n).full_rev().map(str::to_owned))
+                            .and_then(|n| n.full_rev().map(str::to_owned))
                             .unwrap_or_default(),
                         lm:       tlock
                             .get(&tinp.name)
-                            .and_then(|n| lock::Node::from(n).last_modified()),
+                            .and_then(lock::LockedNode::last_modified),
                     },
                 });
             }
@@ -489,9 +509,8 @@ fn scan_files(
                 next.push(tinp.name.clone());
                 let source = tlock
                     .get(&tinp.name)
-                    .map_or(SourceRef::Url(expanded), |node| {
-                        SourceRef::Locked(node.clone())
-                    });
+                    .cloned()
+                    .map_or(SourceRef::Url(expanded), SourceRef::Locked);
                 transitive.push(TackTransitive {
                     path: next,
                     source,
@@ -504,15 +523,6 @@ fn scan_files(
     ScanResult {
         findings,
         transitive,
-    }
-}
-
-fn source_key(source: &SourceRef) -> String {
-    match *source {
-        SourceRef::Locked(ref node) => {
-            SourceId::from_node(node).map_or_else(|| node.to_string(), |id| id.to_string())
-        },
-        SourceRef::Url(ref url) => url.clone(),
     }
 }
 

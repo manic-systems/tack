@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use super::{
-    Item,
     MARKER,
     Path,
     Project,
@@ -12,7 +11,6 @@ use super::{
     bail,
     env,
     fs,
-    pins,
     project,
 };
 
@@ -126,16 +124,9 @@ pub(in crate::commands) fn wires_overrides(flake: &str) -> bool {
 
 /// set `[tack] recomposable = true`, preserving any existing `[tack]` keys.
 fn mark_recomposable(project: &Project) -> Result<()> {
-    let path = project.pins_path();
-    let mut doc = pins::load(&path)?;
-    if let Some(table) = doc.get_mut("tack").and_then(Item::as_table_mut) {
-        table["recomposable"] = toml_edit::value(true);
-    } else {
-        let mut table = toml_edit::Table::new();
-        table["recomposable"] = toml_edit::value(true);
-        doc.insert("tack", Item::Table(table));
-    }
-    pins::save(&path, &doc)
+    let mut doc = project.load_pins()?;
+    doc.mark_recomposable();
+    project.save_pins(&doc)
 }
 
 fn print_wiring_blurb() {
