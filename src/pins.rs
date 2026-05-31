@@ -5,8 +5,14 @@ use std::{
         BTreeMap,
         BTreeSet,
     },
+    fmt::{
+        Display,
+        Formatter,
+        Result as FmtResult,
+    },
     fs,
     path::Path,
+    str::FromStr,
 };
 
 use anyhow::{
@@ -36,9 +42,19 @@ impl PinType {
             Self::Fixed => "fixed",
         }
     }
+}
 
-    fn parse(str: &str) -> Result<Self> {
-        match str {
+impl Display for PinType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PinType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
             "flake" => Ok(Self::Flake),
             "fetch" => Ok(Self::Fetch),
             "fixed" => Ok(Self::Fixed),
@@ -61,14 +77,6 @@ impl Unpack {
         }
     }
 
-    fn parse(str: &str) -> Result<Self> {
-        match str {
-            "tarball" => Ok(Self::Tarball),
-            "file" => Ok(Self::File),
-            other => bail!("unknown unpack '{other}' (expected tarball|file)"),
-        }
-    }
-
     /// guess from a URL extension; tarball-family wins, otherwise file
     pub fn detect(url: &str) -> Self {
         let no_query = url.split('?').next().unwrap_or(url);
@@ -81,6 +89,24 @@ impl Unpack {
             Self::Tarball
         } else {
             Self::File
+        }
+    }
+}
+
+impl Display for Unpack {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Unpack {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "tarball" => Ok(Self::Tarball),
+            "file" => Ok(Self::File),
+            other => bail!("unknown unpack '{other}' (expected tarball|file)"),
         }
     }
 }
@@ -182,7 +208,10 @@ pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
             .with_context(|| format!("input '{name}' has no url"))?;
         // `type` is canonical; legacy `flake = false` reads as `fetch`
         let pin_type = match entry.get("type").and_then(Item::as_str) {
-            Some(typ) => PinType::parse(typ).with_context(|| format!("input '{name}'"))?,
+            Some(typ) => {
+                typ.parse::<PinType>()
+                    .with_context(|| format!("input '{name}'"))?
+            },
             None => {
                 match entry.get("flake").and_then(Item::as_bool) {
                     Some(false) => PinType::Fetch,
@@ -193,7 +222,11 @@ pub fn inputs(doc: &DocumentMut) -> Result<Vec<Input>> {
         let unpack = entry
             .get("unpack")
             .and_then(Item::as_str)
-            .map(|unpack| Unpack::parse(unpack).with_context(|| format!("input '{name}'")))
+            .map(|unpack| {
+                unpack
+                    .parse::<Unpack>()
+                    .with_context(|| format!("input '{name}'"))
+            })
             .transpose()?;
         if pin_type != PinType::Fixed && unpack.is_some() {
             bail!("input '{name}': `unpack` is only valid for type = \"fixed\"");
