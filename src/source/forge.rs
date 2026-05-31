@@ -2,7 +2,7 @@
 
 use std::error::Error;
 
-use serde_json::Value;
+use crate::lock;
 
 /// Body decoder applied after a raw-file HTTP get.
 pub type DecoderError = Box<dyn Error + Send + Sync>;
@@ -61,29 +61,27 @@ pub struct Forge {
 }
 
 impl Forge {
-    pub fn from_node(node: &Value) -> Option<Self> {
-        let ty = node.get("type").and_then(Value::as_str)?;
-        let owner_repo = || -> Option<(&str, &str)> {
-            Some((node.get("owner")?.as_str()?, node.get("repo")?.as_str()?))
-        };
-        let (base, authoritative) = match ty {
+    pub fn from_locked(node: &lock::LockedNode) -> Option<Self> {
+        let (base, authoritative) = match node.kind() {
             "github" => {
-                let (owner, repo) = owner_repo()?;
+                let github = node.github()?;
                 (
-                    format!("https://raw.githubusercontent.com/{owner}/{repo}"),
+                    format!(
+                        "https://raw.githubusercontent.com/{}/{}",
+                        github.owner, github.repo
+                    ),
                     true,
                 )
             },
             "gitlab" => {
-                let (owner, repo) = owner_repo()?;
-                let host = node
-                    .get("host")
-                    .and_then(Value::as_str)
-                    .unwrap_or("gitlab.com");
-                (format!("https://{host}/{owner}/{repo}"), true)
+                let gitlab = node.gitlab()?;
+                (
+                    format!("https://{}/{}/{}", gitlab.host, gitlab.owner, gitlab.repo),
+                    true,
+                )
             },
             "git" => {
-                let url = node.get("url").and_then(Value::as_str)?;
+                let url = node.git()?.url;
                 (url.strip_suffix(".git").unwrap_or(url).to_owned(), false)
             },
             _ => return None,
@@ -128,16 +126,21 @@ mod tests {
     use serde_json::json;
 
     use super::Forge;
+    use crate::lock;
 
-    fn url(node: &serde_json::Value, file: &str) -> Option<String> {
-        Forge::from_node(node).map(|forge| forge.raw_file_url("REV", file).url)
+    fn node(value: serde_json::Value) -> lock::LockedNode {
+        lock::LockedNode::from_value(value).unwrap()
+    }
+
+    fn url(node: lock::LockedNode, file: &str) -> Option<String> {
+        Forge::from_locked(&node).map(|forge| forge.raw_file_url("REV", file).url)
     }
 
     #[test]
     fn github_node_builds_raw_githubusercontent_url() {
         assert_eq!(
             url(
-                &json!({"type": "github", "owner": "o", "repo": "r"}),
+                node(json!({"type": "github", "owner": "o", "repo": "r"})),
                 "flake.lock"
             )
             .as_deref(),
@@ -147,8 +150,8 @@ mod tests {
 
     #[test]
     fn gitlab_node_uses_dash_raw_and_is_authoritative() {
-        let forge =
-            Forge::from_node(&json!({"type": "gitlab", "owner": "o", "repo": "r"})).unwrap();
+        let forge = Forge::from_locked(&node(json!({"type": "gitlab", "owner": "o", "repo": "r"})))
+            .unwrap();
         assert_eq!(
             forge.raw_file_url("REV", "f").url,
             "https://gitlab.com/o/r/-/raw/REV/f"
@@ -158,9 +161,10 @@ mod tests {
 
     #[test]
     fn git_node_is_not_authoritative_and_uses_gitea_default() {
-        let forge =
-            Forge::from_node(&json!({"type": "git", "url": "https://codeberg.org/o/r.git"}))
-                .unwrap();
+        let forge = Forge::from_locked(&node(
+            json!({"type": "git", "url": "https://codeberg.org/o/r.git"}),
+        ))
+        .unwrap();
         assert!(!forge.authoritative());
         assert_eq!(
             forge.raw_file_url("REV", "f").url,
@@ -170,9 +174,10 @@ mod tests {
 
     #[test]
     fn gerrit_host_decodes_base64() {
-        let forge =
-            Forge::from_node(&json!({"type": "git", "url": "https://x.googlesource.com/o/r"}))
-                .unwrap();
+        let forge = Forge::from_locked(&node(
+            json!({"type": "git", "url": "https://x.googlesource.com/o/r"}),
+        ))
+        .unwrap();
         let raw = forge.raw_file_url("REV", "f");
         assert_eq!(
             raw.url,

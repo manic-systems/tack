@@ -27,8 +27,6 @@ use eyre::{
     Result,
     bail,
 };
-use serde_json::Value;
-use toml_edit::Item;
 
 use crate::{
     fetch,
@@ -48,7 +46,6 @@ use crate::{
         Project,
     },
     render,
-    shorturl,
     source::{
         Source,
         forge::Forge,
@@ -164,8 +161,8 @@ fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Inpu
 
 fn top_map<T>(
     inputs: &[pins::Input],
-    lock: &lock::Lock,
-    project: impl Fn(&Value) -> Option<T>,
+    lock: &lock::LockFile,
+    project: impl Fn(&lock::LockedNode) -> Option<T>,
 ) -> BTreeMap<String, T> {
     let declared = inputs
         .iter()
@@ -203,7 +200,7 @@ use self::{
     },
     edit::rm_in_dir,
     init::wires_overrides,
-    update::choose_lock_observation,
+    update::LockObservation,
 };
 
 #[cfg(test)]
@@ -218,15 +215,13 @@ mod tests {
         iter,
     };
 
-    use serde_json::Value;
-
     use super::{
         Entry,
+        LockObservation,
         MAX_COMPARE_JOBS,
         Mark,
         Side,
         apply_follows,
-        choose_lock_observation,
         classify,
         comparator,
         compare_jobs,
@@ -239,6 +234,7 @@ mod tests {
     };
     use crate::{
         fetch,
+        lock,
         source::id::SourceId,
     };
 
@@ -318,17 +314,12 @@ mod tests {
         }
     }
 
-    fn github_node(rev: &str) -> Value {
-        serde_json::json!({
-            "type": "github",
-            "owner": "o",
-            "repo": "r",
-            "rev": rev,
-        })
+    fn github_node(rev: &str) -> lock::LockedNode {
+        lock::LockedNode::new_github("o", "r", rev, "sha256-n", 0)
     }
 
-    fn node_rev(node: &Value) -> &str {
-        node.get("rev").and_then(Value::as_str).unwrap()
+    fn node_rev(node: &lock::LockedNode) -> &str {
+        node.rev().unwrap()
     }
 
     fn source_id(str: &str) -> SourceId {
@@ -395,8 +386,11 @@ mod tests {
 
     #[test]
     fn auto_dedup_prefers_ahead_candidate_despite_older_timestamp() {
-        let winner = choose_lock_observation(
-            vec![(300, github_node("base")), (100, github_node("ahead"))],
+        let winner = LockObservation::choose(
+            vec![
+                LockObservation::new(300, github_node("base")),
+                LockObservation::new(100, github_node("ahead")),
+            ],
             |base, head| {
                 match (node_rev(base), node_rev(head)) {
                     ("base", "ahead") => Some(super::CompareStatus::Ahead),
@@ -411,8 +405,11 @@ mod tests {
 
     #[test]
     fn auto_dedup_keeps_base_when_candidate_is_behind_despite_newer_timestamp() {
-        let winner = choose_lock_observation(
-            vec![(100, github_node("base")), (500, github_node("behind"))],
+        let winner = LockObservation::choose(
+            vec![
+                LockObservation::new(100, github_node("base")),
+                LockObservation::new(500, github_node("behind")),
+            ],
             |base, head| {
                 match (node_rev(base), node_rev(head)) {
                     ("base", "behind") => Some(super::CompareStatus::Behind),
@@ -427,8 +424,11 @@ mod tests {
 
     #[test]
     fn auto_dedup_falls_back_to_timestamp_for_diverged_histories() {
-        let winner = choose_lock_observation(
-            vec![(100, github_node("base")), (500, github_node("amended"))],
+        let winner = LockObservation::choose(
+            vec![
+                LockObservation::new(100, github_node("base")),
+                LockObservation::new(500, github_node("amended")),
+            ],
             |base, head| {
                 match (node_rev(base), node_rev(head)) {
                     ("base", "amended") => Some(super::CompareStatus::Diverged),

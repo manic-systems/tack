@@ -22,7 +22,6 @@ use super::{
     Project,
     Result,
     Source,
-    Value,
     bail,
     dedup::{
         strip_disambiguator,
@@ -34,21 +33,190 @@ use super::{
     pins,
     render,
     select,
-    shorturl,
     tolerate,
 };
+use crate::flake_lock::FlakeLock;
 
 struct UpdateFetch {
-    node:       Value,
+    node:       lock::LockedNode,
     rev:        String,
     comparison: BranchComparison,
+}
+
+struct AutoDedupReport {
+    changed:               bool,
+    surfaced_fetch_causes: BTreeSet<String>,
+}
+
+struct AutoFollowAliases {
+    targets_by_alias: BTreeMap<String, String>,
+}
+
+impl AutoFollowAliases {
+    fn from_inputs(inputs: &[pins::Input], all_follow: &BTreeMap<String, String>) -> Self {
+        let input_names = inputs
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<HashSet<&str>>();
+
+        Self {
+            targets_by_alias: all_follow
+                .iter()
+                .filter(|&(_, target)| !input_names.contains(target.as_str()))
+                .filter_map(|(alias, target)| {
+                    Some((
+                        pins::FollowAlias::new(alias).flake_side()?.to_owned(),
+                        target.clone(),
+                    ))
+                })
+                .collect(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.targets_by_alias.is_empty()
+    }
+
+    fn target_for(&self, alias: &str) -> Option<&String> {
+        self.targets_by_alias.get(alias)
+    }
+
+    fn targets(&self) -> impl Iterator<Item = &String> {
+        self.targets_by_alias.values()
+    }
+}
+
+#[derive(Clone)]
+pub(in crate::commands) struct LockObservation {
+    last_modified: i64,
+    node:          lock::LockedNode,
+}
+
+impl LockObservation {
+    #[cfg(test)]
+    pub(in crate::commands) const fn new(last_modified: i64, node: lock::LockedNode) -> Self {
+        Self {
+            last_modified,
+            node,
+        }
+    }
+
+    fn from_node(node: lock::LockedNode) -> Self {
+        let last_modified = node
+            .last_modified()
+            .and_then(|lm| i64::try_from(lm).ok())
+            .unwrap_or(0);
+        Self {
+            last_modified,
+            node,
+        }
+    }
+
+    pub(in crate::commands) fn choose<C>(
+        observations: Vec<Self>,
+        mut compare: C,
+    ) -> Option<lock::LockedNode>
+    where
+        C: FnMut(&lock::LockedNode, &lock::LockedNode) -> Option<CompareStatus>,
+    {
+        let mut iter = observations.into_iter();
+        let mut winner = iter.next()?;
+        for candidate in iter {
+            match compare(&winner.node, &candidate.node) {
+                Some(CompareStatus::Ahead) => winner = candidate,
+                Some(CompareStatus::Behind | CompareStatus::Identical) => {},
+                Some(CompareStatus::Diverged) | None => {
+                    if candidate.last_modified > winner.last_modified {
+                        winner = candidate;
+                    }
+                },
+            }
+        }
+        Some(winner.node)
+    }
+}
+
+struct GithubCompare {
+    owner: String,
+    repo:  String,
+    base:  String,
+    head:  String,
+}
+
+impl GithubCompare {
+    fn from_nodes(base: &lock::LockedNode, head: &lock::LockedNode) -> Option<Self> {
+        let (base_node, head_node) = (base.github()?, head.github()?);
+        let (base_owner, base_repo) = (base_node.owner, base_node.repo);
+        let (head_owner, head_repo) = (head_node.owner, head_node.repo);
+        if !base_owner.eq_ignore_ascii_case(head_owner)
+            || !base_repo.eq_ignore_ascii_case(head_repo)
+        {
+            return None;
+        }
+        Some(Self {
+            owner: base_owner.to_owned(),
+            repo:  base_repo.to_owned(),
+            base:  base_node.rev?.to_owned(),
+            head:  head_node.rev?.to_owned(),
+        })
+    }
+
+    fn cache_key(&self) -> (String, String, String, String) {
+        (
+            self.owner.clone(),
+            self.repo.clone(),
+            self.base.clone(),
+            self.head.clone(),
+        )
+    }
+}
+
+struct LockComparator {
+    cache:    HashMap<(String, String, String, String), Option<CompareStatus>>,
+    surfaced: BTreeSet<String>,
+}
+
+impl LockComparator {
+    fn new() -> Self {
+        Self {
+            cache:    HashMap::new(),
+            surfaced: BTreeSet::new(),
+        }
+    }
+
+    fn compare_locked_nodes(
+        &mut self,
+        base: &lock::LockedNode,
+        head: &lock::LockedNode,
+    ) -> Option<CompareStatus> {
+        let compare = GithubCompare::from_nodes(base, head)?;
+        if compare.base == compare.head {
+            return Some(CompareStatus::Identical);
+        }
+        let key = compare.cache_key();
+        if let Some(cached) = self.cache.get(&key) {
+            return *cached;
+        }
+        let (maybe_status, maybe_cause) =
+            tolerate(fetch::compare_status(&key.0, &key.1, &key.2, &key.3));
+        if let Some(cause) = maybe_cause {
+            self.surfaced.insert(cause);
+        }
+        let status = maybe_status.flatten();
+        self.cache.insert(key, status);
+        status
+    }
+
+    fn into_surfaced(self) -> BTreeSet<String> {
+        self.surfaced
+    }
 }
 
 pub fn update(names: &[String], accept: bool) -> Result<()> {
     let project = Project::discover();
     let doc = project.load_pins()?;
-    let shorturls = pins::shorturls(&doc);
-    let all = pins::inputs(&doc)?;
+    let shorturls = doc.shorturls();
+    let all = doc.inputs()?;
     let selected = select(&all, names);
     if selected.is_empty() {
         return Ok(());
@@ -63,9 +231,9 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
         .enumerate()
         .map(|(i, inp)| {
             display.set(i, PinStatus::Fetching);
-            let expanded = shorturl::expand(&inp.url, &shorturls);
+            let expanded = shorturls.expand(&inp.url);
             let old = lk.get(&inp.name);
-            let old_rev = old.and_then(|n| lock::Node::from(n).rev());
+            let old_rev = old.and_then(lock::LockedNode::rev);
             let fetched = fetch_for_update(inp, &expanded, old_rev);
             match fetched {
                 // for fixed pins sha256 is the identity; any mismatch is drift
@@ -123,7 +291,7 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
                 },
             }
         })
-        .collect::<Vec<Option<Value>>>();
+        .collect::<Vec<Option<lock::LockedNode>>>();
 
     let mut changed = false;
     for (inp, result) in selected.iter().zip(results) {
@@ -132,16 +300,16 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
             changed = true;
         }
     }
-    let all_follow = pins::all_follows(&doc);
-    let (auto_changed, surfaced) = write_auto_dedup(&all, &all_follow, &mut lk);
-    if auto_changed {
+    let all_follow = doc.all_follows();
+    let auto_dedup = write_auto_dedup(&all, &all_follow, &mut lk);
+    if auto_dedup.changed {
         changed = true;
     }
     if changed {
         project.save_lock(&lk)?;
     }
     display.finish();
-    print_surfaced_fetch_causes(&surfaced);
+    print_surfaced_fetch_causes(&auto_dedup.surfaced_fetch_causes);
 
     if drift.into_inner() > 0 {
         bail!(
@@ -158,12 +326,9 @@ fn print_surfaced_fetch_causes(surfaced: &BTreeSet<String>) {
     }
 }
 
-fn hash_drifted(old: Option<&Value>, node: &Value) -> bool {
+fn hash_drifted(old: Option<&lock::LockedNode>, node: &lock::LockedNode) -> bool {
     matches!(
-        (
-            old.and_then(|n| lock::Node::from(n).hash()),
-            lock::Node::from(node).hash()
-        ),
+        (old.and_then(lock::LockedNode::hash), node.hash()),
         (Some(prev), Some(curr)) if prev != curr
     )
 }
@@ -204,48 +369,27 @@ fn fetch_for_update(
 fn write_auto_dedup(
     inputs: &[pins::Input],
     all_follow: &BTreeMap<String, String>,
-    lock: &mut lock::Lock,
-) -> (bool, BTreeSet<String>) {
-    let input_names = inputs
-        .iter()
-        .map(|i| i.name.as_str())
-        .collect::<HashSet<&str>>();
-
-    // synthesis observes flake.lock nodes, so project aliases onto the flake
-    // side: `flake:` is rekeyed bare and `tack:` is dropped
-    let aliases = all_follow
-        .iter()
-        .filter(|&(_, target)| !input_names.contains(target.as_str()))
-        .filter_map(|(alias, target)| Some((pins::flake_side(alias)?.to_owned(), target.clone())))
-        .collect::<BTreeMap<String, String>>();
-
+    lock: &mut lock::LockFile,
+) -> AutoDedupReport {
+    let aliases = AutoFollowAliases::from_inputs(inputs, all_follow);
     let mut valid = inputs
         .iter()
         .map(|i| i.name.clone())
         .collect::<HashSet<String>>();
-    for target in aliases.values() {
-        valid.insert(target.clone());
-    }
-
-    let stale = lock
-        .keys()
-        .filter(|key| !valid.contains(key.as_str()))
-        .cloned()
-        .collect::<Vec<String>>();
-    let mut changed = false;
-    for key in stale {
-        lock.remove(&key);
-        changed = true;
-    }
-    let mut surfaced = BTreeSet::new();
+    valid.extend(aliases.targets().cloned());
+    let mut changed = prune_stale_auto_entries(lock, &valid);
+    let mut comparator = LockComparator::new();
 
     if aliases.is_empty() {
-        return (changed, surfaced);
+        return AutoDedupReport {
+            changed,
+            surfaced_fetch_causes: BTreeSet::new(),
+        };
     }
 
     let probe_causes = Mutex::new(BTreeSet::<String>::new());
     let batches = {
-        let lock_ro: &lock::Lock = lock;
+        let lock_ro: &lock::LockFile = lock;
         inputs
             .par_iter()
             .filter(|inp| inp.pin_type == PinType::Flake)
@@ -256,55 +400,36 @@ fn write_auto_dedup(
                     probe_causes.lock().unwrap().insert(cause);
                 }
                 let raw_body = maybe_raw.flatten()?;
-                let parsed = serde_json::from_str::<Value>(&raw_body).ok()?;
-                let root_key = parsed
-                    .get("root")
-                    .and_then(Value::as_str)
-                    .unwrap_or("root")
-                    .to_owned();
-                let nodes = parsed.get("nodes")?.as_object()?.clone();
-                let mut local = Vec::<(String, i64, Value)>::new();
-                for (key, n) in &nodes {
-                    if *key == root_key {
-                        continue;
-                    }
+                let parsed = FlakeLock::parse(&raw_body).ok()?;
+                let mut local = Vec::<(String, LockObservation)>::new();
+                for (key, locked) in parsed.locked_nodes() {
                     let stripped = strip_disambiguator(key);
-                    let Some(target) = aliases.get(stripped) else {
+                    let Some(target) = aliases.target_for(stripped) else {
                         continue;
                     };
-                    let Some(locked) = n.get("locked") else {
-                        continue;
-                    };
-                    let lm = locked
-                        .get("lastModified")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0);
-                    local.push((target.clone(), lm, locked.clone()));
+                    local.push((target.clone(), LockObservation::from_node(locked.clone())));
                 }
                 Some(local)
             })
-            .collect::<Vec<Vec<(String, i64, Value)>>>()
+            .collect::<Vec<Vec<(String, LockObservation)>>>()
     };
-    surfaced.extend(probe_causes.into_inner().unwrap());
+    comparator
+        .surfaced
+        .extend(probe_causes.into_inner().unwrap());
 
-    let mut observations = BTreeMap::<String, Vec<(i64, Value)>>::new();
+    let mut observations = BTreeMap::<String, Vec<LockObservation>>::new();
     for batch in batches {
-        for (target, lm, locked) in batch {
-            observations.entry(target).or_default().push((lm, locked));
+        for (target, observation) in batch {
+            observations.entry(target).or_default().push(observation);
         }
     }
 
-    let mut compare_cache = HashMap::new();
     for (target, mut obs) in observations {
         if let Some(current) = lock.get(&target) {
-            let lm = lock::Node::from(current)
-                .last_modified()
-                .and_then(|lm| i64::try_from(lm).ok())
-                .unwrap_or(0);
-            obs.insert(0, (lm, current.clone()));
+            obs.insert(0, LockObservation::from_node(current.clone()));
         }
-        if let Some(winner) = choose_lock_observation(obs, |base, head| {
-            compare_locked_nodes(&mut compare_cache, &mut surfaced, base, head)
+        if let Some(winner) = LockObservation::choose(obs, |base, head| {
+            comparator.compare_locked_nodes(base, head)
         }) && lock.get(&target) != Some(&winner)
         {
             lock.insert(target, winner);
@@ -312,71 +437,22 @@ fn write_auto_dedup(
         }
     }
 
-    (changed, surfaced)
+    AutoDedupReport {
+        changed,
+        surfaced_fetch_causes: comparator.into_surfaced(),
+    }
 }
 
-pub(in crate::commands) fn choose_lock_observation(
-    observations: Vec<(i64, Value)>,
-    mut compare: impl FnMut(&Value, &Value) -> Option<CompareStatus>,
-) -> Option<Value> {
-    let mut iter = observations.into_iter();
-    let mut winner = iter.next()?;
-    for candidate in iter {
-        match compare(&winner.1, &candidate.1) {
-            Some(CompareStatus::Ahead) => winner = candidate,
-            Some(CompareStatus::Behind | CompareStatus::Identical) => {},
-            Some(CompareStatus::Diverged) | None => {
-                if candidate.0 > winner.0 {
-                    winner = candidate;
-                }
-            },
-        }
+fn prune_stale_auto_entries(lock: &mut lock::LockFile, valid: &HashSet<String>) -> bool {
+    let stale = lock
+        .keys()
+        .filter(|key| !valid.contains(key.as_str()))
+        .cloned()
+        .collect::<Vec<String>>();
+    for key in &stale {
+        lock.remove(key);
     }
-    Some(winner.1)
-}
-
-fn compare_locked_nodes(
-    cache: &mut HashMap<(String, String, String, String), Option<CompareStatus>>,
-    surfaced: &mut BTreeSet<String>,
-    base: &Value,
-    head: &Value,
-) -> Option<CompareStatus> {
-    let (owner, repo, base_rev, head_rev) = github_compare_parts(base, head)?;
-    if base_rev == head_rev {
-        return Some(CompareStatus::Identical);
-    }
-    let key = (owner, repo, base_rev, head_rev);
-    if let Some(cached) = cache.get(&key) {
-        return *cached;
-    }
-    let (maybe_status, maybe_cause) =
-        tolerate(fetch::compare_status(&key.0, &key.1, &key.2, &key.3));
-    if let Some(cause) = maybe_cause {
-        surfaced.insert(cause);
-    }
-    let status = maybe_status.flatten();
-    cache.insert(key, status);
-    status
-}
-
-fn github_compare_parts(base: &Value, head: &Value) -> Option<(String, String, String, String)> {
-    let (base_node, head_node) = (lock::Node::from(base), lock::Node::from(head));
-    if base_node.kind()? != "github" || head_node.kind()? != "github" {
-        return None;
-    }
-    let base_owner = base.get("owner")?.as_str()?;
-    let base_repo = base.get("repo")?.as_str()?;
-    let head_owner = head.get("owner")?.as_str()?;
-    let head_repo = head.get("repo")?.as_str()?;
-    if !base_owner.eq_ignore_ascii_case(head_owner) || !base_repo.eq_ignore_ascii_case(head_repo) {
-        return None;
-    }
-    Some((
-        base_owner.to_owned(),
-        base_repo.to_owned(),
-        base_node.rev()?.to_owned(),
-        head_node.rev()?.to_owned(),
-    ))
+    !stale.is_empty()
 }
 
 pub fn look(names: &[String], verbose: bool) -> Result<()> {
@@ -384,8 +460,8 @@ pub fn look(names: &[String], verbose: bool) -> Result<()> {
 
     let project = Project::discover();
     let doc = project.load_pins()?;
-    let shorturls = pins::shorturls(&doc);
-    let all = pins::inputs(&doc)?;
+    let shorturls = doc.shorturls();
+    let all = doc.inputs()?;
     if all.is_empty() {
         println!(
             "no pins in {}; add one with `tack add <name> <url>`",
@@ -413,7 +489,7 @@ pub fn look(names: &[String], verbose: bool) -> Result<()> {
             return;
         }
         display.set(i, PinStatus::Fetching);
-        let expanded = shorturl::expand(&inp.url, &shorturls);
+        let expanded = shorturls.expand(&inp.url);
         let source = match expanded.parse::<Source>() {
             Ok(source) => source,
             Err(err) => {
@@ -423,7 +499,7 @@ pub fn look(names: &[String], verbose: bool) -> Result<()> {
         };
         let old = lk
             .get(&inp.name)
-            .and_then(|n| lock::Node::from(n).rev())
+            .and_then(lock::LockedNode::rev)
             .map(str::to_owned);
         match fetch::current_rev_compared(&source, old.as_deref()) {
             Ok(current) if old.as_deref() == Some(current.rev.as_str()) => {

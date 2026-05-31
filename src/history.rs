@@ -21,6 +21,7 @@ use std::{
         PathBuf,
     },
     process,
+    result::Result as StdResult,
     time::{
         SystemTime,
         UNIX_EPOCH,
@@ -32,9 +33,11 @@ use etcetera::{
     choose_base_strategy,
 };
 use eyre::Result;
-use serde_json::{
-    Value,
-    json,
+use serde::{
+    Deserialize,
+    Deserializer,
+    Serialize,
+    Serializer,
 };
 
 use crate::project::{
@@ -45,9 +48,214 @@ use crate::project::{
 const MAX_LEVELS: usize = 20;
 const MAX_AGE: u64 = 30 * 24 * 60 * 60;
 
-/// verbatim bytes of the three state files: `(pins.toml, pins.lock.json,
-/// resolver)`.
-pub type State = (Option<String>, Option<String>, Option<String>);
+/// verbatim bytes of the three state files that determine tack's state.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    toml:     Option<String>,
+    lock:     Option<String>,
+    resolver: Option<String>,
+}
+
+impl Snapshot {
+    /// read the current on-disk state of all three files
+    pub fn capture(project: &Project) -> Self {
+        Self {
+            toml:     fs::read_to_string(project.pins_path()).ok(),
+            lock:     fs::read_to_string(project.lock_path()).ok(),
+            resolver: fs::read_to_string(project.resolver_path()).ok(),
+        }
+    }
+}
+
+/// undo-history store for one project.
+pub struct HistoryStore {
+    dir: PathBuf,
+}
+
+pub struct RecordedRun {
+    pub result:            Result<()>,
+    pub captured_external: bool,
+}
+
+impl HistoryStore {
+    /// undo-history dir for `project`, under the XDG state dir so snapshots
+    /// stay out of the repo.
+    pub fn for_project(project: &Project) -> Self {
+        Self {
+            dir: store_dir(project),
+        }
+    }
+
+    /// record a `pre -> post` transition under `label`. a no-op appends
+    /// nothing, and an edit made outside tack is captured as `(edited)` first
+    /// (returning whether it was). errors are swallowed so recording never
+    /// breaks a command.
+    pub fn record(&self, label: &str, pre: Snapshot, post: Snapshot) -> bool {
+        self.record_inner(label, pre, post).unwrap_or(false)
+    }
+
+    /// run a mutating command, recording the resulting file diff to undo
+    /// history. records failures too, since a partial write is still
+    /// recoverable.
+    pub fn record_run<F>(&self, project: &Project, label: &str, run: F) -> RecordedRun
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let pre = Snapshot::capture(project);
+        let result = run();
+        let post = Snapshot::capture(project);
+        RecordedRun {
+            result,
+            captured_external: self.record(label, pre, post),
+        }
+    }
+
+    fn record_inner(&self, label: &str, pre: Snapshot, post: Snapshot) -> Result<bool> {
+        // a command that left both files untouched is not worth an entry
+        if pre == post {
+            return Ok(false);
+        }
+        let ts = now();
+        let mut history = self.load();
+
+        let captured_edit = if history.entries.is_empty() {
+            history.entries.push(Entry {
+                label: "(initial)".to_owned(),
+                ts,
+                toml: pre.toml,
+                lock: pre.lock,
+                resolver: pre.resolver,
+            });
+            history.cursor = 0;
+            false
+        } else {
+            capture_external(&mut history, &pre, ts)
+        };
+
+        // a fresh mutation supersedes any redo branch
+        history.entries.truncate(history.cursor + 1);
+        // entries[cursor] now mirrors the on-disk pre-state, so append the result
+        if !history.entries[history.cursor].matches(&post) {
+            history.entries.push(Entry {
+                label: label.to_owned(),
+                ts,
+                toml: post.toml,
+                lock: post.lock,
+                resolver: post.resolver,
+            });
+            history.cursor += 1;
+        }
+
+        gc(&mut history, ts);
+        self.save(&history)?;
+        Ok(captured_edit)
+    }
+
+    pub fn undo(&self, project: &Project) -> Result<Option<View>> {
+        let mut history = self.load();
+        // capture any live edit before moving, so undo never drops it
+        let captured = capture_external(&mut history, &Snapshot::capture(project), now());
+        if !captured && history.cursor == 0 {
+            return Ok(None);
+        }
+        if history.cursor > 0 {
+            history.cursor -= 1;
+            restore(project, &history.entries[history.cursor])?;
+        }
+        self.save(&history)?;
+        Ok(Some(view(&history)))
+    }
+
+    pub fn redo(&self, project: &Project) -> Result<Option<View>> {
+        let mut history = self.load();
+        // a live edit voids the redo future, so capture it, then report nothing
+        if capture_external(&mut history, &Snapshot::capture(project), now()) {
+            self.save(&history)?;
+            return Ok(None);
+        }
+        if history.entries.is_empty() || history.cursor + 1 >= history.entries.len() {
+            return Ok(None);
+        }
+        history.cursor += 1;
+        restore(project, &history.entries[history.cursor])?;
+        self.save(&history)?;
+        Ok(Some(view(&history)))
+    }
+
+    pub fn list(&self) -> Option<View> {
+        let history = self.load();
+        if history.entries.is_empty() {
+            return None;
+        }
+        Some(view(&history))
+    }
+
+    fn manifest_path(&self) -> PathBuf {
+        self.dir.join("history.json")
+    }
+
+    fn snapshots_dir(&self) -> PathBuf {
+        self.dir.join("snapshots")
+    }
+
+    fn load(&self) -> History {
+        let Ok(raw) = fs::read_to_string(self.manifest_path()) else {
+            return empty();
+        };
+        let Ok(stored) = serde_json::from_str::<StoredHistory>(&raw) else {
+            return empty();
+        };
+        let snaps = self.snapshots_dir();
+        let mut entries = Vec::with_capacity(stored.entries.len());
+        for value in stored.entries {
+            // an unreadable ref means a corrupt store, so start fresh
+            let Some(entry) = value.resolve(&snaps) else {
+                return empty();
+            };
+            entries.push(entry);
+        }
+
+        // clamp a possibly-corrupt cursor into range
+        let clamped = stored.cursor.min(entries.len().saturating_sub(1));
+        History {
+            cursor: clamped,
+            entries,
+        }
+    }
+
+    fn save(&self, history: &History) -> Result<()> {
+        let snaps = self.snapshots_dir();
+        fs::create_dir_all(&snaps)?;
+
+        // content-addressed files, written only when absent, so a record writes
+        // just its own new snapshot instead of the whole history
+        let mut referenced = HashSet::new();
+        let mut entries = Vec::with_capacity(history.entries.len());
+        for entry in &history.entries {
+            entries.push(StoredEntry {
+                label:    entry.label.clone(),
+                ts:       entry.ts,
+                toml:     persist(&snaps, entry.toml.as_deref(), &mut referenced)?,
+                lock:     persist(&snaps, entry.lock.as_deref(), &mut referenced)?,
+                resolver: persist(&snaps, entry.resolver.as_deref(), &mut referenced)?,
+            });
+        }
+        let doc = StoredHistory {
+            cursor: history.cursor,
+            entries,
+        };
+        let mut json = serde_json::to_string_pretty(&doc)?;
+        json.push('\n');
+
+        let path = self.manifest_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        project::write_atomic(&path, &json)?;
+        sweep(&snaps, &referenced);
+        Ok(())
+    }
+}
 
 /// the state of the bytes of all three files, plus the command that produced it
 /// and when
@@ -61,14 +269,103 @@ struct Entry {
 }
 
 impl Entry {
-    fn matches(&self, state: &State) -> bool {
-        self.toml == state.0 && self.lock == state.1 && self.resolver == state.2
+    fn matches(&self, state: &Snapshot) -> bool {
+        self.toml == state.toml && self.lock == state.lock && self.resolver == state.resolver
     }
 }
 
 struct History {
     cursor:  usize,
     entries: Vec<Entry>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredHistory {
+    #[serde(default)]
+    cursor:  usize,
+    #[serde(default)]
+    entries: Vec<StoredEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredEntry {
+    #[serde(default)]
+    label:    String,
+    #[serde(default)]
+    ts:       u64,
+    #[serde(default)]
+    toml:     SnapshotRef,
+    #[serde(default)]
+    lock:     SnapshotRef,
+    #[serde(default)]
+    resolver: SnapshotRef,
+}
+
+impl StoredEntry {
+    fn resolve(self, snaps: &Path) -> Option<Entry> {
+        Some(Entry {
+            label:    self.label,
+            ts:       self.ts,
+            toml:     self.toml.resolve(snaps)?.into_option(),
+            lock:     self.lock.resolve(snaps)?.into_option(),
+            resolver: self.resolver.resolve(snaps)?.into_option(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum SnapshotRef {
+    #[default]
+    Missing,
+    Present(String),
+}
+
+impl SnapshotRef {
+    fn resolve(&self, snaps: &Path) -> Option<SnapshotBytes> {
+        match *self {
+            Self::Missing => Some(SnapshotBytes::Missing),
+            Self::Present(ref name) => {
+                fs::read_to_string(snaps.join(name))
+                    .ok()
+                    .map(SnapshotBytes::Present)
+            },
+        }
+    }
+}
+
+enum SnapshotBytes {
+    Missing,
+    Present(String),
+}
+
+impl SnapshotBytes {
+    fn into_option(self) -> Option<String> {
+        match self {
+            Self::Missing => None,
+            Self::Present(content) => Some(content),
+        }
+    }
+}
+
+impl Serialize for SnapshotRef {
+    fn serialize<S>(&self, serializer: S) -> StdResult<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match *self {
+            Self::Missing => serializer.serialize_none(),
+            Self::Present(ref name) => serializer.serialize_some(name),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SnapshotRef {
+    fn deserialize<D>(deserializer: D) -> StdResult<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Option::<String>::deserialize(deserializer)?.map_or(Self::Missing, Self::Present))
+    }
 }
 
 /// a label + timestamp pair
@@ -89,66 +386,10 @@ pub fn now() -> u64 {
         .map_or(0, |dur| dur.as_secs())
 }
 
-/// read the current on-disk state of all three files
-pub fn snapshot(project: &Project) -> State {
-    let toml = fs::read_to_string(project.pins_path()).ok();
-    let lock = fs::read_to_string(project.lock_path()).ok();
-    let resolver = fs::read_to_string(project.resolver_path()).ok();
-    (toml, lock, resolver)
-}
-
-/// record a `pre -> post` transition under `label`. a no-op appends nothing,
-/// and an edit made outside tack is captured as `(edited)` first (returning
-/// whether it was). errors are swallowed so recording never breaks a command.
-pub fn record(store: &Path, label: &str, pre: State, post: State) -> bool {
-    record_inner(store, label, pre, post).unwrap_or(false)
-}
-
-fn record_inner(store: &Path, label: &str, pre: State, post: State) -> Result<bool> {
-    // a command that left both files untouched is not worth an entry
-    if pre == post {
-        return Ok(false);
-    }
-    let ts = now();
-    let mut history = load(store);
-
-    let captured_edit = if history.entries.is_empty() {
-        history.entries.push(Entry {
-            label: "(initial)".to_owned(),
-            ts,
-            toml: pre.0,
-            lock: pre.1,
-            resolver: pre.2,
-        });
-        history.cursor = 0;
-        false
-    } else {
-        capture_external(&mut history, &pre, ts)
-    };
-
-    // a fresh mutation supersedes any redo branch
-    history.entries.truncate(history.cursor + 1);
-    // entries[cursor] now mirrors the on-disk pre-state, so append the result
-    if !history.entries[history.cursor].matches(&post) {
-        history.entries.push(Entry {
-            label: label.to_owned(),
-            ts,
-            toml: post.0,
-            lock: post.1,
-            resolver: post.2,
-        });
-        history.cursor += 1;
-    }
-
-    gc(&mut history, ts);
-    save(store, &history)?;
-    Ok(captured_edit)
-}
-
 /// capture the live `state` as an `(edited)` entry when it has diverged from
 /// the model (e.g. the user manually edited it), so undo/redo never drop it,
 /// truncating the redo branch like a fresh mutation.
-fn capture_external(history: &mut History, state: &State, ts: u64) -> bool {
+fn capture_external(history: &mut History, state: &Snapshot, ts: u64) -> bool {
     if history.entries.is_empty() {
         return false;
     }
@@ -160,9 +401,9 @@ fn capture_external(history: &mut History, state: &State, ts: u64) -> bool {
     history.entries.push(Entry {
         label: "(edited)".to_owned(),
         ts,
-        toml: state.0.clone(),
-        lock: state.1.clone(),
-        resolver: state.2.clone(),
+        toml: state.toml.clone(),
+        lock: state.lock.clone(),
+        resolver: state.resolver.clone(),
     });
     history.cursor += 1;
     true
@@ -179,45 +420,6 @@ fn gc(history: &mut History, now: u64) {
         history.entries.remove(0);
         history.cursor -= 1;
     }
-}
-
-pub fn undo(project: &Project, store: &Path) -> Result<Option<View>> {
-    let mut history = load(store);
-    // capture any live edit before moving, so undo never drops it
-    let captured = capture_external(&mut history, &snapshot(project), now());
-    if !captured && history.cursor == 0 {
-        return Ok(None);
-    }
-    if history.cursor > 0 {
-        history.cursor -= 1;
-        restore(project, &history.entries[history.cursor])?;
-    }
-    save(store, &history)?;
-    Ok(Some(view(&history)))
-}
-
-pub fn redo(project: &Project, store: &Path) -> Result<Option<View>> {
-    let mut history = load(store);
-    // a live edit voids the redo future, so capture it, then report nothing
-    if capture_external(&mut history, &snapshot(project), now()) {
-        save(store, &history)?;
-        return Ok(None);
-    }
-    if history.entries.is_empty() || history.cursor + 1 >= history.entries.len() {
-        return Ok(None);
-    }
-    history.cursor += 1;
-    restore(project, &history.entries[history.cursor])?;
-    save(store, &history)?;
-    Ok(Some(view(&history)))
-}
-
-pub fn list(store: &Path) -> Option<View> {
-    let history = load(store);
-    if history.entries.is_empty() {
-        return None;
-    }
-    Some(view(&history))
 }
 
 fn view(history: &History) -> View {
@@ -378,9 +580,7 @@ fn temp_path(path: &Path, tag: &str, kind: &str) -> PathBuf {
     PathBuf::from(tmp_str)
 }
 
-/// undo-history dir for `project`, under the XDG state dir so snapshots stay
-/// out of the repo
-pub fn store_dir(project: &Project) -> PathBuf {
+fn store_dir(project: &Project) -> PathBuf {
     // XDG state dir on Linux, falling back to the data dir where there is no
     // state dir (e.g. on macOS, Windows)
     let base = choose_base_strategy().map_or_else(
@@ -410,47 +610,6 @@ fn content_key(text: &str) -> String {
     format!("{:016x}{:016x}", hi.finish(), lo.finish())
 }
 
-fn manifest_path(store: &Path) -> PathBuf {
-    store.join("history.json")
-}
-
-fn snapshots_dir(store: &Path) -> PathBuf {
-    store.join("snapshots")
-}
-
-fn load(store: &Path) -> History {
-    let Ok(raw) = fs::read_to_string(manifest_path(store)) else {
-        return empty();
-    };
-    let Ok(json) = serde_json::from_str::<Value>(&raw) else {
-        return empty();
-    };
-    let Some(arr) = json.get("entries").and_then(Value::as_array) else {
-        return empty();
-    };
-    let snaps = snapshots_dir(store);
-    let mut entries = Vec::with_capacity(arr.len());
-    for value in arr {
-        // an unreadable ref means a corrupt store, so start fresh
-        let Some(entry) = parse_entry(&snaps, value) else {
-            return empty();
-        };
-        entries.push(entry);
-    }
-    let cursor = json
-        .get("cursor")
-        .and_then(Value::as_u64)
-        .and_then(|num| usize::try_from(num).ok())
-        .unwrap_or(0);
-
-    // clamp a possibly-corrupt cursor into range
-    let clamped = cursor.min(entries.len().saturating_sub(1));
-    History {
-        cursor: clamped,
-        entries,
-    }
-}
-
 const fn empty() -> History {
     History {
         cursor:  0,
@@ -458,71 +617,14 @@ const fn empty() -> History {
     }
 }
 
-/// read one entry, resolving each file ref to its bytes. a missing key or null
-/// means the file was absent. an unreadable ref is corruption ([`None`])
-fn parse_entry(snaps: &Path, value: &Value) -> Option<Entry> {
-    let resolve = |key: &str| -> Option<Option<String>> {
-        let Some(field) = value.get(key) else {
-            return Some(None);
-        };
-        if field.is_null() {
-            return Some(None);
-        }
-        field
-            .as_str()
-            .and_then(|name| fs::read_to_string(snaps.join(name)).ok())
-            .map(Some)
-    };
-    Some(Entry {
-        label:    value
-            .get("label")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-        ts:       value.get("ts").and_then(Value::as_u64).unwrap_or(0),
-        toml:     resolve("toml")?,
-        lock:     resolve("lock")?,
-        resolver: resolve("resolver")?,
-    })
-}
-
-fn save(store: &Path, history: &History) -> Result<()> {
-    let snaps = snapshots_dir(store);
-    fs::create_dir_all(&snaps)?;
-
-    // content-addressed files, written only when absent, so a record writes
-    // just its own new snapshot instead of the whole history
-    let mut referenced = HashSet::new();
-    let mut entries = Vec::with_capacity(history.entries.len());
-    for entry in &history.entries {
-        entries.push(json!({
-            "label": entry.label,
-            "ts": entry.ts,
-            "toml": persist(&snaps, entry.toml.as_deref(), &mut referenced)?,
-            "lock": persist(&snaps, entry.lock.as_deref(), &mut referenced)?,
-            "resolver": persist(&snaps, entry.resolver.as_deref(), &mut referenced)?,
-        }));
-    }
-    let doc = json!({
-        "cursor": history.cursor,
-        "entries": entries,
-    });
-    let mut json = serde_json::to_string_pretty(&doc)?;
-    json.push('\n');
-
-    let path = manifest_path(store);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    project::write_atomic(&path, &json)?;
-    sweep(&snaps, &referenced);
-    Ok(())
-}
-
 /// write `content` to a hash-named file and return the name.
-fn persist(snaps: &Path, content: Option<&str>, referenced: &mut HashSet<String>) -> Result<Value> {
+fn persist(
+    snaps: &Path,
+    content: Option<&str>,
+    referenced: &mut HashSet<String>,
+) -> Result<SnapshotRef> {
     let Some(text) = content else {
-        return Ok(Value::Null);
+        return Ok(SnapshotRef::Missing);
     };
     let name = content_key(text);
     let path = snaps.join(&name);
@@ -530,7 +632,7 @@ fn persist(snaps: &Path, content: Option<&str>, referenced: &mut HashSet<String>
         project::write_atomic(&path, text)?;
     }
     referenced.insert(name.clone());
-    Ok(Value::String(name))
+    Ok(SnapshotRef::Present(name))
 }
 
 /// drop snapshot files the manifest no longer references, after gc or a
@@ -566,21 +668,27 @@ pub fn rel_time(now: u64, ts: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        path::Path,
+    };
 
     use super::{
         Entry,
         History,
+        HistoryStore,
         MAX_AGE,
         MAX_LEVELS,
+        Snapshot,
         gc,
-        list,
-        record,
-        redo,
-        snapshot,
-        undo,
     };
     use crate::project::Project;
+
+    fn store(dir: &Path) -> HistoryStore {
+        HistoryStore {
+            dir: dir.to_path_buf(),
+        }
+    }
 
     fn write(project: &Project, toml: &str) {
         fs::write(project.pins_path(), toml).unwrap();
@@ -593,11 +701,11 @@ mod tests {
 
     /// stand in for a recorded mutating command: snapshot, mutate, snapshot,
     /// record. returns whether an external edit was captured.
-    fn run(project: &Project, label: &str, toml: &str) -> bool {
-        let pre = snapshot(project);
+    fn run(project: &Project, store: &HistoryStore, label: &str, toml: &str) -> bool {
+        let pre = Snapshot::capture(project);
         write(project, toml);
-        let post = snapshot(project);
-        record(project.dir(), label, pre, post)
+        let post = Snapshot::capture(project);
+        store.record(label, pre, post)
     }
 
     #[test]
@@ -605,23 +713,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let project = Project::at(dir.to_path_buf());
+        let store = store(dir);
         write(&project, "v1\n");
-        run(&project, "a", "v2\n");
-        run(&project, "b", "v3\n");
+        run(&project, &store, "a", "v2\n");
+        run(&project, &store, "b", "v3\n");
         assert_eq!(read(&project), "v3\n");
 
-        undo(&project, dir).unwrap();
+        store.undo(&project).unwrap();
         assert_eq!(read(&project), "v2\n");
-        undo(&project, dir).unwrap();
+        store.undo(&project).unwrap();
         assert_eq!(read(&project), "v1\n");
-        assert!(undo(&project, dir).unwrap().is_none()); // at the initial state
+        assert!(store.undo(&project).unwrap().is_none()); // at the initial state
         assert_eq!(read(&project), "v1\n");
 
-        redo(&project, dir).unwrap();
+        store.redo(&project).unwrap();
         assert_eq!(read(&project), "v2\n");
-        redo(&project, dir).unwrap();
+        store.redo(&project).unwrap();
         assert_eq!(read(&project), "v3\n");
-        assert!(redo(&project, dir).unwrap().is_none());
+        assert!(store.redo(&project).unwrap().is_none());
     }
 
     #[test]
@@ -629,19 +738,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let project = Project::at(dir.to_path_buf());
+        let store = store(dir);
         write(&project, "v1\n");
-        run(&project, "a", "v2\n");
+        run(&project, &store, "a", "v2\n");
 
         // user hand-edits pins.toml outside tack, then undoes
         write(&project, "manual\n");
-        undo(&project, dir).unwrap();
+        store.undo(&project).unwrap();
         assert_eq!(read(&project), "v2\n"); // stepped back to the recorded state
 
         // the manual edit must not be lost
-        redo(&project, dir).unwrap();
+        store.redo(&project).unwrap();
         assert_eq!(read(&project), "manual\n");
         assert!(
-            list(dir)
+            store
+                .list()
                 .unwrap()
                 .rows
                 .iter()
@@ -654,11 +765,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let project = Project::at(dir.to_path_buf());
+        let store = store(dir);
         write(&project, "v1\n");
-        assert!(!run(&project, "a", "v2\n")); // nothing diverged yet
+        assert!(!run(&project, &store, "a", "v2\n")); // nothing diverged yet
 
         write(&project, "manual\n"); // unrecorded edit
-        assert!(run(&project, "b", "v3\n")); // recorder notices and captures it
+        assert!(run(&project, &store, "b", "v3\n")); // recorder notices and captures it
     }
 
     #[test]
@@ -666,15 +778,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let project = Project::at(dir.to_path_buf());
+        let store = store(dir);
         write(&project, "v1\n");
-        run(&project, "a", "v2\n");
-        run(&project, "b", "v3\n");
-        undo(&project, dir).unwrap(); // back to v2 with v3 redoable
+        run(&project, &store, "a", "v2\n");
+        run(&project, &store, "b", "v3\n");
+        store.undo(&project).unwrap(); // back to v2 with v3 redoable
         assert_eq!(read(&project), "v2\n");
 
-        run(&project, "c", "v4\n"); // forks a new branch
+        run(&project, &store, "c", "v4\n"); // forks a new branch
         assert_eq!(read(&project), "v4\n");
-        assert!(redo(&project, dir).unwrap().is_none()); // the v3 future is gone
+        assert!(store.redo(&project).unwrap().is_none()); // the v3 future is gone
     }
 
     #[test]
@@ -682,11 +795,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let project = Project::at(dir.to_path_buf());
+        let store = store(dir);
         write(&project, "s0\n");
         for i in 1..=MAX_LEVELS + 5 {
-            run(&project, &format!("m{i}"), &format!("s{i}\n"));
+            run(&project, &store, &format!("m{i}"), &format!("s{i}\n"));
         }
-        assert!(list(dir).unwrap().rows.len() <= MAX_LEVELS);
+        assert!(store.list().unwrap().rows.len() <= MAX_LEVELS);
         assert_eq!(read(&project), format!("s{}\n", MAX_LEVELS + 5));
     }
 
@@ -720,18 +834,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let project = Project::at(dir.to_path_buf());
+        let store = store(dir);
         let resolver = project.resolver_path();
         write(&project, "v1\n");
         fs::write(&resolver, "resolver-v1\n").unwrap();
-        let pre = snapshot(&project);
+        let pre = Snapshot::capture(&project);
 
         // a resolver-only change, e.g. `tack init --resolver`
         fs::write(&resolver, "resolver-v2\n").unwrap();
-        let post = snapshot(&project);
+        let post = Snapshot::capture(&project);
         assert!(pre != post); // the 3-file snapshot notices the resolver change
-        record(dir, "init --resolver", pre, post);
+        store.record("init --resolver", pre, post);
 
-        undo(&project, dir).unwrap();
+        store.undo(&project).unwrap();
         assert_eq!(fs::read_to_string(&resolver).unwrap(), "resolver-v1\n");
     }
 }
