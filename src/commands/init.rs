@@ -1,21 +1,28 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use super::{
-    MARKER,
-    Path,
-    Project,
-    RESOLVER_NIX,
-    Result,
-    SCAFFOLD_FLAKE,
-    STARTER_TOML,
-    bail,
+use std::{
     env,
     fs,
-    project,
+    path::Path,
 };
 
-pub fn init(force: bool, resolver_only: bool, flake: bool) -> Result<()> {
-    let project = Project::discover();
+use eyre::{
+    Result,
+    bail,
+};
+
+use super::{
+    MARKER,
+    RESOLVER_NIX,
+    SCAFFOLD_FLAKE,
+    STARTER_TOML,
+};
+use crate::project::{
+    self,
+    Project,
+};
+
+pub fn init(project: &Project, force: bool, resolver_only: bool, flake: bool) -> Result<()> {
     let (pt, lp, rp) = (
         project.pins_path(),
         project.lock_path(),
@@ -43,17 +50,17 @@ pub fn init(force: bool, resolver_only: bool, flake: bool) -> Result<()> {
     }
     project::write_atomic(&rp, RESOLVER_NIX)?;
 
-    println!("initialised tack in {}", project.dir().display());
+    println!("initialized tack in {}", project.dir().display());
     println!("  pins.toml       edit shorturls and inputs here");
     println!("  pins.lock.json  written by `tack update`");
     println!("  default.nix     `import ./.tack` from your flake/config");
 
-    flake_awareness(flake, &project)?;
+    flake_awareness(flake, project)?;
     Ok(())
 }
 
-/// (re)write just the resolver to the bundled template. refuses to clobber a
-/// forked resolver (marker stripped) unless `force`.
+/// (re)write just the resolver to the bundled template
+/// refuses to clobber a forked resolver unless `force`
 fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     if let Ok(current) = fs::read_to_string(path) {
         if current == RESOLVER_NIX {
@@ -73,9 +80,8 @@ fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// `--flake` scaffolds a wired flake and marks the project recomposable, but
-/// only when no flake.nix exists. an existing flake.nix is the user's, never
-/// tack's.
+/// `--flake` scaffolds a wired flake and marks the project recomposable
+/// existing flake.nix belongs to the user
 fn flake_awareness(scaffold: bool, project: &Project) -> Result<()> {
     let cwd = env::current_dir()?;
     let path = cwd.join("flake.nix");
@@ -113,8 +119,8 @@ fn flake_awareness(scaffold: bool, project: &Project) -> Result<()> {
 }
 
 /// whether `flake.nix` mentions `tackOverrides` in code rather than only a `#`
-/// comment.
-pub(in crate::commands) fn wires_overrides(flake: &str) -> bool {
+/// comment
+pub(super) fn wires_overrides(flake: &str) -> bool {
     flake.lines().any(|line| {
         line.split_once('#')
             .map_or(line, |(code, _)| code)
@@ -122,7 +128,7 @@ pub(in crate::commands) fn wires_overrides(flake: &str) -> bool {
     })
 }
 
-/// set `[tack] recomposable = true`, preserving any existing `[tack]` keys.
+/// set `[tack] recomposable = true`, preserving any existing `[tack]` keys
 fn mark_recomposable(project: &Project) -> Result<()> {
     let mut doc = project.load_pins()?;
     doc.mark_recomposable();

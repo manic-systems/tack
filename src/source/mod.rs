@@ -10,7 +10,7 @@ use eyre::{
     bail,
 };
 
-/// A fetchable pin source, parsed from an expanded pins.toml URL.
+/// fetchable pin source parsed from an expanded pins.toml url
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Github {
@@ -68,7 +68,7 @@ impl FromStr for Source {
     }
 }
 
-/// Pull out ref= and rev=.
+/// pull out ref= and rev=
 fn split_query(str: &str) -> (&str, Option<String>, Option<String>) {
     let Some((path, query)) = str.split_once('?') else {
         return (str, None, None);

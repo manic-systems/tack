@@ -8,11 +8,10 @@ use std::{
     },
 };
 
-use crate::lock;
+use crate::lock::LockedNode;
 
-/// Canonical identity of a pin source, parsed from either an expanded URL or a
-/// locked node. Two equal ids are the same upstream for dedup. The canonical
-/// form is case-folded to preserve the existing string behavior.
+/// canonical identity of a pin source
+/// parsed from either an expanded url or a locked node
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum SourceId {
     Github {
@@ -35,10 +34,9 @@ pub enum SourceId {
 }
 
 impl SourceId {
-    /// identity of an expanded pins.toml URL
+    /// identity of an expanded pins.toml url
     pub fn from_url(expanded: &str) -> Option<Self> {
-        let no_query = expanded.split('?').next().unwrap_or(expanded);
-        let path = no_query.split('#').next().unwrap_or(no_query);
+        let path = strip_query_fragment(expanded);
         if let Some(body) = path.strip_prefix("github:") {
             let mut segs = body.split('/');
             let owner = segs.next().filter(|segment| !segment.is_empty())?;
@@ -57,35 +55,35 @@ impl SourceId {
         }
         None
     }
-    pub fn from_locked(node: &lock::LockedNode) -> Option<Self> {
-        match node.kind() {
-            "github" => {
-                let github = node.github()?;
-                Some(Self::github(github.owner, github.repo))
-            },
-            "git" => {
-                let url = node.git()?.url;
-                let cut = url.split('?').next().unwrap_or(url);
+    pub fn from_locked(node: &LockedNode) -> Option<Self> {
+        match *node {
+            LockedNode::Github {
+                ref owner,
+                ref repo,
+                ..
+            } => Some(Self::github(owner, repo)),
+            LockedNode::Git { ref url, .. } => {
+                let cut = strip_query_fragment(url);
                 Some(Self::Git {
                     url: cut.to_lowercase(),
                 })
             },
-            "tarball" => {
+            LockedNode::Tarball { ref url, .. } => {
                 Some(Self::Tarball {
-                    url: node.tarball()?.url.to_lowercase(),
+                    url: strip_query_fragment(url).to_lowercase(),
                 })
             },
-            "indirect" => {
+            LockedNode::Indirect { ref id, .. } => {
                 Some(Self::Indirect {
-                    id: node.indirect()?.id.to_lowercase(),
+                    id: id.to_lowercase(),
                 })
             },
-            "path" => {
+            LockedNode::Path { ref path, .. } => {
                 Some(Self::Path {
-                    path: node.path()?.path.to_lowercase(),
+                    path: path.to_lowercase(),
                 })
             },
-            _ => None,
+            LockedNode::Gitlab { .. } | LockedNode::Fixed { .. } => None,
         }
     }
 
@@ -108,6 +106,12 @@ impl SourceId {
             },
         }
     }
+}
+
+fn strip_query_fragment(value: &str) -> &str {
+    let query = value.find('?').unwrap_or(value.len());
+    let fragment = value.find('#').unwrap_or(value.len());
+    value.get(..query.min(fragment)).unwrap_or(value)
 }
 
 impl Display for SourceId {
@@ -141,11 +145,13 @@ impl PartialOrd for SourceId {
 mod tests {
     use serde_json::json;
 
-    use super::SourceId;
-    use crate::lock;
+    use super::{
+        LockedNode,
+        SourceId,
+    };
 
-    fn node(value: serde_json::Value) -> lock::LockedNode {
-        lock::LockedNode::from_value(value).unwrap()
+    fn node(value: serde_json::Value) -> LockedNode {
+        LockedNode::from_value(value).unwrap()
     }
 
     #[test]
@@ -200,6 +206,30 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "path:/p"
+        );
+    }
+
+    #[test]
+    fn url_and_node_strip_query_and_fragment_consistently() {
+        assert_eq!(
+            SourceId::from_url("git+https://x/o/r?ref=main#frag")
+                .unwrap()
+                .to_string(),
+            SourceId::from_locked(&node(
+                json!({"type": "git", "url": "https://x/o/r?ref=main#frag"})
+            ))
+            .unwrap()
+            .to_string()
+        );
+        assert_eq!(
+            SourceId::from_url("https://x/archive.tar.gz#frag")
+                .unwrap()
+                .to_string(),
+            SourceId::from_locked(&node(
+                json!({"type": "tarball", "url": "https://x/archive.tar.gz#frag"})
+            ))
+            .unwrap()
+            .to_string()
         );
     }
 

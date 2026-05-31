@@ -74,7 +74,7 @@
             };
           };
 
-          # `nix develop .#fmt` formats on entry.
+          # `nix develop .#fmt` formats on entry
           fmt = pkgs.mkShellNoCC {
             packages = [
               pkgs.cargo

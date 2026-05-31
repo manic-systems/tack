@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-//! verbatim snapshots of `pins.toml`, `pins.lock.json`, and the resolver for
-//! `tack undo`/`redo`. those three files fully determine tack's state, so
-//! snapshotting their exact bytes is an exact undo. history is an editor-style
-//! list of states plus a cursor pointing at the live one.
+//! verbatim snapshots of `pins.toml`, `pins.lock.json`, and the resolver
+//! those three files fully determine tack's state
+//! history is an editor-style list of states plus a cursor pointing at the live
+//! one
 
 use std::{
     collections::{
@@ -28,11 +28,13 @@ use std::{
     },
 };
 
+use data_encoding::HEXLOWER;
 use etcetera::{
     BaseStrategy as _,
     choose_base_strategy,
 };
 use eyre::Result;
+use hmac_sha256::Hash as Sha256;
 use serde::{
     Deserialize,
     Deserializer,
@@ -48,7 +50,7 @@ use crate::project::{
 const MAX_LEVELS: usize = 20;
 const MAX_AGE: u64 = 30 * 24 * 60 * 60;
 
-/// verbatim bytes of the three state files that determine tack's state.
+/// verbatim bytes of the three state files that determine tack's state
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     toml:     Option<String>,
@@ -67,7 +69,7 @@ impl Snapshot {
     }
 }
 
-/// undo-history store for one project.
+/// undo-history store for one project
 pub struct HistoryStore {
     dir: PathBuf,
 }
@@ -78,25 +80,22 @@ pub struct RecordedRun {
 }
 
 impl HistoryStore {
-    /// undo-history dir for `project`, under the XDG state dir so snapshots
-    /// stay out of the repo.
+    /// undo-history dir for `project`, under the xdg state dir so snapshots
+    /// stay out of the repo
     pub fn for_project(project: &Project) -> Self {
         Self {
             dir: store_dir(project),
         }
     }
 
-    /// record a `pre -> post` transition under `label`. a no-op appends
-    /// nothing, and an edit made outside tack is captured as `(edited)` first
-    /// (returning whether it was). errors are swallowed so recording never
-    /// breaks a command.
+    /// record a `pre -> post` transition under `label`
+    /// no-op writes nothing, outside edits are captured first
     pub fn record(&self, label: &str, pre: Snapshot, post: Snapshot) -> bool {
         self.record_inner(label, pre, post).unwrap_or(false)
     }
 
-    /// run a mutating command, recording the resulting file diff to undo
-    /// history. records failures too, since a partial write is still
-    /// recoverable.
+    /// run a mutating command and record the resulting file diff
+    /// failures are recorded too because partial writes are still recoverable
     pub fn record_run<F>(&self, project: &Project, label: &str, run: F) -> RecordedRun
     where
         F: FnOnce() -> Result<()>,
@@ -134,7 +133,8 @@ impl HistoryStore {
 
         // a fresh mutation supersedes any redo branch
         history.entries.truncate(history.cursor + 1);
-        // entries[cursor] now mirrors the on-disk pre-state, so append the result
+
+        // entries[cursor] mirrors the on-disk pre-state, so append the result
         if !history.entries[history.cursor].matches(&post) {
             history.entries.push(Entry {
                 label: label.to_owned(),
@@ -386,9 +386,8 @@ pub fn now() -> u64 {
         .map_or(0, |dur| dur.as_secs())
 }
 
-/// capture the live `state` as an `(edited)` entry when it has diverged from
-/// the model (e.g. the user manually edited it), so undo/redo never drop it,
-/// truncating the redo branch like a fresh mutation.
+/// capture a live edit as an `(edited)` entry so undo/redo never drop it
+/// this truncates the redo branch like a fresh mutation
 fn capture_external(history: &mut History, state: &Snapshot, ts: u64) -> bool {
     if history.entries.is_empty() {
         return false;
@@ -409,7 +408,8 @@ fn capture_external(history: &mut History, state: &Snapshot, ts: u64) -> bool {
     true
 }
 
-/// prune oldest entries first. two caps (count, age), both refusing to drop the
+/// prune oldest entries first
+/// two caps, count and age, both refusing to drop the
 /// live state or anything redoable
 fn gc(history: &mut History, now: u64) {
     while history.entries.len() > MAX_LEVELS && history.cursor > 0 {
@@ -438,9 +438,9 @@ fn view(history: &History) -> View {
     }
 }
 
-/// rewrite all three files from `entry` as one transaction. if any write fails,
-/// every file is rolled back to where it started. a [`None`] field means the
-/// file was absent in that state and is removed.
+/// rewrite all three files from `entry` as one transaction
+/// if any write fails, every file is rolled back to where it started
+/// a [`None`] field means the file was absent in that state and is removed
 fn restore(project: &Project, entry: &Entry) -> Result<()> {
     let specs = [
         (project.pins_path(), entry.toml.as_deref()),
@@ -471,8 +471,8 @@ fn restore(project: &Project, entry: &Entry) -> Result<()> {
     }
 }
 
-/// one file in a [`RestoreTx`]: its staged replacement (`tmp`, [`None`] to
-/// remove), a backup of the prior bytes, and how far the commit got
+/// one file in a [`RestoreTx`]
+/// staged replacement, prior backup, and how far the commit got
 struct RestoreStep {
     path:      PathBuf,
     tmp:       Option<PathBuf>,
@@ -581,27 +581,44 @@ fn temp_path(path: &Path, tag: &str, kind: &str) -> PathBuf {
 }
 
 fn store_dir(project: &Project) -> PathBuf {
-    // XDG state dir on Linux, falling back to the data dir where there is no
-    // state dir (e.g. on macOS, Windows)
+    // xdg state dir on linux, falling back to the data dir where there is no
+    // state dir
     let base = choose_base_strategy().map_or_else(
         |_| PathBuf::from(".tack-state"),
         |dirs| dirs.state_dir().unwrap_or_else(|| dirs.data_dir()),
     );
-    base.join("tack").join(project_key(project.dir()))
+    let root = base.join("tack");
+    let stable = root.join(project_key(project.dir()));
+    let legacy = root.join(legacy_project_key(project.dir()));
+    if !stable.exists() && legacy.exists() && fs::rename(&legacy, &stable).is_err() {
+        return legacy;
+    }
+    stable
 }
 
 fn project_key(project: &Path) -> String {
+    content_key(&project_identity(project))
+}
+
+fn legacy_project_key(project: &Path) -> String {
+    legacy_content_key(&project_identity(project))
+}
+
+fn project_identity(project: &Path) -> String {
     let abs = if project.is_absolute() {
         project.to_path_buf()
     } else {
         env::current_dir().map_or_else(|_| project.to_path_buf(), |cwd| cwd.join(project))
     };
-    content_key(&abs.to_string_lossy())
+    abs.to_string_lossy().into_owned()
 }
 
-/// 128-bit hex digest of `text`, recomputed every save, so a hasher change
-/// across toolchains just rewrites the snapshot files once.
+/// stable sha256 hex digest of text
 fn content_key(text: &str) -> String {
+    HEXLOWER.encode(&Sha256::hash(text.as_bytes()))
+}
+
+fn legacy_content_key(text: &str) -> String {
     let mut hi = DefaultHasher::new();
     text.hash(&mut hi);
     let mut lo = DefaultHasher::new();
@@ -617,7 +634,7 @@ const fn empty() -> History {
     }
 }
 
-/// write `content` to a hash-named file and return the name.
+/// write `content` to a hash-named file and return the name
 fn persist(
     snaps: &Path,
     content: Option<&str>,
@@ -636,7 +653,7 @@ fn persist(
 }
 
 /// drop snapshot files the manifest no longer references, after gc or a
-/// truncated redo branch. this is best-effort
+/// truncated redo branch
 fn sweep(snaps: &Path, referenced: &HashSet<String>) {
     let Ok(read) = fs::read_dir(snaps) else {
         return;
@@ -652,7 +669,7 @@ fn sweep(snaps: &Path, referenced: &HashSet<String>) {
     }
 }
 
-/// `just now`, `2m ago`, `1h ago`, `3d ago` from two epochs.
+/// `just now`, `2m ago`, `1h ago`, `3d ago` from two epochs
 pub fn rel_time(now: u64, ts: u64) -> String {
     let delta = now.saturating_sub(ts);
     if delta < 60 {
@@ -680,6 +697,7 @@ mod tests {
         MAX_AGE,
         MAX_LEVELS,
         Snapshot,
+        content_key,
         gc,
     };
     use crate::project::Project;
@@ -695,12 +713,20 @@ mod tests {
         fs::write(project.lock_path(), "{}\n").unwrap();
     }
 
+    #[test]
+    fn content_key_is_stable_sha256_hex() {
+        assert_eq!(
+            content_key("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
     fn read(project: &Project) -> String {
         fs::read_to_string(project.pins_path()).unwrap()
     }
 
-    /// stand in for a recorded mutating command: snapshot, mutate, snapshot,
-    /// record. returns whether an external edit was captured.
+    /// stand in for a recorded mutating command
+    /// returns whether an external edit was captured
     fn run(project: &Project, store: &HistoryStore, label: &str, toml: &str) -> bool {
         let pre = Snapshot::capture(project);
         write(project, toml);
@@ -840,7 +866,7 @@ mod tests {
         fs::write(&resolver, "resolver-v1\n").unwrap();
         let pre = Snapshot::capture(&project);
 
-        // a resolver-only change, e.g. `tack init --resolver`
+        // resolver-only change such as `tack init --resolver`
         fs::write(&resolver, "resolver-v2\n").unwrap();
         let post = Snapshot::capture(&project);
         assert!(pre != post); // the 3-file snapshot notices the resolver change
