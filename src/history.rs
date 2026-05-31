@@ -37,7 +37,10 @@ use serde_json::{
     json,
 };
 
-use crate::commands;
+use crate::project::{
+    self,
+    Project,
+};
 
 const MAX_LEVELS: usize = 20;
 const MAX_AGE: u64 = 30 * 24 * 60 * 60;
@@ -87,10 +90,10 @@ pub fn now() -> u64 {
 }
 
 /// read the current on-disk state of all three files
-pub fn snapshot(dir: &Path) -> State {
-    let toml = fs::read_to_string(commands::pins_path(dir)).ok();
-    let lock = fs::read_to_string(commands::lock_path(dir)).ok();
-    let resolver = fs::read_to_string(commands::resolver_path(dir)).ok();
+pub fn snapshot(project: &Project) -> State {
+    let toml = fs::read_to_string(project.pins_path()).ok();
+    let lock = fs::read_to_string(project.lock_path()).ok();
+    let resolver = fs::read_to_string(project.resolver_path()).ok();
     (toml, lock, resolver)
 }
 
@@ -178,7 +181,7 @@ fn gc(history: &mut History, now: u64) {
     }
 }
 
-pub fn undo(project: &Path, store: &Path) -> Result<Option<View>> {
+pub fn undo(project: &Project, store: &Path) -> Result<Option<View>> {
     let mut history = load(store);
     // capture any live edit before moving, so undo never drops it
     let captured = capture_external(&mut history, &snapshot(project), now());
@@ -193,7 +196,7 @@ pub fn undo(project: &Path, store: &Path) -> Result<Option<View>> {
     Ok(Some(view(&history)))
 }
 
-pub fn redo(project: &Path, store: &Path) -> Result<Option<View>> {
+pub fn redo(project: &Project, store: &Path) -> Result<Option<View>> {
     let mut history = load(store);
     // a live edit voids the redo future, so capture it, then report nothing
     if capture_external(&mut history, &snapshot(project), now()) {
@@ -236,11 +239,11 @@ fn view(history: &History) -> View {
 /// rewrite all three files from `entry` as one transaction. if any write fails,
 /// every file is rolled back to where it started. a [`None`] field means the
 /// file was absent in that state and is removed.
-fn restore(dir: &Path, entry: &Entry) -> Result<()> {
+fn restore(project: &Project, entry: &Entry) -> Result<()> {
     let specs = [
-        (commands::pins_path(dir), entry.toml.as_deref()),
-        (commands::lock_path(dir), entry.lock.as_deref()),
-        (commands::resolver_path(dir), entry.resolver.as_deref()),
+        (project.pins_path(), entry.toml.as_deref()),
+        (project.lock_path(), entry.lock.as_deref()),
+        (project.resolver_path(), entry.resolver.as_deref()),
     ];
     let tag = format!(
         "{}.{}",
@@ -377,14 +380,14 @@ fn temp_path(path: &Path, tag: &str, kind: &str) -> PathBuf {
 
 /// undo-history dir for `project`, under the XDG state dir so snapshots stay
 /// out of the repo
-pub fn store_dir(project: &Path) -> PathBuf {
+pub fn store_dir(project: &Project) -> PathBuf {
     // XDG state dir on Linux, falling back to the data dir where there is no
     // state dir (e.g. on macOS, Windows)
     let base = choose_base_strategy().map_or_else(
         |_| PathBuf::from(".tack-state"),
         |dirs| dirs.state_dir().unwrap_or_else(|| dirs.data_dir()),
     );
-    base.join("tack").join(project_key(project))
+    base.join("tack").join(project_key(project.dir()))
 }
 
 fn project_key(project: &Path) -> String {
@@ -511,7 +514,7 @@ fn save(store: &Path, history: &History) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    commands::write_atomic(&path, &json)?;
+    project::write_atomic(&path, &json)?;
     sweep(&snaps, &referenced);
     Ok(())
 }
@@ -524,7 +527,7 @@ fn persist(snaps: &Path, content: Option<&str>, referenced: &mut HashSet<String>
     let name = content_key(text);
     let path = snaps.join(&name);
     if !path.exists() {
-        commands::write_atomic(&path, text)?;
+        project::write_atomic(&path, text)?;
     }
     referenced.insert(name.clone());
     Ok(Value::String(name))
@@ -563,10 +566,7 @@ pub fn rel_time(now: u64, ts: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::Path,
-    };
+    use std::fs;
 
     use super::{
         Entry,
@@ -580,64 +580,66 @@ mod tests {
         snapshot,
         undo,
     };
-    use crate::commands;
+    use crate::project::Project;
 
-    fn write(dir: &Path, toml: &str) {
-        fs::write(commands::pins_path(dir), toml).unwrap();
-        fs::write(commands::lock_path(dir), "{}\n").unwrap();
+    fn write(project: &Project, toml: &str) {
+        fs::write(project.pins_path(), toml).unwrap();
+        fs::write(project.lock_path(), "{}\n").unwrap();
     }
 
-    fn read(dir: &Path) -> String {
-        fs::read_to_string(commands::pins_path(dir)).unwrap()
+    fn read(project: &Project) -> String {
+        fs::read_to_string(project.pins_path()).unwrap()
     }
 
     /// stand in for a recorded mutating command: snapshot, mutate, snapshot,
     /// record. returns whether an external edit was captured.
-    fn run(dir: &Path, label: &str, toml: &str) -> bool {
-        let pre = snapshot(dir);
-        write(dir, toml);
-        let post = snapshot(dir);
-        record(dir, label, pre, post)
+    fn run(project: &Project, label: &str, toml: &str) -> bool {
+        let pre = snapshot(project);
+        write(project, toml);
+        let post = snapshot(project);
+        record(project.dir(), label, pre, post)
     }
 
     #[test]
     fn undo_then_redo_round_trips_state() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        write(dir, "v1\n");
-        run(dir, "a", "v2\n");
-        run(dir, "b", "v3\n");
-        assert_eq!(read(dir), "v3\n");
+        let project = Project::at(dir.to_path_buf());
+        write(&project, "v1\n");
+        run(&project, "a", "v2\n");
+        run(&project, "b", "v3\n");
+        assert_eq!(read(&project), "v3\n");
 
-        undo(dir, dir).unwrap();
-        assert_eq!(read(dir), "v2\n");
-        undo(dir, dir).unwrap();
-        assert_eq!(read(dir), "v1\n");
-        assert!(undo(dir, dir).unwrap().is_none()); // at the initial state
-        assert_eq!(read(dir), "v1\n");
+        undo(&project, dir).unwrap();
+        assert_eq!(read(&project), "v2\n");
+        undo(&project, dir).unwrap();
+        assert_eq!(read(&project), "v1\n");
+        assert!(undo(&project, dir).unwrap().is_none()); // at the initial state
+        assert_eq!(read(&project), "v1\n");
 
-        redo(dir, dir).unwrap();
-        assert_eq!(read(dir), "v2\n");
-        redo(dir, dir).unwrap();
-        assert_eq!(read(dir), "v3\n");
-        assert!(redo(dir, dir).unwrap().is_none());
+        redo(&project, dir).unwrap();
+        assert_eq!(read(&project), "v2\n");
+        redo(&project, dir).unwrap();
+        assert_eq!(read(&project), "v3\n");
+        assert!(redo(&project, dir).unwrap().is_none());
     }
 
     #[test]
     fn undo_captures_external_edit_rather_than_discarding() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        write(dir, "v1\n");
-        run(dir, "a", "v2\n");
+        let project = Project::at(dir.to_path_buf());
+        write(&project, "v1\n");
+        run(&project, "a", "v2\n");
 
         // user hand-edits pins.toml outside tack, then undoes
-        write(dir, "manual\n");
-        undo(dir, dir).unwrap();
-        assert_eq!(read(dir), "v2\n"); // stepped back to the recorded state
+        write(&project, "manual\n");
+        undo(&project, dir).unwrap();
+        assert_eq!(read(&project), "v2\n"); // stepped back to the recorded state
 
         // the manual edit must not be lost
-        redo(dir, dir).unwrap();
-        assert_eq!(read(dir), "manual\n");
+        redo(&project, dir).unwrap();
+        assert_eq!(read(&project), "manual\n");
         assert!(
             list(dir)
                 .unwrap()
@@ -651,38 +653,41 @@ mod tests {
     fn record_flags_an_external_edit() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        write(dir, "v1\n");
-        assert!(!run(dir, "a", "v2\n")); // nothing diverged yet
+        let project = Project::at(dir.to_path_buf());
+        write(&project, "v1\n");
+        assert!(!run(&project, "a", "v2\n")); // nothing diverged yet
 
-        write(dir, "manual\n"); // unrecorded edit
-        assert!(run(dir, "b", "v3\n")); // recorder notices and captures it
+        write(&project, "manual\n"); // unrecorded edit
+        assert!(run(&project, "b", "v3\n")); // recorder notices and captures it
     }
 
     #[test]
     fn new_mutation_truncates_redo_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        write(dir, "v1\n");
-        run(dir, "a", "v2\n");
-        run(dir, "b", "v3\n");
-        undo(dir, dir).unwrap(); // back to v2 with v3 redoable
-        assert_eq!(read(dir), "v2\n");
+        let project = Project::at(dir.to_path_buf());
+        write(&project, "v1\n");
+        run(&project, "a", "v2\n");
+        run(&project, "b", "v3\n");
+        undo(&project, dir).unwrap(); // back to v2 with v3 redoable
+        assert_eq!(read(&project), "v2\n");
 
-        run(dir, "c", "v4\n"); // forks a new branch
-        assert_eq!(read(dir), "v4\n");
-        assert!(redo(dir, dir).unwrap().is_none()); // the v3 future is gone
+        run(&project, "c", "v4\n"); // forks a new branch
+        assert_eq!(read(&project), "v4\n");
+        assert!(redo(&project, dir).unwrap().is_none()); // the v3 future is gone
     }
 
     #[test]
     fn gc_caps_undo_depth_to_max_levels() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        write(dir, "s0\n");
+        let project = Project::at(dir.to_path_buf());
+        write(&project, "s0\n");
         for i in 1..=MAX_LEVELS + 5 {
-            run(dir, &format!("m{i}"), &format!("s{i}\n"));
+            run(&project, &format!("m{i}"), &format!("s{i}\n"));
         }
         assert!(list(dir).unwrap().rows.len() <= MAX_LEVELS);
-        assert_eq!(read(dir), format!("s{}\n", MAX_LEVELS + 5));
+        assert_eq!(read(&project), format!("s{}\n", MAX_LEVELS + 5));
     }
 
     #[test]
@@ -714,18 +719,19 @@ mod tests {
     fn undo_reverts_the_resolver_too() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        let resolver = commands::resolver_path(dir);
-        write(dir, "v1\n");
+        let project = Project::at(dir.to_path_buf());
+        let resolver = project.resolver_path();
+        write(&project, "v1\n");
         fs::write(&resolver, "resolver-v1\n").unwrap();
-        let pre = snapshot(dir);
+        let pre = snapshot(&project);
 
         // a resolver-only change, e.g. `tack init --resolver`
         fs::write(&resolver, "resolver-v2\n").unwrap();
-        let post = snapshot(dir);
+        let post = snapshot(&project);
         assert!(pre != post); // the 3-file snapshot notices the resolver change
         record(dir, "init --resolver", pre, post);
 
-        undo(dir, dir).unwrap();
+        undo(&project, dir).unwrap();
         assert_eq!(fs::read_to_string(&resolver).unwrap(), "resolver-v1\n");
     }
 }

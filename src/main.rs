@@ -7,6 +7,8 @@ mod history;
 mod lock;
 mod nar;
 mod pins;
+mod project;
+mod render;
 mod shorturl;
 mod source;
 mod ui;
@@ -14,6 +16,7 @@ mod ui;
 use std::process;
 
 use cli::Command;
+use project::Project;
 
 fn main() {
     if let Err(err) = run() {
@@ -110,11 +113,11 @@ fn run() -> anyhow::Result<()> {
 /// run a mutating command, recording the resulting file diff to undo history.
 /// records even on [`Err`], since a partial write is still recoverable.
 fn recorded(label: &str, run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
-    let dir = commands::dir();
-    let store = history::store_dir(&dir);
-    let pre = history::snapshot(&dir);
+    let project = Project::discover();
+    let store = history::store_dir(&project);
+    let pre = history::snapshot(&project);
     let res = run();
-    let post = history::snapshot(&dir);
+    let post = history::snapshot(&project);
     if history::record(&store, label, pre, post) {
         println!("captured external edit");
     }
