@@ -27,11 +27,11 @@ use std::{
     },
 };
 
-use anyhow::Result;
 use etcetera::{
     BaseStrategy as _,
     choose_base_strategy,
 };
+use eyre::Result;
 use serde_json::{
     Value,
     json,

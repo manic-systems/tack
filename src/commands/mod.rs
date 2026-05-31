@@ -13,6 +13,7 @@ use std::{
     iter,
     mem,
     path::Path,
+    result::Result as StdResult,
     sync::{
         Mutex,
         atomic::{
@@ -22,7 +23,7 @@ use std::{
     },
 };
 
-use anyhow::{
+use eyre::{
     Result,
     bail,
 };
@@ -134,6 +135,19 @@ pub fn help() {
     init::help();
 }
 
+/// Disposition of a swallowed fetch result. Expected degraded-operation misses
+/// vanish silently; fixable or suspicious failures return a cause string for
+/// the caller to aggregate after any parallel batch or live spinner.
+pub(in crate::commands) fn tolerate<T>(
+    result: StdResult<T, fetch::FetchError>,
+) -> (Option<T>, Option<String>) {
+    match result {
+        Ok(value) => (Some(value), None),
+        Err(fetch::FetchError::NotFound { .. } | fetch::FetchError::Transport(_)) => (None, None),
+        Err(err) => (None, Some(err.to_string())),
+    }
+}
+
 fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Input> {
     if names.is_empty() {
         return inputs.iter().collect();
@@ -220,9 +234,13 @@ mod tests {
         pick_name,
         rev_last_modified,
         rm_in_dir,
+        tolerate,
         wires_overrides,
     };
-    use crate::source::id::SourceId;
+    use crate::{
+        fetch,
+        source::id::SourceId,
+    };
 
     #[test]
     fn wires_overrides_ignores_comments() {
@@ -237,6 +255,34 @@ mod tests {
         assert!(!wires_overrides(
             "outputs = { self }: { }; # no tackOverrides here"
         ));
+    }
+
+    #[test]
+    fn tolerate_swallows_absent_and_transport_silently() {
+        assert_eq!(
+            tolerate::<()>(Err(fetch::FetchError::NotFound { what: "x".into() })).1,
+            None
+        );
+        assert_eq!(
+            tolerate::<()>(Err(fetch::FetchError::Transport("down".into()))).1,
+            None
+        );
+    }
+
+    #[test]
+    fn tolerate_surfaces_auth_and_upstream() {
+        assert!(
+            tolerate::<()>(Err(fetch::FetchError::Auth {
+                what: "no token".into(),
+            }))
+            .1
+            .is_some()
+        );
+        assert!(
+            tolerate::<()>(Err(fetch::FetchError::Upstream("weird".into())))
+                .1
+                .is_some()
+        );
     }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {

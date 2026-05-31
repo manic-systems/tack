@@ -27,6 +27,7 @@ use super::{
     pins,
     render,
     shorturl,
+    tolerate,
     top_map,
 };
 
@@ -135,6 +136,9 @@ enum SourceRef {
     Locked(Value),
     Url(String),
 }
+
+type RawProbeSet = (Option<String>, Option<String>, Option<String>);
+type RawProbeOutcome = (Option<RawProbeSet>, BTreeSet<String>);
 
 pub(in crate::commands) const MAX_COMPARE_JOBS: usize = 100;
 const MAX_LIVE_COMPARE_JOBS: usize = 8;
@@ -308,8 +312,11 @@ pub fn dedup() -> Result<()> {
 fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
     // fetch only the 3 files scan needs via http if the source's forge supports it
     if let SourceRef::Locked(ref node) = item.source
-        && let Some((flake_lock, tack_pins, tack_lock)) = try_raw_files(node)
+        && let (Some((flake_lock, tack_pins, tack_lock)), surfaced) = try_raw_files(node)
     {
+        for cause in &surfaced {
+            eprintln!("tack: {cause}");
+        }
         return Ok(scan_files(
             flake_lock.as_deref(),
             tack_pins.as_deref(),
@@ -331,12 +338,20 @@ fn fetch_and_scan(item: &TackTransitive) -> Result<ScanResult> {
 
 /// `authoritative = true` means a 404 on every probe is final, and `false`
 /// means the caller should fall back to clone
-fn try_raw_files(node: &Value) -> Option<(Option<String>, Option<String>, Option<String>)> {
-    let forge = Forge::from_node(node)?;
-    let rev = lock::Node::from(node).rev();
-    let probe = |file| {
-        let revision = rev?;
-        fetch_forge_file(&forge, revision, file)
+fn try_raw_files(node: &Value) -> RawProbeOutcome {
+    let Some(forge) = Forge::from_node(node) else {
+        return (None, BTreeSet::new());
+    };
+    let Some(rev) = lock::Node::from(node).rev() else {
+        return (None, BTreeSet::new());
+    };
+    let mut surfaced = BTreeSet::new();
+    let mut probe = |file| {
+        let (value, maybe_cause) = tolerate(fetch_forge_file(&forge, rev, file));
+        if let Some(cause) = maybe_cause {
+            surfaced.insert(cause);
+        }
+        value
     };
     let triple = (
         probe("flake.lock"),
@@ -344,27 +359,41 @@ fn try_raw_files(node: &Value) -> Option<(Option<String>, Option<String>, Option
         probe(".tack/pins.lock.json"),
     );
     if !forge.authoritative() && triple.0.is_none() && triple.1.is_none() && triple.2.is_none() {
-        None
+        (None, surfaced)
     } else {
-        Some(triple)
+        (Some(triple), surfaced)
     }
 }
 
-fn fetch_forge_file(forge: &Forge, rev: &str, file: &str) -> Option<String> {
+fn fetch_forge_file(forge: &Forge, rev: &str, file: &str) -> Result<String, fetch::FetchError> {
     let raw = forge.raw_file_url(rev, file);
-    let body = fetch::raw(&raw.url).ok()?;
+    let body = fetch::raw(&raw.url)?;
     match raw.decoder {
-        Some(decode) => decode(&body).ok(),
-        None => Some(body),
+        Some(decode) => {
+            decode(&body).map_err(|source| {
+                fetch::FetchError::Decode {
+                    what: file.to_owned(),
+                    source,
+                }
+            })
+        },
+        None => Ok(body),
     }
 }
 
-/// fetch one file from a locked node via raw http. returns [`None`] on unknown
-/// host or http error
-pub(in crate::commands) fn try_raw_file(node: &Value, file: &str) -> Option<String> {
-    let forge = Forge::from_node(node)?;
-    let rev = lock::Node::from(node).rev()?;
-    fetch_forge_file(&forge, rev, file)
+/// Fetch one file from a locked node via raw http. Unknown hosts or missing
+/// revs simply ask the caller to skip the raw path.
+pub(in crate::commands) fn try_raw_file(
+    node: &Value,
+    file: &str,
+) -> Result<Option<String>, fetch::FetchError> {
+    let Some(forge) = Forge::from_node(node) else {
+        return Ok(None);
+    };
+    let Some(rev) = lock::Node::from(node).rev() else {
+        return Ok(None);
+    };
+    fetch_forge_file(&forge, rev, file).map(Some)
 }
 
 fn scan_tree(root: &Path, path: &[String]) -> ScanResult {
@@ -587,20 +616,35 @@ fn ahead_behind(
     let (jobs, capped) = compare_jobs(groups);
     let attempted = jobs.len();
     let mut compares = HashMap::<(SourceId, String), CompareStatus>::new();
+    let mut surfaced = BTreeSet::<String>::new();
     for chunk in jobs.chunks(MAX_LIVE_COMPARE_JOBS) {
-        compares.extend(
-            chunk
-                .into_par_iter()
-                .filter_map(|job| {
-                    fetch::compare_status(&job.owner, &job.repo, &job.base, &job.head)
-                        .ok()
-                        .flatten()
-                        .map(|status| ((job.id.clone(), job.head.clone()), status))
-                })
-                .collect::<Vec<_>>(),
-        );
+        let batch = chunk
+            .into_par_iter()
+            .map(|job| {
+                let (maybe_status, surfaced_cause) = tolerate(fetch::compare_status(
+                    &job.owner, &job.repo, &job.base, &job.head,
+                ));
+                (
+                    maybe_status.flatten().map(|comparison_status| {
+                        ((job.id.clone(), job.head.clone()), comparison_status)
+                    }),
+                    surfaced_cause,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (comparison, maybe_cause) in batch {
+            if let Some((key, status)) = comparison {
+                compares.insert(key, status);
+            }
+            if let Some(cause) = maybe_cause {
+                surfaced.insert(cause);
+            }
+        }
     }
 
+    for cause in &surfaced {
+        eprintln!("tack: {cause}");
+    }
     let dropped = capped + attempted - compares.len();
     if dropped > 0 {
         eprintln!(

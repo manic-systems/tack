@@ -13,20 +13,39 @@ mod shorturl;
 mod source;
 mod ui;
 
-use std::process;
+use std::process::{
+    ExitCode,
+    Termination,
+};
 
 use cli::Command;
+use color_eyre::config::HookBuilder;
 use project::Project;
 
-fn main() {
-    if let Err(err) = run() {
-        eprintln!("tack: {err:#}");
-        process::exit(1);
+fn main() -> TackExit {
+    if let Err(err) = HookBuilder::default().display_env_section(false).install() {
+        eprintln!("tack: {err}");
+        return TackExit::Other;
+    }
+
+    let cmd = match cli::parse() {
+        Ok(cmd) => cmd,
+        Err(err) => {
+            print_report(&err);
+            return TackExit::Usage;
+        },
+    };
+
+    match run(cmd) {
+        Ok(()) => TackExit::Success,
+        Err(err) => {
+            print_report(&err);
+            TackExit::from_report(&err)
+        },
     }
 }
 
-fn run() -> anyhow::Result<()> {
-    let cmd = cli::parse()?;
+fn run(cmd: Command) -> eyre::Result<()> {
     // every command except the resolver's own fixer (init) and help nags when
     // the resolver has drifted. do it after a successful command so it trails the
     // output and never piles onto an unrelated failure
@@ -112,7 +131,7 @@ fn run() -> anyhow::Result<()> {
 
 /// run a mutating command, recording the resulting file diff to undo history.
 /// records even on [`Err`], since a partial write is still recoverable.
-fn recorded(label: &str, run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+fn recorded(label: &str, run: impl FnOnce() -> eyre::Result<()>) -> eyre::Result<()> {
     let project = Project::discover();
     let store = history::store_dir(&project);
     let pre = history::snapshot(&project);
@@ -122,4 +141,46 @@ fn recorded(label: &str, run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Re
         println!("captured external edit");
     }
     res
+}
+
+enum TackExit {
+    Success,
+    Usage,
+    Config,
+    Fetch,
+    Other,
+}
+
+impl TackExit {
+    fn from_report(report: &eyre::Report) -> Self {
+        for cause in report.chain() {
+            if cause.downcast_ref::<project::ConfigError>().is_some() {
+                return Self::Config;
+            }
+            if cause.downcast_ref::<fetch::FetchError>().is_some() {
+                return Self::Fetch;
+            }
+        }
+        Self::Other
+    }
+}
+
+impl Termination for TackExit {
+    fn report(self) -> ExitCode {
+        match self {
+            Self::Success => ExitCode::SUCCESS,
+            Self::Usage => ExitCode::from(2),
+            Self::Config => ExitCode::from(3),
+            Self::Fetch => ExitCode::from(4),
+            Self::Other => ExitCode::FAILURE,
+        }
+    }
+}
+
+#[expect(
+    clippy::use_debug,
+    reason = "color-eyre renders Report through its Debug implementation"
+)]
+fn print_report(err: &eyre::Report) {
+    eprintln!("{err:?}");
 }
