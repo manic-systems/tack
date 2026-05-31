@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::collections::{
-    BTreeMap,
-    BTreeSet,
-};
+use std::fmt;
 
 use crate::{
-    commands::dedup::{
+    history,
+    report::{
+        CollapsedFollow,
         DedupReport,
         Mark,
     },
-    history,
 };
 
 const MAX_SOURCES: usize = 5;
@@ -52,15 +50,15 @@ pub fn source_label(path: &[String]) -> String {
     }
 }
 
-/// A radius-1 window around the new cursor: the redo target, the live state,
-/// the undo target.
+/// radius-1 window around the new cursor
 pub fn render_window(view: &history::View) {
     let lo = view.cursor.saturating_sub(1);
     let hi = (view.cursor + 1).min(view.rows.len().saturating_sub(1));
     render(view, lo, hi);
 }
 
-/// Rows `lo..=hi` newest-first, relative times aligned, `>` marking the cursor.
+/// rows `lo..=hi` newest-first with relative times aligned and `>` marking the
+/// cursor
 pub fn render(view: &history::View, lo: usize, hi: usize) {
     let now = history::now();
     let times = (lo..=hi)
@@ -86,7 +84,7 @@ pub fn print_report(report: &DedupReport) {
         let rw = group
             .revs
             .iter()
-            .map(|rev| rev.rev.len())
+            .map(|rev| short(&rev.rev).len())
             .max()
             .unwrap_or(0);
         let nw = group
@@ -98,23 +96,25 @@ pub fn print_report(report: &DedupReport) {
         let marks = group
             .revs
             .iter()
-            .map(|rev| mark_glyph(rev.mark))
+            .map(|rev| RenderedMark::from(rev.mark))
             .collect::<Vec<_>>();
-        let mw = marks.iter().map(|&(_, vis)| vis).max().unwrap_or(1);
+        let mw = marks.iter().map(|mark| mark.width).max().unwrap_or(1);
 
-        for (rev, (mark, width)) in group.revs.iter().zip(marks) {
-            let mark_on = format!("{mark}{}", " ".repeat(mw - width));
+        for (rev, mark) in group.revs.iter().zip(marks) {
+            let rendered_rev = short(&rev.rev);
+            let mark_on = format!("{mark}{}", " ".repeat(mw - mark.width));
             let blank = " ".repeat(mw);
             for name in &rev.names {
                 let shown = name.sources.len().min(MAX_SOURCES);
                 for (idx, source) in name.sources.iter().take(shown).enumerate() {
-                    let rev_cell = if idx == 0 { rev.rev.as_str() } else { "" };
+                    let rev_cell = if idx == 0 { rendered_rev.as_str() } else { "" };
                     let mark_cell = if idx == 0 {
                         mark_on.as_str()
                     } else {
                         blank.as_str()
                     };
                     let name_cell = if idx == 0 { name.name.as_str() } else { "" };
+                    let source = source_label(source);
                     println!("  {rev_cell:rw$} {mark_cell} {name_cell:nw$}  {source}");
                 }
                 if name.sources.len() > shown {
@@ -128,19 +128,22 @@ pub fn print_report(report: &DedupReport) {
         }
     }
 
-    if report.pin_follow.is_empty() && report.auto_follow.is_empty() {
+    if report.follows.is_empty() {
         return;
     }
-    let pin_lines = collapse_follow(&report.pin_follow);
-    let auto_lines = collapse_follow(&report.auto_follow);
+    let pin_lines = report.follows.pin.collapsed();
+    let auto_lines = report.follows.auto.collapsed();
     let kw = pin_lines
         .iter()
         .chain(auto_lines.iter())
-        .map(|&(ref key, _)| key.len())
+        .map(|line| RenderedFollow::new(line).key().len())
         .max()
         .unwrap_or(0);
     println!("\nshare via [all_follow] in pins.toml:");
-    for &(ref key, ref rhs) in &pin_lines {
+    for line in &pin_lines {
+        let rendered = RenderedFollow::new(line);
+        let key = rendered.key();
+        let rhs = rendered.rhs();
         println!("  {key:kw$} = {rhs}");
     }
     if !auto_lines.is_empty() {
@@ -148,90 +151,133 @@ pub fn print_report(report: &DedupReport) {
             println!();
         }
         println!("  # auto-dedup (no top-level pin needed):");
-        for &(ref key, ref rhs) in &auto_lines {
+        for line in &auto_lines {
+            let rendered = RenderedFollow::new(line);
+            let key = rendered.key();
+            let rhs = rendered.rhs();
             println!("  {key:kw$} = {rhs}");
         }
     }
 }
 
-fn mark_glyph(mark: Mark) -> (String, usize) {
-    const APPROX: &str = "~";
-    let paint = |code: i32, body: &str| format!("\x1b[{code}m{body}\x1b[0m");
-    match mark {
-        Mark::Base => (paint(36, "="), 1),
-        Mark::Ahead => (paint(32, "\u{2191}"), 1),
-        Mark::Behind => (paint(33, "\u{2193}"), 1),
-        Mark::Diverged => {
-            (
-                format!("{}{}", paint(32, "\u{2191}"), paint(33, "\u{2193}")),
-                2,
-            )
-        },
-        Mark::DatedNewer => (format!("{}{}", paint(32, "\u{2191}"), paint(36, APPROX)), 2),
-        Mark::DatedOlder => (format!("{}{}", paint(33, "\u{2193}"), paint(36, APPROX)), 2),
-        Mark::DatedEqual => (paint(36, APPROX), 1),
-        Mark::Unknown => (" ".to_owned(), 1),
+struct RenderedMark {
+    text:  String,
+    width: usize,
+}
+
+impl From<Mark> for RenderedMark {
+    fn from(mark: Mark) -> Self {
+        const APPROX: &str = "~";
+        let paint = |code: i32, body: &str| format!("\x1b[{code}m{body}\x1b[0m");
+        let (text, width) = match mark {
+            Mark::Base => (paint(36_i32, "="), 1),
+            Mark::Ahead => (paint(32_i32, "\u{2191}"), 1),
+            Mark::Behind => (paint(33_i32, "\u{2193}"), 1),
+            Mark::Diverged => {
+                (
+                    format!("{}{}", paint(32_i32, "\u{2191}"), paint(33_i32, "\u{2193}")),
+                    2,
+                )
+            },
+            Mark::DatedNewer => {
+                (
+                    format!("{}{}", paint(32_i32, "\u{2191}"), paint(36_i32, APPROX)),
+                    2,
+                )
+            },
+            Mark::DatedOlder => {
+                (
+                    format!("{}{}", paint(33_i32, "\u{2193}"), paint(36_i32, APPROX)),
+                    2,
+                )
+            },
+            Mark::DatedEqual => (paint(36_i32, APPROX), 1),
+            Mark::Unknown => (" ".to_owned(), 1),
+        };
+        Self { text, width }
     }
 }
 
-/// Invert alias -> target into target -> aliases and emit one line per target.
-/// Single-alias groups use string form and multi-alias groups use array form.
-fn collapse_follow(follow: &BTreeMap<String, String>) -> Vec<(String, String)> {
-    let mut by_target = BTreeMap::<&str, BTreeSet<&str>>::new();
-    for (alias, target) in follow {
-        by_target
-            .entry(target.as_str())
-            .or_default()
-            .insert(alias.as_str());
+impl fmt::Display for RenderedMark {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
     }
-    let mut lines = Vec::<(String, String)>::new();
-    for (target, aliases) in &by_target {
-        if aliases.len() == 1 {
-            let alias = aliases.iter().next().copied().unwrap_or("");
-            lines.push((alias.to_owned(), format!("\"{target}\"")));
-        } else {
-            let body = aliases
-                .iter()
-                .filter(|alias| **alias != *target)
-                .map(|alias| format!("\"{alias}\""))
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.push(((*target).to_owned(), format!("[{body}]")));
+}
+
+struct RenderedFollow<'a> {
+    follow: &'a CollapsedFollow,
+}
+
+impl<'a> RenderedFollow<'a> {
+    const fn new(follow: &'a CollapsedFollow) -> Self {
+        Self { follow }
+    }
+
+    fn key(&self) -> &str {
+        match *self.follow {
+            CollapsedFollow::Single { ref alias, .. } => alias,
+            CollapsedFollow::Group { ref target, .. } => target,
         }
     }
-    lines
+
+    fn rhs(&self) -> String {
+        match *self.follow {
+            CollapsedFollow::Single { ref target, .. } => format!("\"{target}\""),
+            CollapsedFollow::Group { ref aliases, .. } => {
+                let body = aliases
+                    .iter()
+                    .map(|alias| format!("\"{alias}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{body}]")
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::{
-        collapse_follow,
-        mark_glyph,
+        RenderedFollow,
+        RenderedMark,
     };
-    use crate::commands::dedup::Mark;
+    use crate::report::{
+        CollapsedFollow,
+        FollowMap,
+        Mark,
+    };
 
-    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
+    fn map(pairs: &[(&str, &str)]) -> FollowMap {
+        let mut follow = FollowMap::default();
+        for &(alias, target) in pairs {
+            follow.insert(alias.to_owned(), target.to_owned());
+        }
+        follow
+    }
+
+    fn rendered(lines: &[CollapsedFollow]) -> Vec<(String, String)> {
+        lines
             .iter()
-            .map(|&(alias, target)| (alias.to_owned(), target.to_owned()))
+            .map(|follow| {
+                let rendered = RenderedFollow::new(follow);
+                (rendered.key().to_owned(), rendered.rhs())
+            })
             .collect()
     }
 
     #[test]
     fn collapse_single_alias_uses_string_form() {
-        let lines = collapse_follow(&map(&[("nixpkgs", "nixpkgs")]));
-        assert_eq!(lines, vec![("nixpkgs".into(), "\"nixpkgs\"".into())]);
+        let lines = map(&[("nixpkgs", "nixpkgs")]).collapsed();
+        assert_eq!(rendered(&lines), vec![(
+            "nixpkgs".into(),
+            "\"nixpkgs\"".into()
+        )]);
     }
 
     #[test]
     fn collapse_multi_alias_uses_array_form_excluding_key() {
-        let lines = collapse_follow(&map(&[
-            ("git-hooks", "git-hooks"),
-            ("git-hooks-nix", "git-hooks"),
-        ]));
-        assert_eq!(lines, vec![(
+        let lines = map(&[("git-hooks", "git-hooks"), ("git-hooks-nix", "git-hooks")]).collapsed();
+        assert_eq!(rendered(&lines), vec![(
             "git-hooks".into(),
             "[\"git-hooks-nix\"]".into()
         )]);
@@ -239,8 +285,8 @@ mod tests {
 
     #[test]
     fn collapse_multi_alias_when_target_is_not_an_alias() {
-        let lines = collapse_follow(&map(&[("xwl-stable", "xwl"), ("xwl-unstable", "xwl")]));
-        assert_eq!(lines, vec![(
+        let lines = map(&[("xwl-stable", "xwl"), ("xwl-unstable", "xwl")]).collapsed();
+        assert_eq!(rendered(&lines), vec![(
             "xwl".into(),
             "[\"xwl-stable\", \"xwl-unstable\"]".into()
         )]);
@@ -248,20 +294,20 @@ mod tests {
 
     #[test]
     fn mark_glyphs_keep_visible_widths() {
-        let (ahead, ahead_width) = mark_glyph(Mark::Ahead);
-        assert_eq!(ahead_width, 1);
-        assert!(ahead.contains('\u{2191}'));
-        assert!(!ahead.contains('~'));
+        let ahead = RenderedMark::from(Mark::Ahead);
+        assert_eq!(ahead.width, 1);
+        assert!(ahead.text.contains('\u{2191}'));
+        assert!(!ahead.text.contains('~'));
 
-        let (diverged, diverged_width) = mark_glyph(Mark::Diverged);
-        assert_eq!(diverged_width, 2);
-        assert!(diverged.contains('\u{2191}'));
-        assert!(diverged.contains('\u{2193}'));
-        assert!(!diverged.contains('~'));
+        let diverged = RenderedMark::from(Mark::Diverged);
+        assert_eq!(diverged.width, 2);
+        assert!(diverged.text.contains('\u{2191}'));
+        assert!(diverged.text.contains('\u{2193}'));
+        assert!(!diverged.text.contains('~'));
 
-        let (dated, dated_width) = mark_glyph(Mark::DatedNewer);
-        assert_eq!(dated_width, 2);
-        assert!(dated.contains('\u{2191}'));
-        assert!(dated.contains('~'));
+        let dated = RenderedMark::from(Mark::DatedNewer);
+        assert_eq!(dated.width, 2);
+        assert!(dated.text.contains('\u{2191}'));
+        assert!(dated.text.contains('~'));
     }
 }

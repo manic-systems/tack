@@ -1,31 +1,37 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use super::{
-    Path,
-    PinType,
-    Project,
+use std::path::Path;
+
+use eyre::{
     Result,
-    Source,
-    Unpack,
     bail,
-    fetch,
-    pins,
-    render,
 };
 
-pub fn add(
-    name: &str,
-    url: &str,
-    pin_type: PinType,
-    unpack: Option<Unpack>,
-    dir_field: Option<&str>,
-    submodules: bool,
-    follows: &[(String, String)],
-) -> Result<()> {
+use super::AddRequest;
+use crate::{
+    fetch,
+    pins::{
+        self,
+        PinType,
+    },
+    project::Project,
+    render,
+    source::Source,
+};
+
+pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
+    let AddRequest {
+        name,
+        url,
+        pin_type,
+        unpack,
+        dir,
+        submodules,
+        follows,
+    } = request;
     if unpack.is_some() && pin_type != PinType::Fixed {
         bail!("--unpack is only valid with --fixed");
     }
-    let project = Project::discover();
     let mut doc = project.load_pins()?;
     if doc.has_input(name) {
         bail!("input '{name}' already exists");
@@ -33,7 +39,7 @@ pub fn add(
     doc.add_input(name, url, &pins::AddInputOpts {
         pin_type,
         unpack,
-        dir: dir_field,
+        dir,
         submodules,
         follows,
     });
@@ -64,8 +70,7 @@ pub fn add(
     Ok(())
 }
 
-pub fn rm(name: &str) -> Result<()> {
-    let project = Project::discover();
+pub fn rm(project: &Project, name: &str) -> Result<()> {
     let (removed_pin, removed_lock) = rm_in_dir(project.dir(), name)?;
     if removed_pin {
         println!("removed {name}");
@@ -75,7 +80,7 @@ pub fn rm(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(in crate::commands) fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
+pub(super) fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
     let project = Project::at(dir.to_owned());
     let mut doc = project.load_pins()?;
     let removed_pin = doc.remove_input(name);
@@ -96,8 +101,7 @@ pub(in crate::commands) fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bo
     Ok((removed_pin, removed_lock))
 }
 
-pub fn alias(name: &str, template: Option<&str>, remove: bool) -> Result<()> {
-    let project = Project::discover();
+pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool) -> Result<()> {
     let mut doc = project.load_pins()?;
     if remove {
         if !doc.remove_alias(name) {

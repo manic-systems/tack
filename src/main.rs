@@ -4,13 +4,13 @@ mod app;
 mod cli;
 mod commands;
 mod fetch;
-mod flake_lock;
 mod history;
 mod lock;
 mod nar;
 mod pins;
 mod project;
 mod render;
+mod report;
 mod shorturl;
 mod source;
 mod ui;
@@ -59,7 +59,7 @@ impl TackExit {
             if cause.downcast_ref::<project::ConfigError>().is_some() {
                 return Self::Config;
             }
-            if cause.downcast_ref::<fetch::FetchError>().is_some() {
+            if cause.downcast_ref::<fetch::http::FetchError>().is_some() {
                 return Self::Fetch;
             }
         }
