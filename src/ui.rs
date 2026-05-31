@@ -23,6 +23,7 @@ use std::{
 };
 
 use crate::fetch::{
+    BranchComparison,
     CommitLog,
     CompareStatus,
 };
@@ -35,7 +36,7 @@ pub enum PinStatus {
     Updated {
         old:        String,
         new:        String,
-        comparison: Option<CompareStatus>,
+        comparison: BranchComparison,
     },
     Drift {
         rev:      String,
@@ -307,11 +308,30 @@ fn plain_line(name: &str, st: &PinStatus) -> Option<String> {
     }
 }
 
-const fn comparison_suffix(comparison: Option<CompareStatus>) -> &'static str {
-    match comparison {
+const fn comparison_suffix(comparison: BranchComparison) -> &'static str {
+    match comparison.status {
         Some(CompareStatus::Ahead) => " (ahead)",
         Some(CompareStatus::Behind) => " (behind)",
         Some(CompareStatus::Diverged) => " (diverged)",
+        None if comparison.expected => " (unverified)",
         Some(CompareStatus::Identical) | None => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_comparison_suffix_marks_unverified_results() {
+        assert_eq!(
+            comparison_suffix(BranchComparison::verified(CompareStatus::Ahead)),
+            " (ahead)"
+        );
+        assert_eq!(
+            comparison_suffix(BranchComparison::unavailable()),
+            " (unverified)"
+        );
+        assert_eq!(comparison_suffix(BranchComparison::none()), "");
     }
 }

@@ -35,7 +35,10 @@ use toml_edit::Item;
 
 use crate::{
     fetch,
-    fetch::CompareStatus,
+    fetch::{
+        BranchComparison,
+        CompareStatus,
+    },
     lock,
     pins,
     pins::{
@@ -53,6 +56,12 @@ const STARTER_TOML: &str = include_str!("../assets/pins.toml");
 const RESOLVER_NIX: &str = include_str!("../.tack/default.nix");
 const SCAFFOLD_FLAKE: &str = include_str!("../templates/default/flake.nix");
 const MARKER: &str = "# tack-managed resolver.";
+
+struct UpdateFetch {
+    node:       Value,
+    rev:        String,
+    comparison: BranchComparison,
+}
 
 fn dir() -> PathBuf {
     if let Some(dir) = env::var_os("TACK_DIR") {
@@ -389,13 +398,10 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
             let expanded = shorturl::expand(&inp.url, &shorturls);
             let old = lk.get(&inp.name);
             let old_rev = old.and_then(lock::rev_of);
-            let fetched = match inp.pin_type {
-                PinType::Fixed => fetch::fetch_fixed_pin(&expanded, inp.unpack),
-                PinType::Flake | PinType::Fetch => fetch::fetch_pin(&expanded, inp.submodules),
-            };
+            let fetched = fetch_for_update(inp, &expanded, old_rev);
             match fetched {
                 // for fixed pins sha256 is the identity; any mismatch is drift
-                Ok((node, rev))
+                Ok(UpdateFetch { node, rev, .. })
                     if inp.pin_type == PinType::Fixed
                         && old_rev.is_some()
                         && old_rev != Some(rev.as_str()) =>
@@ -412,7 +418,7 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
                         None
                     }
                 },
-                Ok((node, rev)) if old_rev == Some(rev.as_str()) => {
+                Ok(UpdateFetch { node, rev, .. }) if old_rev == Some(rev.as_str()) => {
                     // same rev, if hash moved, upstream changed under a stable rev
                     let drifted = matches!(
                         (old.and_then(lock::hash_of), lock::hash_of(&node)),
@@ -434,12 +440,15 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
                         None
                     }
                 },
-                Ok((node, rev)) => {
+                Ok(UpdateFetch {
+                    node,
+                    rev,
+                    comparison,
+                }) => {
                     display.set(i, PinStatus::Updated {
-                        old:        old_rev.map_or_else(|| "NEW".into(), short),
-                        new:        short(&rev),
-                        comparison: old_rev
-                            .and_then(|previous| branch_comparison(&expanded, previous, &rev)),
+                        old: old_rev.map_or_else(|| "NEW".into(), short),
+                        new: short(&rev),
+                        comparison,
                     });
                     Some(node)
                 },
@@ -474,6 +483,33 @@ pub fn update(names: &[String], accept: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn fetch_for_update(
+    inp: &pins::Input,
+    expanded: &str,
+    old_rev: Option<&str>,
+) -> Result<UpdateFetch> {
+    match inp.pin_type {
+        PinType::Fixed => {
+            fetch::fetch_fixed_pin(expanded, inp.unpack).map(|(node, rev)| {
+                UpdateFetch {
+                    node,
+                    rev,
+                    comparison: BranchComparison::none(),
+                }
+            })
+        },
+        PinType::Flake | PinType::Fetch => {
+            fetch::fetch_pin_compared(expanded, inp.submodules, old_rev).map(|fetched| {
+                UpdateFetch {
+                    node:       fetched.node,
+                    rev:        fetched.rev,
+                    comparison: fetched.comparison,
+                }
+            })
+        },
+    }
 }
 
 /// for every `[all_follow]` entry whose target isn't a declared `[inputs]` pin,
@@ -684,23 +720,20 @@ pub fn look(names: &[String], verbose: bool) -> Result<()> {
         display.set(i, PinStatus::Fetching);
         let expanded = shorturl::expand(&inp.url, &shorturls);
         let old = lk.get(&inp.name).and_then(lock::rev_of).map(str::to_owned);
-        match fetch::current_rev(&expanded) {
-            Ok(rev) if old.as_deref() == Some(rev.as_str()) => {
+        match fetch::current_rev_compared(&expanded, old.as_deref()) {
+            Ok(current) if old.as_deref() == Some(current.rev.as_str()) => {
                 display.set(i, PinStatus::NoChange);
             },
-            Ok(rev) => {
-                let comparison = old
-                    .as_deref()
-                    .and_then(|old_rev| branch_comparison(&expanded, old_rev, &rev));
+            Ok(current) => {
                 display.set(i, PinStatus::Updated {
-                    old: old.as_deref().map_or_else(|| "NEW".into(), short),
-                    new: short(&rev),
-                    comparison,
+                    old:        old.as_deref().map_or_else(|| "NEW".into(), short),
+                    new:        short(&current.rev),
+                    comparison: current.comparison,
                 });
                 if verbose
                     && let Some(old_rev) = old.as_deref()
                     && let Ok(Some(log)) =
-                        fetch::commits_between(&expanded, old_rev, &rev, LOG_LIMIT)
+                        fetch::commits_between(&expanded, old_rev, &current.rev, LOG_LIMIT)
                 {
                     *logs[i].lock().unwrap() = Some(log);
                 }
@@ -751,15 +784,6 @@ impl Side {
             Self::Tack => "tack",
         }
     }
-}
-
-fn branch_comparison(expanded: &str, old_rev: &str, new_rev: &str) -> Option<CompareStatus> {
-    if old_rev == new_rev {
-        return Some(CompareStatus::Identical);
-    }
-    fetch::compare_pin_status(expanded, old_rev, new_rev)
-        .ok()
-        .flatten()
 }
 
 struct Entry {
@@ -1422,7 +1446,8 @@ fn group_marks<'a>(
     revs: impl Iterator<Item = &'a str>,
     compares: &HashMap<(String, String), CompareStatus>,
 ) -> (BTreeMap<&'a str, (String, usize)>, usize) {
-    const CLOCK: &str = "\u{f017}";
+    // a plain "~" marks a date-based guess
+    const APPROX: &str = "~";
 
     let comp_entry = comparator(entries);
     let mut lm_of = BTreeMap::<&str, u64>::new();
@@ -1434,8 +1459,12 @@ fn group_marks<'a>(
         *slot = (*slot).max(lm);
     }
     let paint = |code: i32, body: &str| format!("\x1b[{code}m{body}\x1b[0m");
-    let dated =
-        |code: i32, arrow: &str| (format!("{}{}", paint(code, arrow), paint(36_i32, CLOCK)), 2);
+    let dated = |code: i32, arrow: &str| {
+        (
+            format!("{}{}", paint(code, arrow), paint(36_i32, APPROX)),
+            2,
+        )
+    };
     let render = |rev: &str| -> (String, usize) {
         let Some(comp) = comp_entry else {
             return (" ".to_owned(), 1);
@@ -1465,7 +1494,7 @@ fn group_marks<'a>(
             return (" ".to_owned(), 1);
         };
         match lm.cmp(&comparator_lm) {
-            cmp::Ordering::Equal => (paint(36_i32, CLOCK), 1),
+            cmp::Ordering::Equal => (paint(36_i32, APPROX), 1),
             cmp::Ordering::Greater => dated(32_i32, "\u{2191}"), // ↑ newer by timestamp
             cmp::Ordering::Less => dated(33_i32, "\u{2193}"),    // ↓ older by timestamp
         }
@@ -1697,7 +1726,6 @@ mod tests {
         MAX_COMPARE_JOBS,
         Side,
         apply_follows,
-        branch_comparison,
         choose_lock_observation,
         collapse_follow,
         comparator,
@@ -1850,18 +1878,6 @@ mod tests {
     }
 
     #[test]
-    fn branch_comparison_uses_identity_fast_path_and_skips_unknown_forges() {
-        assert_eq!(
-            branch_comparison("github:o/r", "same", "same"),
-            Some(super::CompareStatus::Identical)
-        );
-        assert_eq!(
-            branch_comparison("git+https://example.invalid/o/r", "old", "new"),
-            None
-        );
-    }
-
-    #[test]
     fn auto_dedup_prefers_ahead_candidate_despite_older_timestamp() {
         let winner = choose_lock_observation(
             vec![(300, github_node("base")), (100, github_node("ahead"))],
@@ -2002,11 +2018,11 @@ mod tests {
         assert_eq!(width, 1);
         assert_eq!(mark.1, 1);
         assert!(mark.0.contains('\u{2191}'));
-        assert!(!mark.0.contains('\u{f017}'));
+        assert!(!mark.0.contains('~'));
     }
 
     #[test]
-    fn group_marks_show_diverged_branch_status_without_clock() {
+    fn group_marks_show_diverged_branch_status_without_marker() {
         let entries = vec![
             entry(&[], "base", "base", Some(100)),
             entry(&["dep"], "head", "head", Some(200)),
@@ -2028,11 +2044,11 @@ mod tests {
         assert_eq!(mark.1, 2);
         assert!(mark.0.contains('\u{2191}'));
         assert!(mark.0.contains('\u{2193}'));
-        assert!(!mark.0.contains('\u{f017}'));
+        assert!(!mark.0.contains('~'));
     }
 
     #[test]
-    fn group_marks_distinguish_timestamp_fallback_with_clock() {
+    fn group_marks_distinguish_timestamp_fallback_with_marker() {
         let entries = vec![
             entry(&[], "base", "base", Some(100)),
             entry(&["dep"], "head", "head", Some(200)),
@@ -2049,8 +2065,8 @@ mod tests {
 
         assert_eq!(width, 2);
         assert_eq!(mark.1, 2);
-        assert!(mark.0.contains('\u{2191}'));
-        assert!(mark.0.contains('\u{f017}'));
+        assert!(mark.0.contains('\u{2191}')); // ↑ newer by timestamp
+        assert!(mark.0.contains('~')); // marked as a date-based guess
     }
 
     #[test]
