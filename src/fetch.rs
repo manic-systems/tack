@@ -11,6 +11,7 @@ use std::{
     },
     str::FromStr,
     sync::OnceLock,
+    time::Duration,
 };
 
 use anyhow::{
@@ -60,11 +61,18 @@ fn agent() -> &'static Agent {
     })
 }
 
+fn github_token() -> Option<String> {
+    env::var("GITHUB_TOKEN")
+        .or_else(|_| env::var("GH_TOKEN"))
+        .ok()
+}
+
 enum Target {
     Github {
         owner: String,
         repo:  String,
         reff:  Option<String>,
+        rev:   Option<String>,
     },
     Git {
         url:  String,
@@ -76,20 +84,23 @@ enum Target {
     },
 }
 
+#[expect(
+    clippy::similar_names,
+    reason = "ref and rev are user-facing URL fields"
+)]
 fn parse(expanded: &str) -> Result<Target> {
     if let Some(body) = expanded.strip_prefix("github:") {
-        let (path, query_ref, query_sha) = split_query(body);
+        let (path, query_ref, query_rev) = split_query(body);
         let segs = path.split('/').collect::<Vec<&str>>();
         if segs.len() < 2 {
             bail!("malformed github url: {expanded}");
         }
-        let reff = query_ref
-            .or(query_sha)
-            .or_else(|| (segs.len() > 2).then(|| segs[2..].join("/")));
+        let reff = query_ref.or_else(|| (segs.len() > 2).then(|| segs[2..].join("/")));
         return Ok(Target::Github {
             owner: segs[0].to_owned(),
             repo: segs[1].to_owned(),
             reff,
+            rev: query_rev,
         });
     }
     if let Some(rest) = expanded.strip_prefix("git+") {
@@ -124,17 +135,96 @@ fn split_query(str: &str) -> (&str, Option<String>, Option<String>) {
     (path, reff, rev)
 }
 
-/// upstream rev, no tree fetch
-pub fn current_rev(expanded: &str) -> Result<String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BranchComparison {
+    pub status:   Option<CompareStatus>,
+    pub expected: bool,
+}
+
+impl BranchComparison {
+    pub const fn none() -> Self {
+        Self {
+            status:   None,
+            expected: false,
+        }
+    }
+
+    pub const fn verified(status: CompareStatus) -> Self {
+        Self {
+            status:   Some(status),
+            expected: true,
+        }
+    }
+
+    pub const fn unavailable() -> Self {
+        Self {
+            status:   None,
+            expected: true,
+        }
+    }
+}
+
+pub struct CurrentRev {
+    pub rev:        String,
+    pub comparison: BranchComparison,
+}
+
+/// upstream rev plus, when possible, branch topology against `old_rev`.
+pub fn current_rev_compared(expanded: &str, old_rev: Option<&str>) -> Result<CurrentRev> {
     match parse(expanded)? {
-        Target::Github { owner, repo, reff } => {
+        Target::Github {
+            owner,
+            repo,
+            reff,
+            rev: pinned,
+        } => {
+            if let Some(rev) = pinned {
+                let comparison = if old_rev == Some(rev.as_str()) {
+                    BranchComparison::verified(CompareStatus::Identical)
+                } else {
+                    BranchComparison::none()
+                };
+                return Ok(CurrentRev { rev, comparison });
+            }
             let ref_str = reff.as_deref().unwrap_or("HEAD");
-            Ok(gh_commit(&owner, &repo, ref_str)?.0)
+            if let Some(previous_rev) = old_rev
+                && let Ok(resolved) = gh_ref_compare(&owner, &repo, reff.as_deref(), previous_rev)
+            {
+                let filled = backfill_comparison(&owner, &repo, previous_rev, resolved);
+                return Ok(CurrentRev {
+                    rev:        filled.rev,
+                    comparison: filled.comparison,
+                });
+            }
+            let (rev, _) = gh_commit(&owner, &repo, ref_str)?;
+            let comparison = old_rev.map_or_else(BranchComparison::none, |previous_rev| {
+                if previous_rev == rev.as_str() {
+                    BranchComparison::verified(CompareStatus::Identical)
+                } else {
+                    compare_status(&owner, &repo, previous_rev, &rev)
+                        .ok()
+                        .flatten()
+                        .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
+                }
+            });
+            Ok(CurrentRev { rev, comparison })
         },
-        Target::Git { url, reff, rev } => {
+        Target::Git {
+            url,
+            reff,
+            rev: pinned,
+        } => {
             // a pinned rev never moves; report it without touching the network
-            if let Some(pinned) = rev {
-                return Ok(pinned);
+            if let Some(pinned_rev) = pinned {
+                let comparison = if old_rev == Some(pinned_rev.as_str()) {
+                    BranchComparison::verified(CompareStatus::Identical)
+                } else {
+                    BranchComparison::none()
+                };
+                return Ok(CurrentRev {
+                    rev: pinned_rev,
+                    comparison,
+                });
             }
             let cb = callbacks();
             let mut remote = git2::Remote::create_detached(url.as_str())?;
@@ -142,7 +232,16 @@ pub fn current_rev(expanded: &str) -> Result<String> {
             let want = full_ref(reff.as_deref(), || branch_str(conn.default_branch()));
             for head in conn.list()? {
                 if head.name() == want {
-                    return Ok(head.oid().to_string());
+                    let head_rev = head.oid().to_string();
+                    let comparison = if old_rev == Some(head_rev.as_str()) {
+                        BranchComparison::verified(CompareStatus::Identical)
+                    } else {
+                        BranchComparison::none()
+                    };
+                    return Ok(CurrentRev {
+                        rev: head_rev,
+                        comparison,
+                    });
                 }
             }
             bail!("ref {want} not found on {url}")
@@ -160,7 +259,13 @@ pub fn current_rev(expanded: &str) -> Result<String> {
                         .map_err(Box::new)
                 })
                 .with_context(|| format!("probe {url}"))?;
-            Ok(immutable_url_of(&resp, &url))
+            let rev = immutable_url_of(&resp, &url);
+            let comparison = if old_rev == Some(rev.as_str()) {
+                BranchComparison::verified(CompareStatus::Identical)
+            } else {
+                BranchComparison::none()
+            };
+            Ok(CurrentRev { rev, comparison })
         },
     }
 }
@@ -263,10 +368,19 @@ pub fn fetch_locked_tree_into(node: &Value, dir: &Path) -> Result<PathBuf> {
 /// used when traversing tack transitives that have no committed lock.
 pub fn fetch_tree_into(expanded: &str, submodules: bool, dir: &Path) -> Result<PathBuf> {
     match parse(expanded)? {
-        Target::Github { owner, repo, reff } => {
-            let ref_str = reff.as_deref().unwrap_or("HEAD");
-            let (rev, _) = gh_commit(&owner, &repo, ref_str)?;
-            download_github_tarball(&owner, &repo, &rev, dir)
+        Target::Github {
+            owner,
+            repo,
+            reff,
+            rev: pinned,
+        } => {
+            let tree_rev = if let Some(pinned_rev) = pinned {
+                pinned_rev
+            } else {
+                let ref_str = reff.as_deref().unwrap_or("HEAD");
+                gh_commit(&owner, &repo, ref_str)?.0
+            };
+            download_github_tarball(&owner, &repo, &tree_rev, dir)
         },
         Target::Git { url, reff, rev } => {
             git_checkout(&url, reff.as_deref(), rev.as_deref(), submodules, dir)?;
@@ -287,23 +401,28 @@ pub fn fetch_tree_into(expanded: &str, submodules: bool, dir: &Path) -> Result<P
 
 /// fetch the tree, return (locked node, rev)
 pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
+    fetch_pin_compared(expanded, submodules, None).map(|fetched| (fetched.node, fetched.rev))
+}
+
+pub struct FetchedPin {
+    pub node:       Value,
+    pub rev:        String,
+    pub comparison: BranchComparison,
+}
+
+/// fetch the tree, returning branch topology against `old_rev` when available.
+pub fn fetch_pin_compared(
+    expanded: &str,
+    submodules: bool,
+    old_rev: Option<&str>,
+) -> Result<FetchedPin> {
     match parse(expanded)? {
-        Target::Github { owner, repo, reff } => {
-            let ref_str = reff.as_deref().unwrap_or("HEAD");
-            let (rev, last_modified) = gh_commit(&owner, &repo, ref_str)?;
-            let dir = tempfile::tempdir()?;
-            let root = download_github_tarball(&owner, &repo, &rev, dir.path())?;
-            let nar_hash = nar::hash_path(&root)?;
-            let node = json!({
-                "type": "github",
-                "owner": owner,
-                "repo": repo,
-                "rev": rev,
-                "narHash": nar_hash,
-                "lastModified": last_modified,
-            });
-            Ok((node, rev))
-        },
+        Target::Github {
+            owner,
+            repo,
+            reff,
+            rev: pinned,
+        } => fetch_github_pin_compared(&owner, &repo, reff.as_deref(), pinned, old_rev),
         Target::Git {
             url,
             reff,
@@ -330,7 +449,11 @@ pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
             if submodules {
                 node["submodules"] = json!(true);
             }
-            Ok((node, rev))
+            Ok(FetchedPin {
+                node,
+                rev,
+                comparison: BranchComparison::none(),
+            })
         },
         Target::Tarball { url } => {
             let mut resp = agent()
@@ -358,9 +481,81 @@ pub fn fetch_pin(expanded: &str, submodules: bool) -> Result<(Value, String)> {
                 "narHash": nar_hash,
                 "lastModified": last_modified,
             });
-            Ok((node, immutable_url))
+            Ok(FetchedPin {
+                node,
+                rev: immutable_url,
+                comparison: BranchComparison::none(),
+            })
         },
     }
+}
+
+fn fetch_github_pin_compared(
+    owner: &str,
+    repo: &str,
+    reff: Option<&str>,
+    pinned: Option<String>,
+    old_rev: Option<&str>,
+) -> Result<FetchedPin> {
+    let resolved = resolve_github_for_pin(owner, repo, reff, pinned, old_rev)?;
+    let dir = tempfile::tempdir()?;
+    let root = download_github_tarball(owner, repo, &resolved.rev, dir.path())?;
+    let nar_hash = nar::hash_path(&root)?;
+    let rev = resolved.rev;
+    let node = json!({
+        "type": "github",
+        "owner": owner,
+        "repo": repo,
+        "rev": rev,
+        "narHash": nar_hash,
+        "lastModified": resolved.last_modified,
+    });
+    Ok(FetchedPin {
+        node,
+        rev,
+        comparison: resolved.comparison,
+    })
+}
+
+fn resolve_github_for_pin(
+    owner: &str,
+    repo: &str,
+    reff: Option<&str>,
+    pinned: Option<String>,
+    old_rev: Option<&str>,
+) -> Result<ResolvedGithubRef> {
+    if let Some(rev) = pinned {
+        let (_, last_modified) = gh_commit(owner, repo, &rev)?;
+        return Ok(ResolvedGithubRef {
+            rev,
+            last_modified,
+            comparison: BranchComparison::none(),
+        });
+    }
+
+    let ref_str = reff.unwrap_or("HEAD");
+    if let Some(previous_rev) = old_rev
+        && let Ok(resolved) = gh_ref_compare(owner, repo, reff, previous_rev)
+    {
+        return Ok(backfill_comparison(owner, repo, previous_rev, resolved));
+    }
+
+    let (rev, last_modified) = gh_commit(owner, repo, ref_str)?;
+    let comparison = old_rev.map_or_else(BranchComparison::none, |previous_rev| {
+        if previous_rev == rev.as_str() {
+            BranchComparison::verified(CompareStatus::Identical)
+        } else {
+            compare_status(owner, repo, previous_rev, &rev)
+                .ok()
+                .flatten()
+                .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
+        }
+    });
+    Ok(ResolvedGithubRef {
+        rev,
+        last_modified,
+        comparison,
+    })
 }
 
 /// Locked URL for a tarball response
@@ -460,12 +655,19 @@ where
 }
 
 fn gh_get(url: &str) -> Result<Value> {
+    gh_get_with_timeout(url, None)
+}
+
+fn gh_get_with_timeout(url: &str, timeout_limit: Option<Duration>) -> Result<Value> {
     let mut req = agent()
         .get(url)
         .header("User-Agent", "tack")
         .header("Accept", "application/vnd.github+json");
-    if let Ok(token) = env::var("GITHUB_TOKEN").or_else(|_| env::var("GH_TOKEN")) {
+    if let Some(token) = github_token() {
         req = req.header("Authorization", &format!("Bearer {token}"));
+    }
+    if let Some(timeout) = timeout_limit {
+        req = req.config().timeout_global(Some(timeout)).build();
     }
     let body = req
         .call()
@@ -473,6 +675,38 @@ fn gh_get(url: &str) -> Result<Value> {
         .body_mut()
         .read_to_string()?;
     Ok(serde_json::from_str(&body)?)
+}
+
+fn gh_graphql(query: &str, variables: &Value) -> Result<Value> {
+    let token = github_token().context("github graphql requires GITHUB_TOKEN or GH_TOKEN")?;
+    let payload = json!({
+        "query": query,
+        "variables": variables,
+    })
+    .to_string();
+    let mut resp = agent()
+        .post("https://api.github.com/graphql")
+        .header("User-Agent", "tack")
+        .header("Accept", "application/vnd.github+json")
+        .header("Content-Type", "application/json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .config()
+        .timeout_global(Some(Duration::from_secs(2)))
+        .build()
+        .send(payload)
+        .context("github graphql")?;
+    let body = resp.body_mut().read_to_string()?;
+    let parsed = serde_json::from_str::<Value>(&body)?;
+    if let Some(message) = parsed
+        .get("errors")
+        .and_then(Value::as_array)
+        .and_then(|errors| errors.first())
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+    {
+        bail!("github graphql: {message}");
+    }
+    Ok(parsed)
 }
 
 /// direction of `head` relative to `base`, as reported by github's compare
@@ -518,6 +752,168 @@ impl CompareStatus {
     }
 }
 
+struct ResolvedGithubRef {
+    rev:           String,
+    last_modified: i64,
+    comparison:    BranchComparison,
+}
+
+const GITHUB_REF_COMPARE_QUERY: &str = "
+query($owner: String!, $repo: String!, $ref: String!, $old: String!) {
+  repository(owner: $owner, name: $repo) {
+    targetRef: ref(qualifiedName: $ref) {
+      target {
+        oid
+        ... on Commit { committedDate }
+        ... on Tag {
+          target {
+            oid
+            ... on Commit { committedDate }
+          }
+        }
+      }
+      compare(headRef: $old) {
+        status
+        aheadBy
+        behindBy
+      }
+    }
+  }
+}
+";
+
+const GITHUB_DEFAULT_COMPARE_QUERY: &str = "
+query($owner: String!, $repo: String!, $old: String!) {
+  repository(owner: $owner, name: $repo) {
+    targetRef: defaultBranchRef {
+      target {
+        oid
+        ... on Commit { committedDate }
+        ... on Tag {
+          target {
+            oid
+            ... on Commit { committedDate }
+          }
+        }
+      }
+      compare(headRef: $old) {
+        status
+        aheadBy
+        behindBy
+      }
+    }
+  }
+}
+";
+
+fn gh_ref_compare(
+    owner: &str,
+    repo: &str,
+    reff: Option<&str>,
+    old_rev: &str,
+) -> Result<ResolvedGithubRef> {
+    let (query, variables) = reff.map_or_else(
+        || {
+            (
+                GITHUB_DEFAULT_COMPARE_QUERY,
+                json!({
+                    "owner": owner,
+                    "repo": repo,
+                    "old": old_rev,
+                }),
+            )
+        },
+        |ref_name| {
+            (
+                GITHUB_REF_COMPARE_QUERY,
+                json!({
+                    "owner": owner,
+                    "repo": repo,
+                    "ref": ref_name,
+                    "old": old_rev,
+                }),
+            )
+        },
+    );
+    parse_gh_ref_compare(&gh_graphql(query, &variables)?)
+}
+
+fn parse_gh_ref_compare(parsed: &Value) -> Result<ResolvedGithubRef> {
+    let ref_node = parsed
+        .get("data")
+        .and_then(|data| data.get("repository"))
+        .and_then(|repo| repo.get("targetRef"))
+        .filter(|node| !node.is_null())
+        .context("github graphql response missing ref")?;
+    let target = ref_node
+        .get("target")
+        .context("github graphql response missing ref target")?;
+    let (rev, last_modified) = target_commit(target)?;
+    let comparison = ref_node
+        .get("compare")
+        .and_then(|compare| compare.get("status"))
+        .and_then(Value::as_str)
+        .and_then(graphql_ref_compare_status)
+        .map_or_else(BranchComparison::unavailable, BranchComparison::verified);
+    Ok(ResolvedGithubRef {
+        rev,
+        last_modified,
+        comparison,
+    })
+}
+
+/// when the GraphQL ref resolved but its comparison came back unavailable, the
+/// REST `/compare` endpoint may still classify the two revs. a verified or
+/// not-attempted comparison is left untouched.
+fn backfill_comparison(
+    owner: &str,
+    repo: &str,
+    old_rev: &str,
+    resolved: ResolvedGithubRef,
+) -> ResolvedGithubRef {
+    let unavailable = resolved.comparison.status.is_none() && resolved.comparison.expected;
+    if !unavailable || old_rev == resolved.rev {
+        return resolved;
+    }
+    let comparison = compare_status(owner, repo, old_rev, &resolved.rev)
+        .ok()
+        .flatten()
+        .map_or(resolved.comparison, BranchComparison::verified);
+    ResolvedGithubRef {
+        comparison,
+        ..resolved
+    }
+}
+
+fn target_commit(target: &Value) -> Result<(String, i64)> {
+    let commit = target
+        .get("target")
+        .filter(|inner| inner.get("committedDate").is_some())
+        .unwrap_or(target);
+    let rev = commit
+        .get("oid")
+        .and_then(Value::as_str)
+        .context("github graphql response missing commit oid")?
+        .to_owned();
+    let date = commit
+        .get("committedDate")
+        .and_then(Value::as_str)
+        .context("github graphql response missing commit date")?;
+    Ok((rev, epoch_from_iso(date)?))
+}
+
+fn graphql_ref_compare_status(status: &str) -> Option<CompareStatus> {
+    Some(match status {
+        // Ref.compare compares `targetRef` as the base to the old locked rev
+        // as the head. tack displays the current ref relative to the old rev.
+        "AHEAD" => CompareStatus::Behind,
+        "BEHIND" => CompareStatus::Ahead,
+        "DIVERGED" => CompareStatus::Diverged,
+        "IDENTICAL" => CompareStatus::Identical,
+        _ => return None,
+    })
+}
+
 /// compare `head` against `base` via github's compare endpoint. returns
 /// [`None`] when the response carries no recognised `status`, which callers
 /// treat as "no answer" and fall back to commit-date ordering
@@ -527,21 +923,17 @@ pub fn compare_status(
     base: &str,
     head: &str,
 ) -> Result<Option<CompareStatus>> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}");
-    let parsed = gh_get(&url).with_context(|| format!("github compare {owner}/{repo}"))?;
+    let url = gh_compare_url(owner, repo, base, head);
+    let parsed = gh_get_with_timeout(&url, Some(Duration::from_secs(5)))
+        .with_context(|| format!("github compare {owner}/{repo}"))?;
     Ok(parsed
         .get("status")
         .and_then(Value::as_str)
         .and_then(|status| status.parse().ok()))
 }
 
-/// compare two revs for a parsed pin URL when the backing forge can answer
-/// without cloning.
-pub fn compare_pin_status(expanded: &str, base: &str, head: &str) -> Result<Option<CompareStatus>> {
-    let Target::Github { owner, repo, .. } = parse(expanded)? else {
-        return Ok(None);
-    };
-    compare_status(&owner, &repo, base, head)
+fn gh_compare_url(owner: &str, repo: &str, base: &str, head: &str) -> String {
+    format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}?per_page=1")
 }
 
 fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
@@ -847,9 +1239,115 @@ mod tests {
     #[test]
     fn github_rev_is_committish() {
         match parse("github:o/r?rev=abc123").unwrap() {
-            Target::Github { reff, .. } => assert_eq!(reff.as_deref(), Some("abc123")),
+            Target::Github { reff, rev, .. } => {
+                assert_eq!(reff, None);
+                assert_eq!(rev.as_deref(), Some("abc123"));
+            },
             Target::Git { .. } | Target::Tarball { .. } => panic!("expected github target"),
         }
+    }
+
+    #[test]
+    fn github_pinned_rev_skips_branch_comparison() {
+        let mismatched = current_rev_compared("github:o/r?rev=abc123", Some("old")).unwrap();
+        assert_eq!(mismatched.rev, "abc123");
+        assert_eq!(mismatched.comparison, BranchComparison::none());
+
+        let identical = current_rev_compared("github:o/r?rev=abc123", Some("abc123")).unwrap();
+        assert_eq!(identical.rev, "abc123");
+        assert_eq!(
+            identical.comparison,
+            BranchComparison::verified(CompareStatus::Identical)
+        );
+    }
+
+    #[test]
+    fn graphql_ref_compare_status_is_inverted_for_tack_display() {
+        assert_eq!(
+            graphql_ref_compare_status("BEHIND"),
+            Some(CompareStatus::Ahead)
+        );
+        assert_eq!(
+            graphql_ref_compare_status("AHEAD"),
+            Some(CompareStatus::Behind)
+        );
+        assert_eq!(
+            graphql_ref_compare_status("DIVERGED"),
+            Some(CompareStatus::Diverged)
+        );
+        assert_eq!(
+            graphql_ref_compare_status("IDENTICAL"),
+            Some(CompareStatus::Identical)
+        );
+        assert_eq!(graphql_ref_compare_status("UNKNOWN"), None);
+    }
+
+    #[test]
+    fn parses_graphql_ref_compare_response() {
+        let parsed = json!({
+            "data": {
+                "repository": {
+                    "targetRef": {
+                        "target": {
+                            "oid": "new",
+                            "committedDate": "2026-05-30T18:08:13Z"
+                        },
+                        "compare": {
+                            "status": "BEHIND",
+                            "aheadBy": 0_i32,
+                            "behindBy": 1_264_i32
+                        }
+                    }
+                }
+            }
+        });
+
+        let resolved = parse_gh_ref_compare(&parsed).unwrap();
+
+        assert_eq!(resolved.rev, "new");
+        assert_eq!(resolved.last_modified, 1_780_164_493);
+        assert_eq!(
+            resolved.comparison,
+            BranchComparison::verified(CompareStatus::Ahead)
+        );
+    }
+
+    #[test]
+    fn parses_graphql_annotated_tag_target() {
+        let parsed = json!({
+            "data": {
+                "repository": {
+                    "targetRef": {
+                        "target": {
+                            "oid": "tag-object",
+                            "target": {
+                                "oid": "commit",
+                                "committedDate": "2026-05-30T18:08:13Z"
+                            }
+                        },
+                        "compare": {
+                            "status": "IDENTICAL"
+                        }
+                    }
+                }
+            }
+        });
+
+        let resolved = parse_gh_ref_compare(&parsed).unwrap();
+
+        assert_eq!(resolved.rev, "commit");
+        assert_eq!(
+            resolved.comparison,
+            BranchComparison::verified(CompareStatus::Identical)
+        );
+    }
+
+    #[test]
+    fn rest_compare_url_limits_payload() {
+        assert_eq!(
+            gh_compare_url("o", "r", "base", "head"),
+            "https://api.github.com/repos/o/r/compare/base...head?per_page=1"
+        );
     }
 
     fn commit(repo: &Repository, parent_ids: &[git2::Oid], message: &str, time: i64) -> git2::Oid {
