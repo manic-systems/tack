@@ -503,6 +503,21 @@ impl FromStr for CompareStatus {
     }
 }
 
+#[cfg(test)]
+impl CompareStatus {
+    pub const fn from_ancestry(
+        base_is_ancestor_of_head: bool,
+        head_is_ancestor_of_base: bool,
+    ) -> Self {
+        match (base_is_ancestor_of_head, head_is_ancestor_of_base) {
+            (true, true) => Self::Identical,
+            (true, false) => Self::Ahead,
+            (false, true) => Self::Behind,
+            (false, false) => Self::Diverged,
+        }
+    }
+}
+
 /// compare `head` against `base` via github's compare endpoint. returns
 /// [`None`] when the response carries no recognised `status`, which callers
 /// treat as "no answer" and fall back to commit-date ordering
@@ -518,6 +533,15 @@ pub fn compare_status(
         .get("status")
         .and_then(Value::as_str)
         .and_then(|status| status.parse().ok()))
+}
+
+/// compare two revs for a parsed pin URL when the backing forge can answer
+/// without cloning.
+pub fn compare_pin_status(expanded: &str, base: &str, head: &str) -> Result<Option<CompareStatus>> {
+    let Target::Github { owner, repo, .. } = parse(expanded)? else {
+        return Ok(None);
+    };
+    compare_status(&owner, &repo, base, head)
 }
 
 fn gh_commit(owner: &str, repo: &str, reff: &str) -> Result<(String, i64)> {
@@ -826,6 +850,50 @@ mod tests {
             Target::Github { reff, .. } => assert_eq!(reff.as_deref(), Some("abc123")),
             Target::Git { .. } | Target::Tarball { .. } => panic!("expected github target"),
         }
+    }
+
+    fn commit(repo: &Repository, parent_ids: &[git2::Oid], message: &str, time: i64) -> git2::Oid {
+        let sig = git2::Signature::new("tack", "tack@example.invalid", &git2::Time::new(time, 0))
+            .unwrap();
+        let tree_id = repo.treebuilder(None).unwrap().write().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent_commits = parent_ids
+            .iter()
+            .map(|oid| repo.find_commit(*oid).unwrap())
+            .collect::<Vec<_>>();
+        let parent_refs = parent_commits.iter().collect::<Vec<_>>();
+        repo.commit(None, &sig, &sig, message, &tree, &parent_refs)
+            .unwrap()
+    }
+
+    fn local_compare(repo: &Repository, base: git2::Oid, head: git2::Oid) -> CompareStatus {
+        if base == head {
+            return CompareStatus::Identical;
+        }
+        let base_is_ancestor = repo.graph_descendant_of(head, base).unwrap();
+        let head_is_ancestor = repo.graph_descendant_of(base, head).unwrap();
+        CompareStatus::from_ancestry(base_is_ancestor, head_is_ancestor)
+    }
+
+    #[test]
+    fn compare_status_from_local_merge_base_semantics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let root = commit(&repo, &[], "root", 100);
+        let base = commit(&repo, &[root], "base", 300);
+        let ahead_with_older_timestamp = commit(&repo, &[base], "ahead", 200);
+        let amended_with_newer_timestamp = commit(&repo, &[root], "amended", 400);
+
+        assert_eq!(
+            local_compare(&repo, base, ahead_with_older_timestamp),
+            CompareStatus::Ahead
+        );
+        assert_eq!(local_compare(&repo, base, root), CompareStatus::Behind);
+        assert_eq!(local_compare(&repo, base, base), CompareStatus::Identical);
+        assert_eq!(
+            local_compare(&repo, base, amended_with_newer_timestamp),
+            CompareStatus::Diverged
+        );
     }
 
     #[test]

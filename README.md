@@ -128,11 +128,13 @@ exclude_follow = ["nixpkgs"]   # ...except bar's
 
 when a target named in `[all_follow]` isn't itself a top-level `[inputs]` pin,
 `tack update` synthesises a lock entry for it by walking every top-level
-flake.lock, collecting the observed revs of the aliased name, and writing the
-freshest by `lastModified` into pins.lock.json. the resolver then treats the
-synthetic entry as a default flake, or as a bare source tree when its repo has
-no `flake.nix`. this lets you dedup transitive inputs (e.g. `crane`) without declaring
-them as top-level pins you don't actually consume.
+flake.lock, collecting the observed revs of the aliased name, and preferring
+the branch-ahead rev when GitHub can compare the commits. when comparison is
+unavailable or histories have diverged, it falls back to `lastModified`. the
+resolver then treats the synthetic entry as a default flake, or as a bare
+source tree when its repo has no `flake.nix`. this lets you dedup transitive
+inputs (e.g. `crane`) without declaring them as top-level pins you don't
+actually consume.
 
 follows reach an upstream's tack pins too, provided the upstream wired
 its flake for it (see [publishing](#publishing)). when an upstream has

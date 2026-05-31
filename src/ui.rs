@@ -22,7 +22,10 @@ use std::{
     time::Duration,
 };
 
-use crate::fetch::CommitLog;
+use crate::fetch::{
+    CommitLog,
+    CompareStatus,
+};
 
 #[derive(Clone)]
 pub enum PinStatus {
@@ -30,8 +33,9 @@ pub enum PinStatus {
     Fetching,
     NoChange,
     Updated {
-        old: String,
-        new: String,
+        old:        String,
+        new:        String,
+        comparison: Option<CompareStatus>,
     },
     Drift {
         rev:      String,
@@ -208,7 +212,13 @@ fn glyph(st: &PinStatus, frame: usize) -> String {
 
 fn suffix(st: &PinStatus) -> String {
     match *st {
-        PinStatus::Updated { ref old, ref new } => format!("  {old} -> {new}"),
+        PinStatus::Updated {
+            ref old,
+            ref new,
+            comparison,
+        } => {
+            format!("  {old} -> {new}{}", comparison_suffix(comparison))
+        },
         PinStatus::Drift {
             ref rev,
             accepted: false,
@@ -245,7 +255,16 @@ fn suffix(st: &PinStatus) -> String {
 
 fn plain_line(name: &str, st: &PinStatus) -> Option<String> {
     match *st {
-        PinStatus::Updated { ref old, ref new } => Some(format!("{name}: {old} -> {new}")),
+        PinStatus::Updated {
+            ref old,
+            ref new,
+            comparison,
+        } => {
+            Some(format!(
+                "{name}: {old} -> {new}{}",
+                comparison_suffix(comparison)
+            ))
+        },
         PinStatus::NoChange => Some(format!("{name}: unchanged")),
         PinStatus::Drift {
             ref rev,
@@ -285,5 +304,14 @@ fn plain_line(name: &str, st: &PinStatus) -> Option<String> {
         PinStatus::Skipped(ref note) => Some(format!("{name}: {note}")),
         PinStatus::Failed(ref msg) => Some(format!("{name}: FAILED: {msg}")),
         PinStatus::Pending | PinStatus::Fetching => None,
+    }
+}
+
+const fn comparison_suffix(comparison: Option<CompareStatus>) -> &'static str {
+    match comparison {
+        Some(CompareStatus::Ahead) => " (ahead)",
+        Some(CompareStatus::Behind) => " (behind)",
+        Some(CompareStatus::Diverged) => " (diverged)",
+        Some(CompareStatus::Identical) | None => "",
     }
 }
