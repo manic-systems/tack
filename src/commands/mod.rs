@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    collections::{
-        BTreeMap,
-        HashSet,
-    },
     fs,
     result::Result as StdResult,
 };
@@ -13,10 +9,6 @@ use eyre::Result;
 
 use crate::{
     fetch::http::FetchError,
-    lock::{
-        self,
-        LockedNode,
-    },
     pins::{
         self,
         PinType,
@@ -125,30 +117,6 @@ fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Inpu
         }
     }
     out
-}
-
-fn top_map<T>(
-    inputs: &[pins::Input],
-    lock: &lock::LockFile,
-    project: impl Fn(&LockedNode) -> Option<T>,
-) -> BTreeMap<String, T> {
-    let declared = inputs
-        .iter()
-        .map(|inp| inp.name.as_str())
-        .collect::<HashSet<&str>>();
-    inputs
-        .iter()
-        .filter_map(|inp| {
-            lock.get(&inp.name)
-                .and_then(&project)
-                .map(|val| (inp.name.clone(), val))
-        })
-        .chain(lock.iter().filter_map(|(key, node)| {
-            (!declared.contains(key.as_str()))
-                .then(|| project(node).map(|val| (key.clone(), val)))
-                .flatten()
-        }))
-        .collect()
 }
 
 #[cfg(test)]

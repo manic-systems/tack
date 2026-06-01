@@ -9,6 +9,7 @@ use crate::{
         DedupReport,
         Mark,
     },
+    scan_diagnostic::ScanDiagnostic,
 };
 
 const MAX_SOURCES: usize = 5;
@@ -48,6 +49,10 @@ pub fn source_label(path: &[String]) -> String {
     } else {
         path.join(" > ")
     }
+}
+
+pub fn scan_diagnostic(diagnostic: &ScanDiagnostic) -> String {
+    format!("scan {}: {}", source_label(diagnostic.path()), diagnostic)
 }
 
 /// radius-1 window around the new cursor
@@ -136,14 +141,13 @@ pub fn print_report(report: &DedupReport) {
     let kw = pin_lines
         .iter()
         .chain(auto_lines.iter())
-        .map(|line| RenderedFollow::new(line).key().len())
+        .map(|line| follow_key(line).len())
         .max()
         .unwrap_or(0);
     println!("\nshare via [all_follow] in pins.toml:");
     for line in &pin_lines {
-        let rendered = RenderedFollow::new(line);
-        let key = rendered.key();
-        let rhs = rendered.rhs();
+        let key = follow_key(line);
+        let rhs = follow_rhs(line);
         println!("  {key:kw$} = {rhs}");
     }
     if !auto_lines.is_empty() {
@@ -152,9 +156,8 @@ pub fn print_report(report: &DedupReport) {
         }
         println!("  # auto-dedup (no top-level pin needed):");
         for line in &auto_lines {
-            let rendered = RenderedFollow::new(line);
-            let key = rendered.key();
-            let rhs = rendered.rhs();
+            let key = follow_key(line);
+            let rhs = follow_rhs(line);
             println!("  {key:kw$} = {rhs}");
         }
     }
@@ -204,47 +207,45 @@ impl fmt::Display for RenderedMark {
     }
 }
 
-struct RenderedFollow<'a> {
-    follow: &'a CollapsedFollow,
+fn follow_key(follow: &CollapsedFollow) -> &str {
+    match *follow {
+        CollapsedFollow::Single { ref alias, .. } => alias,
+        CollapsedFollow::Group { ref target, .. } => target,
+    }
 }
 
-impl<'a> RenderedFollow<'a> {
-    const fn new(follow: &'a CollapsedFollow) -> Self {
-        Self { follow }
-    }
-
-    fn key(&self) -> &str {
-        match *self.follow {
-            CollapsedFollow::Single { ref alias, .. } => alias,
-            CollapsedFollow::Group { ref target, .. } => target,
-        }
-    }
-
-    fn rhs(&self) -> String {
-        match *self.follow {
-            CollapsedFollow::Single { ref target, .. } => format!("\"{target}\""),
-            CollapsedFollow::Group { ref aliases, .. } => {
-                let body = aliases
-                    .iter()
-                    .map(|alias| format!("\"{alias}\""))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("[{body}]")
-            },
-        }
+fn follow_rhs(follow: &CollapsedFollow) -> String {
+    match *follow {
+        CollapsedFollow::Single { ref target, .. } => format!("\"{target}\""),
+        CollapsedFollow::Group { ref aliases, .. } => {
+            let body = aliases
+                .iter()
+                .map(|alias| format!("\"{alias}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{body}]")
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        RenderedFollow,
         RenderedMark,
+        follow_key,
+        follow_rhs,
+        scan_diagnostic,
     };
-    use crate::report::{
-        CollapsedFollow,
-        FollowMap,
-        Mark,
+    use crate::{
+        report::{
+            CollapsedFollow,
+            FollowMap,
+            Mark,
+        },
+        scan_diagnostic::{
+            ScanDiagnostic,
+            ScanFile,
+        },
     };
 
     fn map(pairs: &[(&str, &str)]) -> FollowMap {
@@ -258,10 +259,7 @@ mod tests {
     fn rendered(lines: &[CollapsedFollow]) -> Vec<(String, String)> {
         lines
             .iter()
-            .map(|follow| {
-                let rendered = RenderedFollow::new(follow);
-                (rendered.key().to_owned(), rendered.rhs())
-            })
+            .map(|follow| (follow_key(follow).to_owned(), follow_rhs(follow)))
             .collect()
     }
 
@@ -309,5 +307,16 @@ mod tests {
         assert_eq!(dated.width, 2);
         assert!(dated.text.contains('\u{2191}'));
         assert!(dated.text.contains('~'));
+    }
+
+    #[test]
+    fn scan_diagnostic_includes_source_file_and_kind() {
+        let path = vec!["root".to_owned(), "dep".to_owned()];
+        let diagnostic = ScanDiagnostic::parse(&path, ScanFile::FlakeLock, "expected value");
+
+        assert_eq!(
+            scan_diagnostic(&diagnostic),
+            "scan root > dep: flake.lock parse failed: expected value"
+        );
     }
 }
