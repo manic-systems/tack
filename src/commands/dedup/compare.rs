@@ -15,7 +15,7 @@ use rayon::prelude::{
 };
 
 use super::{
-    github_compare::{
+    forge_compare::{
         self,
         SurfacedCauses,
     },
@@ -32,11 +32,9 @@ const MAX_LIVE_COMPARE_JOBS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CompareJob {
-    pub id:    SourceId,
-    pub owner: String,
-    pub repo:  String,
-    pub base:  String,
-    pub head:  String,
+    pub id:   SourceId,
+    pub base: String,
+    pub head: String,
 }
 
 /// the entry a group is measured against
@@ -67,19 +65,17 @@ pub(super) const fn entry_compare_rev(entry: &Entry) -> &str {
     entry.rev.as_str()
 }
 
-/// build github compare work for every divergent rev against its comparator
-/// returned jobs carry full revs for both the network request and the result
-/// map keys, rendering remains separately abbreviated
+/// forge compare work for each divergent rev vs its comparator
+/// jobs carry full revs (request + map keys); abbreviation happens at render
 pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<CompareJob>, usize) {
     let mut jobs = groups
         .iter()
         .filter(|group| group_diverges(group.1))
         .filter_map(|(id, entries)| {
             let base = comparator(entries)?;
-            if base.rev.is_empty() {
-                return None; // nothing concrete to compare against
+            if base.rev.is_empty() || !forge_compare::comparable(id) {
+                return None; // nothing concrete to compare, or no api to ask
             }
-            let (owner, repo) = id.github_parts()?;
             let mut seen = HashSet::new();
             let heads = entries
                 .iter()
@@ -90,11 +86,9 @@ pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<Comp
                 })
                 .map(|entry| {
                     CompareJob {
-                        id:    id.clone(),
-                        owner: owner.to_owned(),
-                        repo:  repo.to_owned(),
-                        base:  base.rev.clone(),
-                        head:  entry.rev.clone(),
+                        id:   id.clone(),
+                        base: base.rev.clone(),
+                        head: entry.rev.clone(),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -108,9 +102,9 @@ pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<Comp
     (jobs, capped)
 }
 
-/// ask github for the direction of every divergent rev against its comparator
-/// runs in bounded parallel batches keyed by `(group id, full rev)`
-/// misses are reported and fall back to commit-date ordering
+/// forge direction of each divergent rev vs its comparator
+/// bounded parallel batches keyed by `(group id, full rev)`
+/// misses fall back to commit-date ordering
 pub(super) fn ahead_behind(
     groups: &BTreeMap<SourceId, Vec<Entry>>,
 ) -> HashMap<(SourceId, String), CompareStatus> {
@@ -121,12 +115,7 @@ pub(super) fn ahead_behind(
     for chunk in jobs.chunks(MAX_LIVE_COMPARE_JOBS) {
         let batch = chunk
             .into_par_iter()
-            .map(|job| {
-                (
-                    job,
-                    github_compare::compare(&job.owner, &job.repo, &job.base, &job.head),
-                )
-            })
+            .map(|job| (job, forge_compare::compare(&job.id, &job.base, &job.head)))
             .collect::<Vec<_>>();
         for (job, attempt) in batch {
             if let Some(status) = surfaced.record(attempt) {
@@ -320,6 +309,25 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].base, "1111111111111111111111111111111111111111");
         assert_eq!(jobs[0].head, "2222222222222222222222222222222222222222");
+    }
+
+    #[test]
+    fn compare_jobs_cover_gitlab_but_skip_plain_git() {
+        let mut groups = BTreeMap::new();
+        groups.insert(source_id("gitlab:o/r"), vec![
+            entry(&[], "base", "base", Some(10)),
+            entry(&["dep"], "head", "head", Some(20)),
+        ]);
+        groups.insert(source_id("git+https://example.com/o/r.git"), vec![
+            entry(&[], "base", "base", Some(10)),
+            entry(&["dep"], "head", "head", Some(20)),
+        ]);
+
+        let (jobs, capped) = compare_jobs(&groups);
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, source_id("gitlab:o/r"));
+        assert_eq!(capped, 0);
     }
 
     #[test]

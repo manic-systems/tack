@@ -12,14 +12,14 @@ use crate::{
         github::CompareStatus,
     },
     lock::LockedNode,
+    source::id::SourceId,
 };
 
 #[derive(PartialEq, Eq, Hash)]
 struct CompareKey {
-    owner: String,
-    repo:  String,
-    base:  String,
-    head:  String,
+    id:   SourceId,
+    base: String,
+    head: String,
 }
 
 pub(super) struct CompareAttempt {
@@ -27,8 +27,27 @@ pub(super) struct CompareAttempt {
     cause:  Option<String>,
 }
 
-pub(super) fn compare(owner: &str, repo: &str, base: &str, head: &str) -> CompareAttempt {
-    let (maybe_status, cause) = tolerate(fetch::github::compare_status(owner, repo, base, head));
+/// whether `compare` has a forge api to ask for this identity
+pub(super) const fn comparable(id: &SourceId) -> bool {
+    matches!(*id, SourceId::Github { .. } | SourceId::Gitlab { .. })
+}
+
+pub(super) fn compare(id: &SourceId, base: &str, head: &str) -> CompareAttempt {
+    let (maybe_status, cause) = match *id {
+        SourceId::Github {
+            ref owner,
+            ref repo,
+        } => tolerate(fetch::github::compare_status(owner, repo, base, head)),
+        SourceId::Gitlab {
+            ref host,
+            ref owner,
+            ref repo,
+        } => tolerate(fetch::gitlab::compare_status(host, owner, repo, base, head)),
+        SourceId::Git { .. }
+        | SourceId::Tarball { .. }
+        | SourceId::Indirect { .. }
+        | SourceId::Path { .. } => (None, None),
+    };
     CompareAttempt {
         status: maybe_status.flatten(),
         cause,
@@ -86,9 +105,7 @@ impl CachedComparator {
             return *cached;
         }
 
-        let status = self
-            .surfaced
-            .record(compare(&key.owner, &key.repo, &key.base, &key.head));
+        let status = self.surfaced.record(compare(&key.id, &key.base, &key.head));
         self.cache.insert(key, status);
         status
     }
@@ -99,30 +116,13 @@ impl CachedComparator {
 }
 
 fn locked_compare_key(base: &LockedNode, head: &LockedNode) -> Option<CompareKey> {
-    let (
-        &LockedNode::Github {
-            owner: ref base_owner,
-            repo: ref base_repo,
-            rev: ref base_rev,
-            ..
-        },
-        &LockedNode::Github {
-            owner: ref head_owner,
-            repo: ref head_repo,
-            rev: ref head_rev,
-            ..
-        },
-    ) = (base, head)
-    else {
-        return None;
-    };
-    if !base_owner.eq_ignore_ascii_case(head_owner) || !base_repo.eq_ignore_ascii_case(head_repo) {
+    let id = SourceId::from_locked(base).filter(comparable)?;
+    if SourceId::from_locked(head).as_ref() != Some(&id) {
         return None;
     }
     Some(CompareKey {
-        owner: base_owner.to_owned(),
-        repo:  base_repo.to_owned(),
-        base:  base_rev.as_ref()?.to_owned(),
-        head:  head_rev.as_ref()?.to_owned(),
+        id,
+        base: base.rev()?.to_owned(),
+        head: head.rev()?.to_owned(),
     })
 }

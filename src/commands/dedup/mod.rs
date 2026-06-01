@@ -3,7 +3,7 @@
 mod auto;
 mod compare;
 mod follows;
-mod github_compare;
+mod forge_compare;
 mod model;
 mod reporting;
 mod scan;

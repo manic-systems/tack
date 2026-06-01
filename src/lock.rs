@@ -14,6 +14,8 @@ use serde::{
 };
 use serde_json::Value;
 
+use crate::source::gitlab;
+
 /// on-disk lock file keyed by input name
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockFile {
@@ -165,6 +167,7 @@ pub enum LockedNode {
         repo:          String,
         #[serde(
             default = "default_gitlab_host",
+            deserialize_with = "deserialize_gitlab_host",
             skip_serializing_if = "is_default_gitlab_host"
         )]
         host:          String,
@@ -251,6 +254,34 @@ impl LockedNode {
         NarHash: Into<String>,
     {
         Self::Github {
+            owner:         owner.into(),
+            repo:          repo.into(),
+            rev:           Some(rev.into()),
+            nar_hash:      Some(nar_hash.into()),
+            last_modified: Some(last_modified),
+            extra:         BTreeMap::new(),
+        }
+    }
+
+    pub fn new_gitlab<Host, Owner, Repo, Rev, NarHash>(
+        host: Host,
+        owner: Owner,
+        repo: Repo,
+        rev: Rev,
+        nar_hash: NarHash,
+        last_modified: i64,
+    ) -> Self
+    where
+        Host: Into<String>,
+        Owner: Into<String>,
+        Repo: Into<String>,
+        Rev: Into<String>,
+        NarHash: Into<String>,
+    {
+        let raw_host = host.into();
+        let canonical_host = gitlab::normalize_host(&raw_host);
+        Self::Gitlab {
+            host:          canonical_host,
             owner:         owner.into(),
             repo:          repo.into(),
             rev:           Some(rev.into()),
@@ -385,8 +416,15 @@ where
     Ok(locked.and_then(|value| LockedNode::from_value(value).ok()))
 }
 
+fn deserialize_gitlab_host<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(|host| gitlab::normalize_host(&host))
+}
+
 fn is_default_gitlab_host(host: &str) -> bool {
-    host == "gitlab.com"
+    gitlab::is_default_host(host)
 }
 
 #[expect(
@@ -576,6 +614,45 @@ mod tests {
             node(json!({"type": "path", "path": "/p"})),
             LockedNode::Path { ref path, .. } if path == "/p"
         ));
+    }
+
+    #[test]
+    fn gitlab_host_is_canonicalized_at_lock_boundary() {
+        let parsed = node(json!({
+            "type": "gitlab",
+            "host": "GITLAB.COM:443",
+            "owner": "o",
+            "repo": "r"
+        }));
+        assert!(matches!(
+            parsed,
+            LockedNode::Gitlab { ref host, .. } if host == "gitlab.com"
+        ));
+
+        let default_host = serde_json::to_value(LockedNode::new_gitlab(
+            "GitLab.Com:443",
+            "o",
+            "r",
+            "rev",
+            "sha256-n",
+            10,
+        ))
+        .unwrap();
+        assert!(default_host.get("host").is_none());
+
+        let self_hosted = serde_json::to_value(LockedNode::new_gitlab(
+            "GitLab.Example.Com:8443",
+            "o",
+            "r",
+            "rev",
+            "sha256-n",
+            10,
+        ))
+        .unwrap();
+        assert_eq!(
+            self_hosted.get("host").and_then(Value::as_str),
+            Some("gitlab.example.com:8443")
+        );
     }
 
     #[test]
