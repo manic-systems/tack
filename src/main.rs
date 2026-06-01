@@ -16,6 +16,7 @@ mod pins;
 mod project;
 mod render;
 mod report;
+mod scan_diagnostic;
 mod shorturl;
 mod source;
 mod ui;
