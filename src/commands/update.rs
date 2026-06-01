@@ -596,3 +596,77 @@ pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::LockObservation;
+    use crate::{
+        fetch::github::CompareStatus,
+        lock::LockedNode,
+    };
+
+    fn github_node(rev: &str) -> LockedNode {
+        LockedNode::new_github("o", "r", rev, "sha256-n", 0)
+    }
+
+    fn node_rev(node: &LockedNode) -> &str {
+        node.rev().unwrap()
+    }
+
+    #[test]
+    fn auto_dedup_prefers_ahead_candidate_despite_older_timestamp() {
+        let winner = LockObservation::choose(
+            vec![
+                LockObservation::new(300, github_node("base")),
+                LockObservation::new(100, github_node("ahead")),
+            ],
+            |base, head| {
+                match (node_rev(base), node_rev(head)) {
+                    ("base", "ahead") => Some(CompareStatus::Ahead),
+                    _ => None,
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(node_rev(&winner), "ahead");
+    }
+
+    #[test]
+    fn auto_dedup_keeps_base_when_candidate_is_behind_despite_newer_timestamp() {
+        let winner = LockObservation::choose(
+            vec![
+                LockObservation::new(100, github_node("base")),
+                LockObservation::new(500, github_node("behind")),
+            ],
+            |base, head| {
+                match (node_rev(base), node_rev(head)) {
+                    ("base", "behind") => Some(CompareStatus::Behind),
+                    _ => None,
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(node_rev(&winner), "base");
+    }
+
+    #[test]
+    fn auto_dedup_falls_back_to_timestamp_for_diverged_histories() {
+        let winner = LockObservation::choose(
+            vec![
+                LockObservation::new(100, github_node("base")),
+                LockObservation::new(500, github_node("amended")),
+            ],
+            |base, head| {
+                match (node_rev(base), node_rev(head)) {
+                    ("base", "amended") => Some(CompareStatus::Diverged),
+                    _ => None,
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(node_rev(&winner), "amended");
+    }
+}

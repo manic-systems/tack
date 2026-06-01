@@ -107,5 +107,8 @@ fn recorded(
     if outcome.captured_external {
         println!("captured external edit");
     }
+    if let Some(err) = outcome.history_error {
+        eprintln!("tack: failed to record undo history: {err:#}");
+    }
     outcome.result
 }
