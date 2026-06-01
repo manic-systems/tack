@@ -106,7 +106,7 @@ pub fn print_report(report: &DedupReport) {
             let blank = " ".repeat(mw);
             for name in &rev.names {
                 let shown = name.sources.len().min(MAX_SOURCES);
-                for (idx, source) in name.sources.iter().take(shown).enumerate() {
+                for (idx, source_path) in name.sources.iter().take(shown).enumerate() {
                     let rev_cell = if idx == 0 { rendered_rev.as_str() } else { "" };
                     let mark_cell = if idx == 0 {
                         mark_on.as_str()
@@ -114,8 +114,8 @@ pub fn print_report(report: &DedupReport) {
                         blank.as_str()
                     };
                     let name_cell = if idx == 0 { name.name.as_str() } else { "" };
-                    let source = source_label(source);
-                    println!("  {rev_cell:rw$} {mark_cell} {name_cell:nw$}  {source}");
+                    let rendered_source = source_label(source_path);
+                    println!("  {rev_cell:rw$} {mark_cell} {name_cell:nw$}  {rendered_source}");
                 }
                 if name.sources.len() > shown {
                     let extra = name.sources.len() - shown;

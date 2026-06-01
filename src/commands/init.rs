@@ -178,3 +178,24 @@ run `tack init --resolver` to update a drifted resolver
 "
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::wires_overrides;
+
+    #[test]
+    fn wires_overrides_ignores_comments() {
+        assert!(
+            wires_overrides(
+                "outputs = { self, ... }@args: (import ./.tack) { overrides = args.tackOverrides \
+                 or +             {}; };"
+            )
+        );
+        assert!(!wires_overrides(
+            "# threads args.tackOverrides through outputs\n{ }"
+        ));
+        assert!(!wires_overrides(
+            "outputs = { self }: { }; # no tackOverrides here"
+        ));
+    }
+}
