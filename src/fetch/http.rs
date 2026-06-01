@@ -37,6 +37,7 @@ const TACK_USER_AGENT: &str = "tack";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const APPLICATION_JSON: &str = "application/json";
+const GITLAB_TOKEN_HEADER: &str = "PRIVATE-TOKEN";
 
 fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
@@ -59,6 +60,13 @@ fn github_token() -> Option<&'static str> {
         .as_deref()
 }
 
+fn gitlab_token() -> Option<&'static str> {
+    static TOKEN: OnceLock<Option<String>> = OnceLock::new();
+    TOKEN
+        .get_or_init(|| env::var("GITLAB_TOKEN").ok())
+        .as_deref()
+}
+
 pub type FetchResult<T> = StdResult<T, FetchError>;
 
 /// why a github query or raw-file probe failed
@@ -69,8 +77,8 @@ pub enum FetchError {
     #[error("{what} not found")]
     NotFound { what: String },
 
-    /// github rejected or lacked credentials
-    #[error("github auth: {what}")]
+    /// request was rejected or lacked credentials
+    #[error("auth: {what}")]
     Auth { what: String },
 
     /// host was unreachable or returned a transient server error
@@ -88,6 +96,10 @@ pub enum FetchError {
     /// github returned a response shape this version of tack does not know
     #[error("unexpected github response: {0}")]
     Github(String),
+
+    /// gitlab returned a response shape tack does not recognize
+    #[error("unexpected gitlab response: {0}")]
+    Gitlab(String),
 }
 
 impl FetchError {
@@ -172,6 +184,14 @@ impl HttpClient {
         }
     }
 
+    fn with_optional_gitlab_auth<B>(request: RequestBuilder<B>) -> RequestBuilder<B> {
+        if let Some(token) = gitlab_token() {
+            request.header(GITLAB_TOKEN_HEADER, token)
+        } else {
+            request
+        }
+    }
+
     fn with_github_auth<B>(request: RequestBuilder<B>, token: &str) -> RequestBuilder<B> {
         request.header(AUTHORIZATION, Self::bearer(token))
     }
@@ -202,6 +222,31 @@ impl HttpClient {
 
         serde_json::from_str::<T>(&body)
             .map_err(|err| FetchError::Github(format!("api {url}: invalid json: {err}")))
+    }
+
+    pub(super) fn gitlab_json<T>(self, url: &str, timeout_limit: Option<Duration>) -> FetchResult<T>
+    where
+        T: DeserializeOwned,
+    {
+        let mut req =
+            Self::with_optional_gitlab_auth(self.get(url).header(ACCEPT, APPLICATION_JSON));
+        if let Some(timeout) = timeout_limit {
+            req = req.config().timeout_global(Some(timeout)).build();
+        }
+
+        let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
+        let status = resp.status();
+        if status != 200 {
+            return Err(FetchError::from_status(status.as_u16(), url));
+        }
+
+        let body = resp
+            .body_mut()
+            .read_to_string()
+            .map_err(|err| FetchError::Transport(format!("read gitlab api {url}: {err}")))?;
+
+        serde_json::from_str::<T>(&body)
+            .map_err(|err| FetchError::Gitlab(format!("api {url}: invalid json: {err}")))
     }
 
     pub(super) fn github_graphql<V, T>(self, query: &str, variables: &V) -> FetchResult<T>
@@ -342,6 +387,7 @@ mod tests {
             FetchError::from_status(503, "x"),
             FetchError::Transport(_)
         ));
+        assert_eq!(FetchError::from_status(403, "x").to_string(), "auth: x");
     }
 
     // ureq surfaces non-2xx as `Error::StatusCode`
