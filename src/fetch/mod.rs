@@ -23,6 +23,7 @@ use ureq::{
 mod archive;
 mod git;
 pub mod github;
+pub mod gitlab;
 pub mod http;
 mod time;
 
@@ -57,11 +58,43 @@ pub fn current_rev_compared(source: &Source, old_rev: Option<&str>) -> Result<Cu
             ref reff,
             rev: ref pinned,
         } => github::current_rev_compared(owner, repo, reff.as_deref(), pinned.as_deref(), old_rev),
-        Source::Git {
-            ref url,
-            ref reff,
+        Source::Git { .. } => {
+            let target = source
+                .git_target()
+                .context("git-backed source missing git target")?;
+            git::current_rev_compared(target.url.as_ref(), target.reff, target.rev, old_rev)
+        },
+        Source::Gitlab {
+            ref host,
+            ref owner,
+            ref repo,
             rev: ref pinned,
-        } => git::current_rev_compared(url, reff.as_deref(), pinned.as_deref(), old_rev),
+            ..
+        } => {
+            let target = source
+                .git_target()
+                .context("git-backed source missing git target")?;
+            // ls-remote resolves the rev (and peels tags); a pinned rev never
+            // moves, so only a resolved moving ref gets a directional compare
+            let current =
+                git::current_rev_compared(target.url.as_ref(), target.reff, target.rev, old_rev)?;
+            let comparison = if pinned.is_some() {
+                current.comparison
+            } else {
+                gitlab::refine_comparison(
+                    host,
+                    owner,
+                    repo,
+                    old_rev,
+                    &current.rev,
+                    current.comparison,
+                )
+            };
+            Ok(CurrentRev {
+                rev: current.rev,
+                comparison,
+            })
+        },
         Source::Tarball { ref url } => {
             let http = HttpClient::global();
             let resp = http
@@ -142,10 +175,17 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
             let format = detect_tar_format(url).wrap_err_with(|| format!("tarball {url}"))?;
             unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
         },
-        LockedNode::Gitlab { .. }
-        | LockedNode::Fixed { .. }
-        | LockedNode::Indirect { .. }
-        | LockedNode::Path { .. } => {
+        LockedNode::Gitlab {
+            ref host,
+            ref owner,
+            ref repo,
+            rev: ref locked_rev,
+            ..
+        } => {
+            let resolved_rev = locked_rev.as_deref().context("gitlab node missing rev")?;
+            gitlab::fetch_locked_tree_into(host, owner, repo, resolved_rev, dir)
+        },
+        LockedNode::Fixed { .. } | LockedNode::Indirect { .. } | LockedNode::Path { .. } => {
             bail!("cannot inspect tree for lock type '{}'", node.kind())
         },
     }
@@ -160,11 +200,19 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
             ref reff,
             rev: ref pinned,
         } => github::fetch_tree_into(owner, repo, reff.as_deref(), pinned.as_deref(), dir),
-        Source::Git {
-            ref url,
-            ref reff,
-            ref rev,
-        } => git::fetch_tree_into(url, reff.as_deref(), rev.as_deref(), submodules, dir),
+        Source::Git { .. } | Source::Gitlab { .. } => {
+            reject_gitlab_submodules(source, submodules)?;
+            let target = source
+                .git_target()
+                .context("git-backed source missing git target")?;
+            git::fetch_tree_into(
+                target.url.as_ref(),
+                target.reff,
+                target.rev,
+                submodules,
+                dir,
+            )
+        },
         Source::Tarball { ref url } => {
             let mut resp = HttpClient::global()
                 .get(url.as_str())
@@ -201,11 +249,15 @@ pub fn fetch_pin_compared(
             ref reff,
             rev: ref pinned,
         } => github::fetch_pin_compared(owner, repo, reff.as_deref(), pinned.clone(), old_rev),
-        Source::Git {
-            ref url,
-            ref reff,
-            rev: ref rev_arg,
-        } => git::fetch_pin_compared(url, reff.as_deref(), rev_arg.as_deref(), submodules),
+        Source::Git { .. } | Source::Gitlab { .. } => {
+            reject_gitlab_submodules(source, submodules)?;
+            let target = source
+                .git_target()
+                .context("git-backed source missing git target")?;
+            let checkout =
+                git::fetch_pin_checkout(target.url.as_ref(), target.reff, target.rev, submodules)?;
+            git_pin_from_checkout(source, checkout, submodules)
+        },
         Source::Tarball { ref url } => {
             let mut resp = HttpClient::global()
                 .get(url.as_str())
@@ -233,6 +285,57 @@ pub fn fetch_pin_compared(
             })
         },
     }
+}
+
+fn reject_gitlab_submodules(source: &Source, submodules: bool) -> Result<()> {
+    if submodules && matches!(source, Source::Gitlab { .. }) {
+        bail!("gitlab sources do not support submodules; use a git+ URL for submodule pins");
+    }
+    Ok(())
+}
+
+fn git_pin_from_checkout(
+    source: &Source,
+    checkout: git::PinCheckout,
+    submodules: bool,
+) -> Result<FetchedPin> {
+    let rev = checkout.rev.clone();
+    let node = match *source {
+        Source::Git { ref url, .. } => {
+            LockedNode::new_git(
+                url,
+                checkout.refname,
+                rev.clone(),
+                checkout.nar_hash,
+                checkout.last_modified,
+                submodules,
+            )
+        },
+        Source::Gitlab {
+            ref host,
+            ref owner,
+            ref repo,
+            ..
+        } => {
+            LockedNode::new_gitlab(
+                host,
+                owner,
+                repo,
+                rev.clone(),
+                checkout.nar_hash,
+                checkout.last_modified,
+            )
+        },
+        Source::Github { .. } | Source::Tarball { .. } => {
+            bail!("non-git source cannot be locked from git checkout")
+        },
+    };
+
+    Ok(FetchedPin {
+        node,
+        rev,
+        comparison: BranchComparison::none(),
+    })
 }
 
 /// locked url for a tarball response
@@ -280,15 +383,28 @@ pub fn raw(url: &str) -> FetchResult<String> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::{
         current_rev_compared,
+        fetch_locked_tree_into,
+        git,
+        git_pin_from_checkout,
         github::{
             BranchComparison,
             CompareStatus,
         },
         parse_link_immutable,
+        reject_gitlab_submodules,
     };
-    use crate::source::Source;
+    use crate::{
+        lock::LockedNode,
+        source::Source,
+    };
+
+    fn node(value: serde_json::Value) -> LockedNode {
+        LockedNode::from_value(value).unwrap()
+    }
 
     #[test]
     fn github_pinned_rev_skips_branch_comparison() {
@@ -329,6 +445,99 @@ mod tests {
         assert_eq!(
             parse_link_immutable(mixed).as_deref(),
             Some("https://x/imm")
+        );
+    }
+
+    #[test]
+    fn gitlab_locked_tree_fetch_requires_locked_rev() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = fetch_locked_tree_into(
+            &node(json!({
+                "type": "gitlab",
+                "host": "git.example.com",
+                "owner": "o",
+                "repo": "r"
+            })),
+            tmp.path(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "gitlab node missing rev");
+    }
+
+    #[test]
+    fn gitlab_source_checkout_locks_as_gitlab_node() {
+        let source = "gitlab:Group/Repo/main?host=gitlab.example.com&rev=abc123"
+            .parse::<Source>()
+            .unwrap();
+        let fetched = git_pin_from_checkout(
+            &source,
+            git::PinCheckout {
+                rev:           "abc123".to_owned(),
+                nar_hash:      "sha256-n".to_owned(),
+                last_modified: 1700,
+                refname:       "refs/heads/main".to_owned(),
+            },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(fetched.rev, "abc123");
+        assert_eq!(fetched.comparison, BranchComparison::none());
+        assert_eq!(
+            fetched.node,
+            node(json!({
+                "type": "gitlab",
+                "host": "gitlab.example.com",
+                "owner": "Group",
+                "repo": "Repo",
+                "rev": "abc123",
+                "narHash": "sha256-n",
+                "lastModified": 1_700_i64
+            }))
+        );
+    }
+
+    #[test]
+    fn gitlab_git_url_checkout_stays_generic_git_lock() {
+        let source = "git+https://gitlab.com/Group/Repo.git?ref=main&rev=abc123"
+            .parse::<Source>()
+            .unwrap();
+        let fetched = git_pin_from_checkout(
+            &source,
+            git::PinCheckout {
+                rev:           "abc123".to_owned(),
+                nar_hash:      "sha256-n".to_owned(),
+                last_modified: 1_700,
+                refname:       "refs/heads/main".to_owned(),
+            },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fetched.node,
+            node(json!({
+                "type": "git",
+                "url": "https://gitlab.com/Group/Repo.git",
+                "ref": "refs/heads/main",
+                "rev": "abc123",
+                "narHash": "sha256-n",
+                "lastModified": 1_700_i64,
+                "submodules": true
+            }))
+        );
+    }
+
+    #[test]
+    fn first_class_gitlab_sources_reject_submodules() {
+        let source = "gitlab:Group/Repo/main".parse::<Source>().unwrap();
+
+        let err = reject_gitlab_submodules(&source, true).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("gitlab sources do not support submodules")
         );
     }
 }

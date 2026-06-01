@@ -61,18 +61,23 @@ pub(super) struct ScanTarget {
 
 impl ScanTarget {
     pub(super) fn fetch_and_scan(&self) -> Result<ScanResult> {
-        if let SourceRef::Locked(ref node) = self.source
-            && let Some((documents, diagnostics)) =
-                RawProbe::documents(node, &self.path).into_documents()
-        {
-            let mut result = documents.scan(&self.path);
-            result.diagnostics.extend(diagnostics);
-            return Ok(result);
-        }
+        let probe_diagnostics = if let SourceRef::Locked(ref node) = self.source {
+            let (maybe_documents, diagnostics) = RawProbe::documents(node, &self.path).into_parts();
+            if let Some(documents) = maybe_documents {
+                let mut result = documents.scan(&self.path);
+                result.diagnostics.extend(diagnostics);
+                return Ok(result);
+            }
+            diagnostics
+        } else {
+            Vec::new()
+        };
 
         let tmp = tempfile::tempdir()?;
         let root = self.fetch_tree(tmp.path())?;
-        Ok(ScanDocuments::from_tree(&root).scan(&self.path))
+        let mut result = ScanDocuments::from_tree(&root).scan(&self.path);
+        result.diagnostics.extend(probe_diagnostics);
+        Ok(result)
     }
 
     fn fetch_tree(&self, dir: &Path) -> Result<PathBuf> {
@@ -141,9 +146,8 @@ impl RawProbeOutcome {
         }
     }
 
-    fn into_documents(self) -> Option<(ScanDocuments, Vec<ScanDiagnostic>)> {
-        let documents = self.documents?;
-        Some((documents, self.diagnostics.into_iter().collect()))
+    fn into_parts(self) -> (Option<ScanDocuments>, Vec<ScanDiagnostic>) {
+        (self.documents, self.diagnostics.into_iter().collect())
     }
 }
 
@@ -183,11 +187,10 @@ impl<'a> RawProbe<'a> {
             tack_pins:  probe(ScanFile::TackPins),
             tack_lock:  probe(ScanFile::TackLock),
         };
-        if !self.forge.authoritative()
-            && documents.flake_lock.is_none()
+        let all_missing = documents.flake_lock.is_none()
             && documents.tack_pins.is_none()
-            && documents.tack_lock.is_none()
-        {
+            && documents.tack_lock.is_none();
+        if (!self.forge.authoritative() || !diagnostics.is_empty()) && all_missing {
             RawProbeOutcome {
                 documents: None,
                 diagnostics,
@@ -420,6 +423,10 @@ mod tests {
         LockedNode::new_github(owner, repo, rev, "sha256-test", 0)
     }
 
+    fn gitlab_node(host: &str, owner: &str, repo: &str, rev: &str) -> LockedNode {
+        LockedNode::new_gitlab(host, owner, repo, rev, "sha256-test", 0)
+    }
+
     fn assert_parse_diagnostic(diagnostic: &ScanDiagnostic, path: &[String], file: ScanFile) {
         assert_eq!(diagnostic.path(), path);
         assert!(
@@ -450,6 +457,64 @@ mod tests {
         let second = SourceRef::Url("github:Owner/Repo?rev=rev-b".to_owned()).key();
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn source_ref_key_distinguishes_gitlab_locked_identity_and_revision() {
+        let base = SourceRef::Locked(gitlab_node("gitlab.com", "Owner", "Repo", "rev-a")).key();
+        let same = SourceRef::Locked(gitlab_node("GITLAB.COM:443", "owner", "repo", "rev-a")).key();
+        let different_rev =
+            SourceRef::Locked(gitlab_node("gitlab.com", "owner", "repo", "rev-b")).key();
+        let different_host = SourceRef::Locked(gitlab_node(
+            "gitlab.example.com:8443",
+            "owner",
+            "repo",
+            "rev-a",
+        ))
+        .key();
+
+        assert_eq!(base, same);
+        assert_ne!(base, different_rev);
+        assert_ne!(base, different_host);
+    }
+
+    #[test]
+    fn scan_records_gitlab_locked_nodes() {
+        let path = vec!["root".to_owned()];
+        let result = ScanDocuments {
+            flake_lock: Some(
+                r#"{
+                    "root": "root",
+                    "nodes": {
+                        "root": {},
+                        "dep": {
+                            "locked": {
+                                "type": "gitlab",
+                                "host": "GitLab.Example.Com:8443",
+                                "owner": "Group/Sub",
+                                "repo": "Repo",
+                                "rev": "abc123",
+                                "lastModified": 1700
+                            }
+                        }
+                    }
+                }"#
+                .to_owned(),
+            ),
+            tack_pins:  None,
+            tack_lock:  None,
+        }
+        .scan(&path);
+
+        assert_eq!(result.findings.len(), 1);
+        let finding = &result.findings[0];
+        assert_eq!(
+            finding.identity.to_string(),
+            "gitlab:gitlab.example.com:8443/group/sub/repo"
+        );
+        assert_eq!(finding.entry.name, "dep");
+        assert_eq!(finding.entry.rev, "abc123");
+        assert_eq!(finding.entry.lm, Some(1_700));
     }
 
     #[test]
