@@ -2,7 +2,13 @@
 
 use std::error::Error;
 
-use crate::lock::LockedNode;
+use crate::{
+    lock::LockedNode,
+    source::{
+        gitlab,
+        host,
+    },
+};
 
 /// body decoder applied after a raw-file http get
 pub type DecoderError = Box<dyn Error + Send + Sync>;
@@ -27,7 +33,7 @@ static GITHUB_RAW_SCHEME: HostScheme = HostScheme {
 };
 
 static GITLAB_SCHEME: HostScheme = HostScheme {
-    matches: |host| host == "gitlab.com" || host.starts_with("gitlab."),
+    matches: host::is_gitlab,
     build:   |base, rev, file| format!("{base}/-/raw/{rev}/{file}"),
     decoder: None,
 };
@@ -97,9 +103,17 @@ impl Forge {
                 )
             },
             LockedNode::Git { ref url, .. } => {
-                let base = url.strip_suffix(".git").unwrap_or(url).to_owned();
-                let scheme = scheme_for_git_url(&base);
-                (base, false, scheme)
+                if let Some(repo) = gitlab::parse_git_url(url) {
+                    (
+                        format!("https://{}/{}/{}", repo.host, repo.owner, repo.repo),
+                        false,
+                        &GITLAB_SCHEME,
+                    )
+                } else {
+                    let base = url.strip_suffix(".git").unwrap_or(url).to_owned();
+                    let scheme = scheme_for_git_url(&base);
+                    (base, false, scheme)
+                }
             },
             LockedNode::Tarball { .. }
             | LockedNode::Fixed { .. }
@@ -199,6 +213,32 @@ mod tests {
             "https://git.example.com/o/r/-/raw/REV/f"
         );
         assert!(forge.authoritative());
+    }
+
+    #[test]
+    fn git_node_gitlab_scheme_ignores_host_case_and_port() {
+        let forge = Forge::from_locked(&node(
+            json!({"type": "git", "url": "https://GitLab.Example.Com:8443/o/r.git"}),
+        ))
+        .unwrap();
+        assert!(!forge.authoritative());
+        assert_eq!(
+            forge.raw_file_url("REV", "f").url,
+            "https://gitlab.example.com:8443/o/r/-/raw/REV/f"
+        );
+    }
+
+    #[test]
+    fn git_node_gitlab_ssh_scheme_uses_https_raw_probe() {
+        let forge = Forge::from_locked(&node(
+            json!({"type": "git", "url": "ssh://git@gitlab.example.com:2222/group/sub/repo.git"}),
+        ))
+        .unwrap();
+        assert!(!forge.authoritative());
+        assert_eq!(
+            forge.raw_file_url("REV", "f").url,
+            "https://gitlab.example.com/group/sub/repo/-/raw/REV/f"
+        );
     }
 
     #[test]

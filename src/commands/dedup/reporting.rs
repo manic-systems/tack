@@ -117,9 +117,9 @@ pub(super) fn build_report(
 }
 
 /// suggested top-level name for a transitive-only group
-/// uses the github repo basename when available, else the shortest alias seen
+/// uses the forge repo basename when available, else the shortest alias seen
 pub(super) fn pick_name(id: &SourceId, aliases: &BTreeSet<String>) -> String {
-    if let Some((_, repo)) = id.github_parts() {
+    if let Some(repo) = id.repo_name() {
         return repo.trim_end_matches(".nix").replace('.', "-");
     }
     aliases
@@ -163,7 +163,25 @@ mod tests {
     }
 
     #[test]
-    fn pick_name_falls_back_to_shortest_alias_for_non_github() {
+    fn pick_name_uses_gitlab_repo_basename() {
+        assert_eq!(
+            pick_name(
+                &source_id("gitlab:Veloren%2Fdev/rfcs.nix"),
+                &set(&["veloren-rfcs", "rfcs"])
+            ),
+            "rfcs"
+        );
+        assert_eq!(
+            pick_name(
+                &source_id("git+https://gitlab.com/NixOS/nixpkgs.lib.git"),
+                &set(&["nixpkgs-lib"])
+            ),
+            "nixpkgs-lib"
+        );
+    }
+
+    #[test]
+    fn pick_name_falls_back_to_shortest_alias_without_repo_coordinates() {
         let aliases = set(&["my-pin", "the-tarball"]);
         assert_eq!(pick_name(&source_id("https://x/y"), &aliases), "my-pin");
     }

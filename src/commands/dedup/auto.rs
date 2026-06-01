@@ -12,7 +12,7 @@ use rayon::prelude::{
 };
 
 use super::{
-    github_compare::CachedComparator,
+    forge_compare::CachedComparator,
     scan::{
         strip_disambiguator,
         try_raw_file,
@@ -213,7 +213,9 @@ fn scan_input(
             .diagnostics
             .insert(ScanDiagnostic::fetch(&path, ScanFile::FlakeLock, cause));
     }
-    let raw_body = maybe_raw.flatten()?;
+    let Some(raw_body) = maybe_raw.flatten() else {
+        return (!batch.diagnostics.is_empty()).then_some(batch);
+    };
     let parsed = match lock::FlakeLock::parse(&raw_body) {
         Ok(parsed) => parsed,
         Err(err) => {
