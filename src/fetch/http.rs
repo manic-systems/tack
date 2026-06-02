@@ -101,16 +101,34 @@ fn non_empty_env(key: &str) -> Option<String> {
 }
 
 /// `host = token` pairs scraped from every nix.conf in the standard ladder,
-/// merged with later files winning
+/// merged with later files winning. empty unless opted into (see
+/// [`nix_conf_scrape_enabled`])
 fn nix_conf_tokens() -> &'static HashMap<String, String> {
     static TOKENS: OnceLock<HashMap<String, String>> = OnceLock::new();
     TOKENS.get_or_init(|| {
         let mut tokens = HashMap::new();
-        for file in nix_conf_files() {
-            scrape_access_tokens(&file, &mut tokens, 0);
+        if nix_conf_scrape_enabled() {
+            for file in nix_conf_files() {
+                scrape_access_tokens(&file, &mut tokens, 0);
+            }
         }
         tokens
     })
+}
+
+/// scraping another tool's nix.conf for `access-tokens` and replaying them to a
+/// forge is invasive, so it is opt-in via `TACK_NIX_CONF_TOKENS` (the NixOS
+/// module exposes this as `programs.tack.nixConfTokens`)
+fn nix_conf_scrape_enabled() -> bool {
+    env_flag_enabled(env::var("TACK_NIX_CONF_TOKENS").ok().as_deref())
+}
+
+/// an on/off env flag: present and not an explicit falsey value
+fn env_flag_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::to_ascii_lowercase).as_deref(),
+        Some(flag) if !matches!(flag, "" | "0" | "false" | "no" | "off")
+    )
 }
 
 /// nix.conf locations, lowest precedence first: system, then user, then the
@@ -356,7 +374,8 @@ impl HttpClient {
         if token_for_host(host).is_none() {
             record_token_warning(format!(
                 "no access token for {host}; gitlab comparison may be rate-limited or unavailable \
-                 for private projects (set GITLAB_TOKEN or a nix.conf access-tokens entry)"
+                 for private projects (set GITLAB_TOKEN, or opt into nix.conf access-tokens with \
+                 TACK_NIX_CONF_TOKENS=1)"
             ));
         }
         let mut req =
@@ -388,7 +407,8 @@ impl HttpClient {
         let token = token_for_host("github.com").ok_or_else(|| {
             record_token_warning(
                 "no GitHub token; rev comparison falls back to the rate-limited REST API (set \
-                 GITHUB_TOKEN, GH_TOKEN, or a nix.conf access-tokens entry)"
+                 GITHUB_TOKEN or GH_TOKEN, or opt into nix.conf access-tokens with \
+                 TACK_NIX_CONF_TOKENS=1)"
                     .to_owned(),
             );
             FetchError::Auth {
@@ -510,8 +530,21 @@ mod tests {
 
     use super::{
         FetchError,
+        env_flag_enabled,
         scrape_access_tokens,
     };
+
+    #[test]
+    fn env_flag_is_on_only_for_truthy_values() {
+        assert!(env_flag_enabled(Some("1")));
+        assert!(env_flag_enabled(Some("true")));
+        assert!(env_flag_enabled(Some("YES")));
+        assert!(!env_flag_enabled(None));
+        assert!(!env_flag_enabled(Some("")));
+        assert!(!env_flag_enabled(Some("0")));
+        assert!(!env_flag_enabled(Some("false")));
+        assert!(!env_flag_enabled(Some("off")));
+    }
 
     #[test]
     fn access_tokens_scrape_follows_include_and_lets_later_lines_win() {

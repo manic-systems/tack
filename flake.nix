@@ -37,6 +37,8 @@
         description = "tack-wired flake, recomposable via tackOverrides";
       };
 
+      nixosModules.default = import ./nix/module.nix self;
+
       packages = forAllSystems (
         system:
         let
