@@ -620,6 +620,7 @@ pub fn compare_status(
     GithubClient::global().compare_status(owner, repo, base, head)
 }
 
+#[derive(Clone, Debug)]
 pub struct CommitLog {
     /// freshest commits in the range, newest first
     pub fresh: Vec<(String, String)>,

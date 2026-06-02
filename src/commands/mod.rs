@@ -15,6 +15,10 @@ use crate::{
         Unpack,
     },
     project::Project,
+    report::{
+        LookReport,
+        UpdateReport,
+    },
 };
 
 const STARTER_TOML: &str = include_str!("../../assets/pins.toml");
@@ -70,12 +74,22 @@ pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool
     edit::alias(project, name, template, remove)
 }
 
-pub fn update(project: &Project, names: &[String], accept: bool) -> Result<()> {
+pub fn update(project: &Project, names: &[String], accept: bool) -> Result<UpdateReport> {
     update::update(project, names, accept)
 }
 
-pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<()> {
+pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<LookReport> {
     update::look(project, names, verbose)
+}
+
+/// `update` driving the terminal spinner; for the binary, not the library
+pub fn update_cli(project: &Project, names: &[String], accept: bool) -> Result<()> {
+    update::update_cli(project, names, accept)
+}
+
+/// `look` driving the terminal spinner; for the binary, not the library
+pub fn look_cli(project: &Project, names: &[String], verbose: bool) -> Result<()> {
+    update::look_cli(project, names, verbose)
 }
 
 pub fn dedup(project: &Project) -> Result<()> {

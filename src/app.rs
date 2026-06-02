@@ -33,7 +33,7 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
                 commands::init(&project, force, resolver, flake)
             })
         },
-        Command::Look { names, verbose } => commands::look(&project, &names, verbose),
+        Command::Look { names, verbose } => commands::look_cli(&project, &names, verbose),
         Command::Dedup => commands::dedup(&project),
         Command::Undo { list } => commands::undo(&project, list),
         Command::Redo => commands::redo(&project),
@@ -44,7 +44,7 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
                 format!("update {}", names.join(" "))
             };
             recorded(&project, &label, || {
-                commands::update(&project, &names, accept)
+                commands::update_cli(&project, &names, accept)
             })
         },
         Command::Add {
