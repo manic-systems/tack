@@ -40,6 +40,10 @@ pub fn short(rev: &str) -> String {
     if let Some(b64) = rev.strip_prefix("sha256-") {
         return format!("sha256-{}", b64.chars().take(12).collect::<String>());
     }
+    // a local path pin carries its path as the "rev"; show it whole
+    if rev.starts_with('/') || rev.starts_with("./") || rev.starts_with("../") {
+        return rev.to_owned();
+    }
     rev.chars().take(7).collect()
 }
 
