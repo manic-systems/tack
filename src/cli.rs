@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use eyre::{
-    ContextCompat as _,
-    Result,
-    bail,
-    eyre,
-};
+use pound::Parse;
 
 use crate::pins::{
     PinType,
     Unpack,
 };
 
+/// the parsed subcommand, in the shape the rest of tack consumes
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Init {
@@ -49,197 +45,247 @@ pub enum Command {
         list: bool,
     },
     Redo,
-    Help,
 }
 
-pub fn parse() -> Result<Command> {
-    parse_parser(lexopt::Parser::from_env())
+/// flake-like toml nix pins, lazily fetched and transformed
+#[derive(Parse)]
+#[pound(name = "tack", version = "0.1.1")]
+enum Cli {
+    /// scaffold a .tack dir (default.nix, pins.toml, pins.lock.json)
+    Init {
+        /// overwrite tack-managed files that already exist
+        #[pound(long)]
+        force:    bool,
+        /// refresh only the resolver (default.nix)
+        #[pound(long)]
+        resolver: bool,
+        /// also scaffold a recomposable flake.nix
+        #[pound(long)]
+        flake:    bool,
+    },
+    /// fetch pins and rewrite the lock
+    Update {
+        /// relock drifted pins instead of failing
+        #[pound(long)]
+        accept: bool,
+        /// pins to update (default: all)
+        names:  Vec<String>,
+    },
+    /// show upstream drift without writing the lock
+    Look {
+        /// list the freshest commits for each changed pin
+        #[pound(short, long)]
+        verbose: bool,
+        /// pins to inspect (default: all)
+        names:   Vec<String>,
+    },
+    /// add a pin
+    Add {
+        /// input name
+        name:       String,
+        /// pin url (shorturl ok; ?rev=<sha> pins a commit)
+        url:        String,
+        /// pin a source tree only, no flake eval
+        #[pound(long, group = "kind")]
+        fetch:      bool,
+        /// pin a fixed-output derivation
+        #[pound(long, group = "kind")]
+        fixed:      bool,
+        /// for --fixed: how to materialise the download
+        #[pound(long)]
+        unpack:     Option<Unpack>,
+        /// subdir holding flake.nix
+        #[pound(long)]
+        dir:        Option<String>,
+        /// fetch git submodules
+        #[pound(long)]
+        submodules: bool,
+        /// follows child=parent (repeatable; a bare child follows its namesake)
+        #[pound(long)]
+        follows:    Vec<String>,
+    },
+    /// remove a pin
+    Rm {
+        /// input name
+        name: String,
+    },
+    /// define or remove a shorturl alias
+    Alias {
+        /// alias name
+        name:     String,
+        /// expansion template containing {path}
+        template: Option<String>,
+        /// remove the alias instead of defining it
+        #[pound(long)]
+        rm:       bool,
+    },
+    /// collapse duplicate pins onto a single source
+    Dedup,
+    /// revert the last tack edit
+    Undo {
+        /// list the undo history
+        #[pound(long)]
+        list: bool,
+    },
+    /// reapply an undone edit
+    Redo,
 }
 
-#[expect(clippy::too_many_lines, reason = "it's a simple parser")]
-fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
-    use lexopt::prelude::*;
+/// parse argv into a [`Command`], printing help/version or an error and exiting
+/// on `-h`/`--help`/`-V` or a malformed command line
+pub fn parse() -> Command {
+    Cli::parse().into()
+}
 
-    let sub = match parser.next()? {
-        Some(Value(value)) => value.string().map_err(|_| eyre!("invalid subcommand"))?,
-        Some(Long("help") | Short('h')) | None => return Ok(Command::Help),
-        Some(arg) => return Err(arg.unexpected().into()),
-    };
-
-    match sub.as_str() {
-        "init" => {
-            let mut force = false;
-            let mut resolver = false;
-            let mut flake = false;
-            while let Some(arg) = parser.next()? {
-                match arg {
-                    Long("force") => force = true,
-                    Long("resolver") => resolver = true,
-                    Long("flake") => flake = true,
-                    Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
-                }
-            }
-            Ok(Command::Init {
+impl From<Cli> for Command {
+    fn from(cli: Cli) -> Self {
+        match cli {
+            Cli::Init {
                 force,
                 resolver,
                 flake,
-            })
-        },
-        "update" | "look" => {
-            let mut names = Vec::new();
-            let mut accept = false;
-            let mut verbose = false;
-            while let Some(arg) = parser.next()? {
-                match arg {
-                    Long("accept") if sub == "update" => accept = true,
-                    Long("verbose") | Short('v') if sub == "look" => verbose = true,
-                    Value(value) => {
-                        names.push(value.string().map_err(|_| eyre!("bad name"))?);
-                    },
-                    Short(_) | Long(_) => return Err(arg.unexpected().into()),
+            } => {
+                Self::Init {
+                    force,
+                    resolver,
+                    flake,
                 }
-            }
-            Ok(if sub == "update" {
-                Command::Update { names, accept }
-            } else {
-                Command::Look { names, verbose }
-            })
-        },
-        "add" => {
-            let (mut name, mut url) = (None, None);
-            let mut pin_type = PinType::Flake;
-            let mut unpack = Option::<Unpack>::None;
-            let mut dir = None;
-            let mut submodules = false;
-            let mut follows = Vec::new();
-            while let Some(arg) = parser.next()? {
-                match arg {
-                    Long("fetch" | "no-flake") => pin_type = PinType::Fetch,
-                    Long("fixed") => pin_type = PinType::Fixed,
-                    Long("unpack") => {
-                        let value = parser.value()?.string().map_err(|_| eyre!("bad unpack"))?;
-                        unpack = Some(value.parse::<Unpack>()?);
-                    },
-                    Long("submodules") => submodules = true,
-                    Long("dir") => {
-                        dir = Some(parser.value()?.string().map_err(|_| eyre!("bad dir"))?);
-                    },
-                    Long("follows") => {
-                        let string = parser.value()?.string().map_err(|_| eyre!("bad follows"))?;
-                        follows.push(parse_follows(&string));
-                    },
-                    Value(value) => {
-                        let str = value.string().map_err(|_| eyre!("bad argument"))?;
-                        if name.is_none() {
-                            name = Some(str);
-                        } else if url.is_none() {
-                            url = Some(str);
-                        } else {
-                            bail!("add takes at most <name> <url>");
-                        }
-                    },
-                    Short(_) | Long(_) => return Err(arg.unexpected().into()),
-                }
-            }
-            Ok(Command::Add {
-                name: name.context("add: missing <name>")?,
-                url: url.context("add: missing <url>")?,
-                pin_type,
+            },
+            Cli::Update { accept, names } => Self::Update { names, accept },
+            Cli::Look { verbose, names } => Self::Look { names, verbose },
+            Cli::Add {
+                name,
+                url,
+                fetch,
+                fixed,
                 unpack,
                 dir,
                 submodules,
                 follows,
-            })
-        },
-        "rm" => {
-            let mut name = None;
-            while let Some(arg) = parser.next()? {
-                match arg {
-                    Value(value) if name.is_none() => {
-                        name = Some(value.string().map_err(|_| eyre!("bad name"))?);
-                    },
-                    Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
+            } => {
+                let pin_type = if fixed {
+                    PinType::Fixed
+                } else if fetch {
+                    PinType::Fetch
+                } else {
+                    PinType::Flake
+                };
+                Self::Add {
+                    name,
+                    url,
+                    pin_type,
+                    unpack,
+                    dir,
+                    submodules,
+                    follows: follows.iter().map(|rule| parse_follows(rule)).collect(),
                 }
-            }
-            Ok(Command::Rm {
-                name: name.context("rm: missing <name>")?,
-            })
-        },
-        "alias" => {
-            let mut rm = false;
-            let (mut name_arg, mut template) = (None, None);
-            while let Some(arg) = parser.next()? {
-                match arg {
-                    Long("rm") => rm = true,
-                    Value(value) => {
-                        let str = value.string().map_err(|_| eyre!("bad argument"))?;
-                        if name_arg.is_none() {
-                            name_arg = Some(str);
-                        } else if template.is_none() {
-                            template = Some(str);
-                        } else {
-                            bail!("alias takes at most <name> <template>");
-                        }
-                    },
-                    Short(_) | Long(_) => return Err(arg.unexpected().into()),
-                }
-            }
-            let name = name_arg.context("alias: missing <name>")?;
-            if !rm && template.is_none() {
-                bail!("alias: missing <template> (or pass --rm)");
-            }
-            Ok(Command::Alias { name, template, rm })
-        },
-        "dedup" => {
-            if let Some(arg) = parser.next()? {
-                return Err(arg.unexpected().into());
-            }
-            Ok(Command::Dedup)
-        },
-        "undo" => {
-            let mut list = false;
-            while let Some(arg) = parser.next()? {
-                match arg {
-                    Long("list") => list = true,
-                    Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
-                }
-            }
-            Ok(Command::Undo { list })
-        },
-        "redo" => {
-            if let Some(arg) = parser.next()? {
-                return Err(arg.unexpected().into());
-            }
-            Ok(Command::Redo)
-        },
-        _ => Ok(Command::Help),
+            },
+            Cli::Rm { name } => Self::Rm { name },
+            Cli::Alias { name, template, rm } => Self::Alias { name, template, rm },
+            Cli::Dedup => Self::Dedup,
+            Cli::Undo { list } => Self::Undo { list },
+            Cli::Redo => Self::Redo,
+        }
     }
 }
 
 /// child=parent, or bare child follows the same-named pin
-fn parse_follows(str: &str) -> (String, String) {
-    match str.split_once('=') {
+fn parse_follows(rule: &str) -> (String, String) {
+    match rule.split_once('=') {
         Some((child, parent)) => (child.to_owned(), parent.to_owned()),
-        None => (str.to_owned(), str.to_owned()),
+        None => (rule.to_owned(), rule.to_owned()),
     }
 }
 
 #[cfg(test)]
+#[expect(clippy::panic, reason = "panic is the test-failure coping mechanism")]
 mod tests {
+    use pound::Parse as _;
+
     use super::{
+        Cli,
         Command,
-        parse_parser,
+    };
+    use crate::pins::{
+        PinType,
+        Unpack,
     };
 
     fn parse(args: &[&str]) -> Command {
-        parse_parser(lexopt::Parser::from_args(args)).expect("arguments should parse")
+        Cli::try_parse_from(args.iter().copied())
+            .expect("arguments should parse")
+            .into()
     }
 
     #[test]
-    fn help_aliases_parse_as_help() {
-        assert_eq!(parse(&[]), Command::Help);
-        assert_eq!(parse(&["help"]), Command::Help);
-        assert_eq!(parse(&["-h"]), Command::Help);
-        assert_eq!(parse(&["--help"]), Command::Help);
+    fn init_flags_map_through() {
+        assert_eq!(parse(&["init", "--resolver"]), Command::Init {
+            force:    false,
+            resolver: true,
+            flake:    false,
+        });
+    }
+
+    #[test]
+    fn update_collects_names_and_accept() {
+        assert_eq!(parse(&["update", "a", "b", "--accept"]), Command::Update {
+            names:  vec!["a".to_owned(), "b".to_owned()],
+            accept: true,
+        });
+    }
+
+    #[test]
+    fn look_takes_short_verbose() {
+        assert_eq!(parse(&["look", "-v"]), Command::Look {
+            names:   Vec::new(),
+            verbose: true,
+        });
+    }
+
+    #[test]
+    fn add_maps_fetch_unpack_and_follows() {
+        assert_eq!(
+            parse(&[
+                "add",
+                "pkg",
+                "github:o/r",
+                "--fixed",
+                "--unpack",
+                "tarball",
+                "--follows",
+                "nixpkgs=host",
+                "--follows",
+                "self",
+            ]),
+            Command::Add {
+                name:       "pkg".to_owned(),
+                url:        "github:o/r".to_owned(),
+                pin_type:   PinType::Fixed,
+                unpack:     Some(Unpack::Tarball),
+                dir:        None,
+                submodules: false,
+                follows:    vec![
+                    ("nixpkgs".to_owned(), "host".to_owned()),
+                    ("self".to_owned(), "self".to_owned()),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn add_defaults_to_a_flake_pin() {
+        let Command::Add { pin_type, .. } = parse(&["add", "n", "github:o/r"]) else {
+            panic!("expected add");
+        };
+        assert_eq!(pin_type, PinType::Flake);
+    }
+
+    #[test]
+    fn alias_rm_parses() {
+        assert_eq!(parse(&["alias", "gh", "--rm"]), Command::Alias {
+            name:     "gh".to_owned(),
+            template: None,
+            rm:       true,
+        });
     }
 }

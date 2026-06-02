@@ -148,35 +148,6 @@ then set `[tack] recomposable = true` in .tack/pins.toml."
     );
 }
 
-pub fn help() {
-    println!(
-        "tack: flake-like toml nix pins, lazily fetched and transformed
-
-usage:
-  tack [-h|--help|help]
-  tack init [--force] [--resolver] [--flake]
-  tack update [names...] [--accept]
-  tack look [names...] [--verbose|-v]
-  tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
-                        [--dir <d>] [--submodules] [--follows c=p]...
-  tack rm <name>
-  tack alias <name> <template> | tack alias --rm <name>
-  tack dedup
-  tack undo [--list]
-  tack redo
-
-pin types: flake (default), fetch (source tree only), fixed (FOD)
-follows keys may be scoped flake:<name> or tack:<name> (no prefix implies both)
-
-tack lives in ./.tack/ by default
-use `import ./.tack` to use inputs
-
-run `tack init --resolver` to update a drifted resolver
-
-"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::wires_overrides;
