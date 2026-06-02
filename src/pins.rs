@@ -21,6 +21,7 @@ use eyre::{
     WrapErr as _,
     bail,
 };
+use pound::ValueEnum;
 use toml_edit::{
     DocumentMut,
     Item,
@@ -66,7 +67,7 @@ impl FromStr for PinType {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
 pub enum Unpack {
     Tarball,
     File,

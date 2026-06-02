@@ -90,10 +90,6 @@ pub fn redo(project: &Project) -> Result<()> {
     undo::redo(project)
 }
 
-pub fn help() {
-    init::help();
-}
-
 /// swallow a fetch result: expected misses vanish, suspicious failures return a
 /// cause string
 fn tolerate<T>(result: StdResult<T, FetchError>) -> (Option<T>, Option<String>) {

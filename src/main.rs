@@ -34,13 +34,7 @@ fn main() -> TackExit {
         return TackExit::Other;
     }
 
-    let cmd = match cli::parse() {
-        Ok(cmd) => cmd,
-        Err(err) => {
-            print_report(&err);
-            return TackExit::Usage;
-        },
-    };
+    let cmd = cli::parse();
 
     match app::run(cmd) {
         Ok(()) => TackExit::Success,
@@ -53,7 +47,6 @@ fn main() -> TackExit {
 
 enum TackExit {
     Success,
-    Usage,
     Config,
     Fetch,
     Other,
@@ -77,7 +70,6 @@ impl Termination for TackExit {
     fn report(self) -> ExitCode {
         match self {
             Self::Success => ExitCode::SUCCESS,
-            Self::Usage => ExitCode::from(2),
             Self::Config => ExitCode::from(3),
             Self::Fetch => ExitCode::from(4),
             Self::Other => ExitCode::FAILURE,
