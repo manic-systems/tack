@@ -37,7 +37,10 @@ use crate::{
     },
     project::Project,
     render,
-    source::Source,
+    source::{
+        self,
+        Source,
+    },
     ui::{
         Display,
         PinStatus,
@@ -101,6 +104,12 @@ impl<'a> UpdateRunner<'a> {
         self.display.set(index, PinStatus::Fetching { frame: 0 });
         let old_rev = old.and_then(LockedNode::rev);
         match UpdateFetch::fetch(input, expanded, old_rev) {
+            // nothing moved: the fetched node is byte-identical to the lock
+            // (the steady state for a path pin, which has no upstream rev)
+            Ok(UpdateFetch { ref node, .. }) if old == Some(node) => {
+                self.display.set(index, PinStatus::NoChange);
+                None
+            },
             // for fixed pins sha256 is the identity; any mismatch is drift
             Ok(UpdateFetch { node, rev, .. })
                 if input.pin_type == PinType::Fixed
@@ -183,7 +192,7 @@ pub fn update(project: &Project, names: &[String], accept: bool) -> Result<()> {
         .par_iter()
         .enumerate()
         .map(|(i, inp)| {
-            let expanded = shorturls.expand(&inp.url);
+            let expanded = source::localize_path_url(&shorturls.expand(&inp.url), project.dir());
             let old = lk.get(&inp.name);
             runner.update_one(i, inp, &expanded, old)
         })
@@ -258,7 +267,7 @@ pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<()> {
             return;
         }
         display.set(i, PinStatus::Fetching { frame: 0 });
-        let expanded = shorturls.expand(&inp.url);
+        let expanded = source::localize_path_url(&shorturls.expand(&inp.url), project.dir());
         let source = match expanded.parse::<Source>() {
             Ok(source) => source,
             Err(err) => {
@@ -266,6 +275,10 @@ pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<()> {
                 return;
             },
         };
+        if matches!(source, Source::Path { .. }) {
+            display.set(i, PinStatus::Skipped("local path".into()));
+            return;
+        }
         let old = lk
             .get(&inp.name)
             .and_then(LockedNode::rev)

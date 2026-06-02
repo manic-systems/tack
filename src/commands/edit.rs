@@ -16,7 +16,10 @@ use crate::{
     },
     project::Project,
     render,
-    source::Source,
+    source::{
+        self,
+        Source,
+    },
 };
 
 pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
@@ -46,7 +49,7 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
     project.save_pins(&doc)?;
 
     let shorturls = doc.shorturls();
-    let expanded = shorturls.expand(url);
+    let expanded = source::localize_path_url(&shorturls.expand(url), project.dir());
     let fetched = match pin_type {
         PinType::Fixed => fetch::fetch_fixed_pin(&expanded, unpack),
         PinType::Flake | PinType::Fetch => {
