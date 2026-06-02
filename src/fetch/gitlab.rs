@@ -45,7 +45,9 @@ impl GitlabClient {
         new: &str,
     ) -> FetchResult<Option<CompareStatus>> {
         let url = merge_base_url(host, owner, repo, old, new);
-        let parsed: GitlabCommit = self.http.gitlab_json(&url, Some(Duration::from_secs(5)))?;
+        let parsed: GitlabCommit =
+            self.http
+                .gitlab_json(&url, host, Some(Duration::from_secs(5)))?;
         Ok(parsed.id.as_deref().map(|base| classify(base, old, new)))
     }
 }
