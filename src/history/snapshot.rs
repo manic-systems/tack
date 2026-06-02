@@ -30,7 +30,7 @@ use crate::project::{
     Project,
 };
 
-/// verbatim bytes of the three state files that determine tack's state
+/// verbatim bytes of the three state files
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     toml:     Option<String>,
@@ -39,7 +39,6 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// read the current on-disk state of all three files
     pub fn capture(project: &Project) -> Self {
         Self {
             toml:     fs::read_to_string(project.pins_path()).ok(),
@@ -178,7 +177,7 @@ impl<'de> Deserialize<'de> for SnapshotRef {
     }
 }
 
-/// stable sha256 hex digest of text
+/// stable sha256 hex; survives across runs unlike `legacy_content_key`
 pub(super) fn content_key(text: &str) -> String {
     HEXLOWER.encode(&Sha256::hash(text.as_bytes()))
 }
@@ -192,7 +191,7 @@ pub(super) fn legacy_content_key(text: &str) -> String {
     format!("{:016x}{:016x}", hi.finish(), lo.finish())
 }
 
-/// write content to a hash-named file and return the name
+/// write content to a hash-named file, return the name
 pub(super) fn persist(
     snaps: &Path,
     content: Option<&str>,

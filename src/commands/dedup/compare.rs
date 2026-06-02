@@ -37,9 +37,8 @@ pub(super) struct CompareJob {
     pub head: String,
 }
 
-/// the entry a group is measured against
-/// returns the version pinned at top, else the newest transitive version by
-/// `lastModified`, else the lowest-named entry for a deterministic fallback
+/// the entry a group is measured against: top pin, else newest transitive by
+/// `lastModified`, else lowest-named for determinism
 pub(super) fn comparator(entries: &[Entry]) -> Option<&Entry> {
     entries
         .iter()
@@ -54,7 +53,7 @@ pub(super) fn comparator(entries: &[Entry]) -> Option<&Entry> {
         .or_else(|| entries.iter().min_by_key(|entry| entry.name.as_str()))
 }
 
-/// a group is worth printing only when its revs disagree
+/// worth printing only when revs disagree
 pub(super) fn group_diverges(entries: &[Entry]) -> bool {
     let mut revs = entries.iter().map(entry_compare_rev);
     revs.next()

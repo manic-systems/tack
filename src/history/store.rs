@@ -39,7 +39,7 @@ use crate::project::{
     Project,
 };
 
-/// undo-history store for one project
+/// undo history for one project
 pub struct HistoryStore {
     dir: PathBuf,
 }
@@ -56,7 +56,7 @@ impl HistoryStore {
         Self { dir }
     }
 
-    /// undo-history dir for project, under the xdg state dir
+    /// history dir for project, under the xdg state dir
     pub fn for_project(project: &Project) -> Self {
         Self {
             dir: store_dir(project),

@@ -22,7 +22,7 @@ fn follow_target(
     if path.is_empty() {
         return None;
     }
-    // a bare follow reaches both sides, but a `flake:`/`tack:` follow only its own
+    // bare follow reaches both sides; `flake:`/`tack:` only its own
     let scoped = format!("{}:{name}", side.as_str());
     let excluded = top_input.is_some_and(|inp| inp.excludes.contains(name));
     if !excluded

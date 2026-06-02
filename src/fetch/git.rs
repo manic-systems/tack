@@ -44,7 +44,7 @@ pub(super) fn current_rev_compared(
     pinned: Option<&str>,
     old_rev: Option<&str>,
 ) -> Result<CurrentRev> {
-    // a pinned rev never moves, so report it without touching the network
+    // a pinned rev never moves, skip the network
     if let Some(pinned_rev) = pinned {
         let comparison = if old_rev == Some(pinned_rev) {
             BranchComparison::verified(CompareStatus::Identical)

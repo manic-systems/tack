@@ -22,7 +22,7 @@ const RESOLVER_NIX: &str = include_str!("../../.tack/default.nix");
 const SCAFFOLD_FLAKE: &str = include_str!("../../templates/default/flake.nix");
 const MARKER: &str = "# tack-managed resolver.";
 
-/// warn when the resolver carries tack's marker but drifted from the template
+/// warn when the resolver carries tack's marker but drifted from the template;
 /// silent for forked resolvers and uninitialized projects
 pub fn warn_stale_resolver(project: &Project) {
     let path = project.resolver_path();
@@ -94,9 +94,8 @@ pub fn help() {
     init::help();
 }
 
-/// disposition of a swallowed fetch result
-/// expected degraded-operation misses vanish silently
-/// fixable or suspicious failures return a cause string for later aggregation
+/// swallow a fetch result: expected misses vanish, suspicious failures return a
+/// cause string
 fn tolerate<T>(result: StdResult<T, FetchError>) -> (Option<T>, Option<String>) {
     match result {
         Ok(value) => (Some(value), None),

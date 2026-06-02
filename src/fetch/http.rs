@@ -69,23 +69,20 @@ fn gitlab_token() -> Option<&'static str> {
 
 pub type FetchResult<T> = StdResult<T, FetchError>;
 
-/// why a github query or raw-file probe failed
-/// callers match this to tolerate degraded paths while surfacing fixable ones
+/// why a github query or raw-file probe failed; callers match to tolerate
+/// degraded paths while surfacing fixable ones
 #[derive(thiserror::Error, Debug)]
 pub enum FetchError {
-    /// ref, commit, repo, or file that is not there
     #[error("{what} not found")]
     NotFound { what: String },
 
-    /// request was rejected or lacked credentials
     #[error("auth: {what}")]
     Auth { what: String },
 
-    /// host was unreachable or returned a transient server error
+    /// unreachable host or transient server error
     #[error("network: {0}")]
     Transport(String),
 
-    /// fetched raw-file body could not be decoded
     #[error("decoding {what}")]
     Decode {
         what:   String,
@@ -93,7 +90,7 @@ pub enum FetchError {
         source: Box<dyn Error + Send + Sync>,
     },
 
-    /// github returned a response shape this version of tack does not know
+    /// response shape tack does not recognize
     #[error("unexpected github response: {0}")]
     Github(String),
 
@@ -119,7 +116,6 @@ impl FetchError {
         }
     }
 
-    /// classify a ureq error
     #[expect(
         clippy::wildcard_enum_match_arm,
         reason = "ureq::Error is #[non_exhaustive]"
@@ -390,8 +386,8 @@ mod tests {
         assert_eq!(FetchError::from_status(403, "x").to_string(), "auth: x");
     }
 
-    // ureq surfaces non-2xx as `Error::StatusCode`
-    // auth/not-found classification must survive the error path too
+    // ureq surfaces non-2xx as Error::StatusCode; classification must survive
+    // the error path too
     #[test]
     fn ureq_status_errors_classify_like_responses() {
         assert!(matches!(

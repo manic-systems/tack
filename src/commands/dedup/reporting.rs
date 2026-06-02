@@ -51,7 +51,7 @@ pub(super) fn build_report(
     let mut report_groups = Vec::<DedupGroup>::new();
 
     for (id, entries) in groups {
-        // single source, or already aligned by follows, means nothing to show
+        // single source or already aligned: nothing to show
         if !group_diverges(entries) {
             continue;
         }
@@ -116,8 +116,8 @@ pub(super) fn build_report(
     }
 }
 
-/// suggested top-level name for a transitive-only group
-/// uses the forge repo basename when available, else the shortest alias seen
+/// suggested top-level name for a transitive-only group: forge repo basename,
+/// else shortest alias
 pub(super) fn pick_name(id: &SourceId, aliases: &BTreeSet<String>) -> String {
     if let Some(repo) = id.repo_name() {
         return repo.trim_end_matches(".nix").replace('.', "-");

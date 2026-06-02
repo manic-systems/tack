@@ -15,9 +15,8 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
 
     let project = Project::discover()?;
 
-    // every command except init and help nags when the resolver drifts.
-    // run after successful commands so it trails the output and never piles onto an
-    // unrelated failure
+    // resolver-drift nag, after success so it trails output and never piles onto a
+    // failure
     let check_resolver = !matches!(cmd, Command::Init { .. });
 
     let res = match cmd {

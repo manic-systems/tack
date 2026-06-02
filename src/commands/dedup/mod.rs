@@ -124,8 +124,8 @@ pub fn dedup(project: &Project) -> Result<()> {
         .collect::<Vec<ScanTarget>>();
     eprintln!("scanning {} pin(s)...", frontier.len());
 
-    // bfs level-by-level: dedup the frontier against `visited`, fetch the
-    // batch in parallel, then expand into the next frontier
+    // bfs level-by-level: dedup frontier against `visited`, fetch batch in
+    // parallel, expand into next frontier
     let mut visited = HashSet::<String>::new();
     while !frontier.is_empty() {
         let results = mem::take(&mut frontier)

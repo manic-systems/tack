@@ -45,13 +45,11 @@ pub enum PinStatus {
         rev:      String,
         accepted: bool,
     },
-    /// fixed-pin identity moved with old + new sha256 short forms
     FixedDrift {
         old:      String,
         new:      String,
         accepted: bool,
     },
-    /// pin intentionally skipped with a one-line note
     Skipped(String),
     Failed(String),
 }
@@ -129,7 +127,7 @@ impl Display {
         }
     }
 
-    /// finish + render the per-pin commit log under each updated entry
+    /// finish, rendering the per-pin commit log under each updated entry
     pub fn finish_verbose(mut self, logs: &[Option<CommitLog>]) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -138,7 +136,7 @@ impl Display {
         let states = self.states.lock().unwrap();
         let mut out = io::stdout().lock();
         if self.tty {
-            // rewind to the first pin row and clear what the spinner drew
+            // rewind to the first pin row, clear the spinner output
             let _ = write!(out, "\x1b[{}A\x1b[J", self.names.len());
             for ((name, status), entry) in self.names.iter().zip(states.iter()).zip(logs.iter()) {
                 let line = StatusLine::new(name, status);
