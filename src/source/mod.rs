@@ -8,6 +8,12 @@ mod host;
 
 use std::{
     borrow::Cow,
+    ffi::OsStr,
+    path::{
+        Component,
+        Path,
+        PathBuf,
+    },
     str::FromStr,
 };
 
@@ -39,6 +45,11 @@ pub enum Source {
     },
     Tarball {
         url: String,
+    },
+    /// a directory on disk, read at nix eval time. the stored spec is either
+    /// absolute or relative to the resolver dir; see [`localize_path_url`]
+    Path {
+        path: String,
     },
 }
 
@@ -75,7 +86,7 @@ impl Source {
                     rev:  rev.as_deref(),
                 })
             },
-            Self::Github { .. } | Self::Tarball { .. } => None,
+            Self::Github { .. } | Self::Tarball { .. } | Self::Path { .. } => None,
         }
     }
 }
@@ -123,6 +134,11 @@ impl FromStr for Source {
                 rev:  fields.rev.map(ToOwned::to_owned),
             });
         }
+        if let Some(spec) = expanded.strip_prefix("path:") {
+            return Ok(Self::Path {
+                path: spec.to_owned(),
+            });
+        }
         if expanded.starts_with("https://") || expanded.starts_with("http://") {
             return Ok(Self::Tarball {
                 url: expanded.to_owned(),
@@ -132,7 +148,94 @@ impl FromStr for Source {
     }
 }
 
-fn split_query_fragment(value: &str) -> (&str, Option<&str>) {
+/// resolve a `path:` url's spec for storage, choosing relative-to-resolver or
+/// absolute by where the target sits: relative when it lives within the
+/// project's neighbourhood (so it travels with a moved project), absolute when
+/// it points somewhere unrelated. non-`path:` urls pass through untouched.
+/// warns but does not fail when the target is missing
+pub fn localize_path_url(expanded: &str, tack_dir: &Path) -> String {
+    let Some(spec) = expanded.strip_prefix("path:") else {
+        return expanded.to_owned();
+    };
+    format!("path:{}", localize_path_spec(spec, tack_dir))
+}
+
+fn localize_path_spec(spec: &str, tack_dir: &Path) -> String {
+    let root = project_root_of(tack_dir);
+    let raw = if Path::new(spec).is_absolute() {
+        PathBuf::from(spec)
+    } else {
+        root.join(spec)
+    };
+    let target = lexical_normalize(&raw);
+    if !target.exists() {
+        eprintln!("tack: path pin target not found: {}", target.display());
+    }
+    // "near" the project = inside the directory that holds the project, so a
+    // sibling checkout resolves relative; anything further out stays absolute
+    let boundary = root.parent().unwrap_or(root.as_path());
+    if target.starts_with(boundary) {
+        relative_from(tack_dir, &target)
+    } else {
+        target.to_string_lossy().into_owned()
+    }
+}
+
+/// the project root holding a `.tack` dir, else the dir itself (legacy layout)
+fn project_root_of(tack_dir: &Path) -> PathBuf {
+    if tack_dir.file_name() == Some(OsStr::new(".tack")) {
+        tack_dir
+            .parent()
+            .map_or_else(|| tack_dir.to_path_buf(), Path::to_path_buf)
+    } else {
+        tack_dir.to_path_buf()
+    }
+}
+
+/// fold `.`/`..` out of a path without touching the filesystem
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            },
+            Component::CurDir => {},
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                out.push(component.as_os_str());
+            },
+        }
+    }
+    out
+}
+
+/// relative path from `base` to `target`, both absolute, via `..` hops
+fn relative_from(base: &Path, target: &Path) -> String {
+    let normalized_base = lexical_normalize(base);
+    let mut base_components = normalized_base.components().peekable();
+    let mut target_components = target.components().peekable();
+    while let (Some(left), Some(right)) = (base_components.peek(), target_components.peek()) {
+        if left == right {
+            base_components.next();
+            target_components.next();
+        } else {
+            break;
+        }
+    }
+    let mut rel = PathBuf::new();
+    for _ in base_components {
+        rel.push("..");
+    }
+    for component in target_components {
+        rel.push(component.as_os_str());
+    }
+    if rel.as_os_str().is_empty() {
+        rel.push(".");
+    }
+    rel.to_string_lossy().into_owned()
+}
+
+pub(in crate::source) fn split_query_fragment(value: &str) -> (&str, Option<&str>) {
     let without_fragment = strip_fragment(value);
     without_fragment
         .split_once('?')
@@ -183,7 +286,44 @@ fn parse_query_fields(query: Option<&str>) -> QueryFields<'_> {
 #[cfg(test)]
 #[expect(clippy::panic, reason = "panic is the test-failure coping mechanism")]
 mod tests {
-    use super::Source;
+    use std::path::Path;
+
+    use super::{
+        Source,
+        localize_path_url,
+    };
+
+    #[test]
+    fn path_url_is_a_path_source() {
+        match "path:../sibling".parse::<Source>().unwrap() {
+            Source::Path { path } => assert_eq!(path, "../sibling"),
+            Source::Github { .. }
+            | Source::Git { .. }
+            | Source::Gitlab { .. }
+            | Source::Tarball { .. } => panic!("expected path source"),
+        }
+    }
+
+    #[test]
+    fn localize_stores_near_paths_relative_and_far_paths_absolute() {
+        let tack = Path::new("/home/u/proj/.tack");
+        // a sibling checkout lives near the project: relative to the resolver
+        assert_eq!(
+            localize_path_url("path:../sibling", tack),
+            "path:../../sibling"
+        );
+        assert_eq!(
+            localize_path_url("path:./vendor/dep", tack),
+            "path:../vendor/dep"
+        );
+        // somewhere unrelated stays absolute so it survives a moved project
+        assert_eq!(
+            localize_path_url("path:/etc/nixos", tack),
+            "path:/etc/nixos"
+        );
+        // non-path urls pass through untouched
+        assert_eq!(localize_path_url("github:o/r", tack), "github:o/r");
+    }
 
     #[test]
     fn git_rev_query() {
@@ -196,7 +336,10 @@ mod tests {
                 assert_eq!(reff.as_deref(), Some("main"));
                 assert_eq!(rev.as_deref(), Some("abc123"));
             },
-            Source::Github { .. } | Source::Gitlab { .. } | Source::Tarball { .. } => {
+            Source::Github { .. }
+            | Source::Gitlab { .. }
+            | Source::Tarball { .. }
+            | Source::Path { .. } => {
                 panic!("expected git target")
             },
         }
@@ -208,7 +351,10 @@ mod tests {
                 assert_eq!(reff, None);
                 assert_eq!(rev.as_deref(), Some("deadbeef"));
             },
-            Source::Github { .. } | Source::Gitlab { .. } | Source::Tarball { .. } => {
+            Source::Github { .. }
+            | Source::Gitlab { .. }
+            | Source::Tarball { .. }
+            | Source::Path { .. } => {
                 panic!("expected git target")
             },
         }
@@ -225,7 +371,10 @@ mod tests {
                 assert_eq!(reff.as_deref(), Some("main"));
                 assert_eq!(rev.as_deref(), Some("abc123"));
             },
-            Source::Github { .. } | Source::Gitlab { .. } | Source::Tarball { .. } => {
+            Source::Github { .. }
+            | Source::Gitlab { .. }
+            | Source::Tarball { .. }
+            | Source::Path { .. } => {
                 panic!("expected git target")
             },
         }
@@ -250,7 +399,10 @@ mod tests {
                 assert_eq!(reff.as_deref(), Some("nixos-unstable"));
                 assert_eq!(rev.as_deref(), Some("abc123"));
             },
-            Source::Github { .. } | Source::Git { .. } | Source::Tarball { .. } => {
+            Source::Github { .. }
+            | Source::Git { .. }
+            | Source::Tarball { .. }
+            | Source::Path { .. } => {
                 panic!("expected gitlab target")
             },
         }
@@ -285,7 +437,10 @@ mod tests {
                 assert_eq!(reff, None);
                 assert_eq!(rev.as_deref(), Some("abc123"));
             },
-            Source::Git { .. } | Source::Gitlab { .. } | Source::Tarball { .. } => {
+            Source::Git { .. }
+            | Source::Gitlab { .. }
+            | Source::Tarball { .. }
+            | Source::Path { .. } => {
                 panic!("expected github target")
             },
         }
@@ -303,7 +458,10 @@ mod tests {
                     "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz"
                 );
             },
-            Source::Github { .. } | Source::Git { .. } | Source::Gitlab { .. } => {
+            Source::Github { .. }
+            | Source::Git { .. }
+            | Source::Gitlab { .. }
+            | Source::Path { .. } => {
                 panic!("expected tarball target")
             },
         }
@@ -312,7 +470,10 @@ mod tests {
             .unwrap()
         {
             Source::Tarball { .. } => {},
-            Source::Github { .. } | Source::Git { .. } | Source::Gitlab { .. } => {
+            Source::Github { .. }
+            | Source::Git { .. }
+            | Source::Gitlab { .. }
+            | Source::Path { .. } => {
                 panic!("expected tarball target")
             },
         }

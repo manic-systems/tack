@@ -77,6 +77,11 @@ impl SourceId {
                     url: strip_query_fragment(url).to_lowercase(),
                 }
             },
+            Source::Path { ref path } => {
+                Self::Path {
+                    path: path.to_lowercase(),
+                }
+            },
         }
     }
 
@@ -228,6 +233,10 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "tarball:https://x.com/a.tar.gz"
+        );
+        assert_eq!(
+            SourceId::from_url("path:/P/X").unwrap().to_string(),
+            "path:/p/x"
         );
         assert!(SourceId::from_url("weird:thing").is_none());
     }
