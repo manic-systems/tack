@@ -71,9 +71,9 @@ impl GithubClient {
         GithubRefCompareData::resolve(&data)
     }
 
-    /// when the graphql ref resolved but its comparison came back unavailable,
-    /// the rest compare endpoint may still classify the two revs
-    /// verified or not-attempted comparisons are left untouched
+    /// if graphql resolved the ref but left the comparison unavailable, the
+    /// rest compare endpoint may still classify the two revs; verified or
+    /// not-attempted comparisons are left alone
     fn backfill_comparison(
         self,
         owner: &str,
@@ -424,12 +424,12 @@ pub(super) fn fetch_pin_compared(
     })
 }
 
-/// direction of head relative to base, as reported by github's compare endpoint
+/// direction of head relative to base, per github's compare endpoint
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompareStatus {
-    /// head has commits base lacks (head is newer)
+    /// head has commits base lacks
     Ahead,
-    /// head is missing commits base has (head is older)
+    /// head is missing commits base has
     Behind,
     /// each side has unique commits
     Diverged,
@@ -600,8 +600,8 @@ query($owner: String!, $repo: String!, $old: String!) {
 
 fn graphql_ref_compare_status(status: &str) -> Option<CompareStatus> {
     Some(match status {
-        // ref.compare compares `targetRef` as base and old locked rev as head
-        // tack displays current ref relative to old rev, so ahead/behind invert
+        // ref.compare uses targetRef as base and old locked rev as head, but tack
+        // shows current ref relative to old rev, so ahead/behind invert
         "AHEAD" => CompareStatus::Behind,
         "BEHIND" => CompareStatus::Ahead,
         "DIVERGED" => CompareStatus::Diverged,
@@ -610,8 +610,7 @@ fn graphql_ref_compare_status(status: &str) -> Option<CompareStatus> {
     })
 }
 
-/// compare head against base via github's compare endpoint
-/// returns no answer when the response carries no recognized status
+/// compare head against base; none when the status is unrecognized
 pub fn compare_status(
     owner: &str,
     repo: &str,
@@ -624,14 +623,14 @@ pub fn compare_status(
 pub struct CommitLog {
     /// freshest commits in the range, newest first
     pub fresh: Vec<(String, String)>,
-    /// the currently-pinned (base) commit, for context
+    /// the currently-pinned (base) commit
     pub base:  Option<(String, String)>,
-    /// more than the requested limit existed
+    /// more than the limit existed
     pub more:  bool,
 }
 
-/// fresh commits between old and new revs, capped at limit
-/// none for non-github targets with no clone-free path yet
+/// fresh commits between old and new, capped at limit; none for non-github
+/// targets with no clone-free path yet
 pub fn commits_between(
     source: &Source,
     old: &str,
@@ -789,8 +788,7 @@ mod tests {
         );
     }
 
-    // our tarball nar hash must equal nix's `narHash` for this rev
-    // cargo test -- --ignored
+    // our tarball nar hash must equal nix's narHash for this rev
     #[test]
     #[ignore = "hits codeload.github.com"]
     fn github_narhash_matches_nix() {

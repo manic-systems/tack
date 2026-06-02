@@ -100,8 +100,8 @@ impl SourceRef {
     pub(super) fn key(&self) -> String {
         match *self {
             Self::Locked(ref node) => {
-                // Transitive dependencies can differ across revisions of the
-                // same source, so locked scan keys must include full_rev.
+                // transitive deps differ across revisions, so locked scan keys
+                // include full_rev
                 let rev = node.full_rev().unwrap_or("");
                 SourceId::from_locked(node).map_or_else(
                     || Self::tagged_key("locked", &[node.kind(), rev]),
@@ -164,8 +164,8 @@ impl<'a> RawProbe<'a> {
         })
     }
 
-    /// authoritative probes treat all-missing files as a real empty result
-    /// non-authoritative probes fall back to cloning
+    /// authoritative probes treat all-missing as a real empty result;
+    /// non-authoritative fall back to cloning
     fn documents(node: &'a LockedNode, path: &[String]) -> RawProbeOutcome {
         let Some(probe) = Self::from_locked(node) else {
             return RawProbeOutcome::empty();
@@ -377,7 +377,7 @@ impl ScanDocuments {
 }
 
 /// fetch one file from a locked node via raw http
-/// unknown hosts or missing revs tell the caller to skip the raw path
+/// `None` on unknown host or missing rev: caller skips the raw path
 pub(super) fn try_raw_file(
     node: &LockedNode,
     file: ScanFile,
@@ -389,8 +389,7 @@ pub(super) fn try_raw_file(
 }
 
 /// flake.lock disambiguates same-named nodes as `name_2`, `name_3`
-/// recover the original input name so dedup groups by what the parent flake
-/// actually declares
+/// recover the original name so dedup groups by what the parent flake declares
 pub(super) fn strip_disambiguator(key: &str) -> &str {
     let bytes = key.as_bytes();
     let mut i = bytes.len();

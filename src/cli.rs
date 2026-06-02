@@ -216,7 +216,7 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
     }
 }
 
-/// child=parent, or bare child -> follows the same-named pin
+/// child=parent, or bare child follows the same-named pin
 fn parse_follows(str: &str) -> (String, String) {
     match str.split_once('=') {
         Some((child, parent)) => (child.to_owned(), parent.to_owned()),

@@ -47,14 +47,13 @@ pub enum ConfigError {
     },
 }
 
-/// on-disk tack workspace and the files it owns
+/// on-disk tack workspace
 pub struct Project {
     dir: PathBuf,
 }
 
 impl Project {
-    /// discover the workspace from `$TACK_DIR`, cwd with legacy `inputs.nix`
-    /// or `cwd/.tack`
+    /// `$TACK_DIR`, else cwd with legacy `inputs.nix`, else `cwd/.tack`
     pub fn discover() -> StdResult<Self, ConfigError> {
         if let Some(dir) = env::var_os("TACK_DIR") {
             return Ok(Self::at(PathBuf::from(dir)));
@@ -140,7 +139,7 @@ impl Project {
     }
 }
 
-/// write `contents` to `path` via a sibling temp + rename
+/// atomic write via sibling temp + rename
 pub fn write_atomic(path: &Path, contents: &str) -> EyreResult<()> {
     let mut tmp_str = path.as_os_str().to_owned();
     tmp_str.push(".tmp");

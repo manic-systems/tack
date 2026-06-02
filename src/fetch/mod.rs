@@ -49,7 +49,7 @@ use crate::{
     source::Source,
 };
 
-/// upstream rev plus branch topology against the old revision when possible
+/// upstream rev plus branch topology vs old rev when possible
 pub fn current_rev_compared(source: &Source, old_rev: Option<&str>) -> Result<CurrentRev> {
     match *source {
         Source::Github {
@@ -113,10 +113,9 @@ pub fn current_rev_compared(source: &Source, old_rev: Option<&str>) -> Result<Cu
     }
 }
 
-/// fetch a fixed pin
-/// download url bytes, sha256 raw bytes rather than nar, and return the locked
-/// node plus the sha256 drift-display rev
-/// auto-detect unpack from the url extension when not supplied
+/// fetch a fixed pin: sha256 the raw bytes (not nar), return the node plus that
+/// hash as the drift-display rev. unpack auto-detected from the url if not
+/// given
 pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<(LockedNode, String)> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         bail!("fixed pins require a plain http(s) URL, got: {url}");
@@ -133,8 +132,7 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<(LockedNode,
         .wrap_err_with(|| format!("read body of {url}"))?;
     let sha256 = nar::hash_bytes(&bytes);
 
-    // detect from the user-supplied url first, since the immutable url may have
-    // lost the extension via a redirect (e.g. github archives -> codeload)
+    // user url first: the immutable url may have lost its extension to a redirect
     let kind = unpack.unwrap_or_else(|| {
         if Unpack::detect(url) == Unpack::Tarball
             || Unpack::detect(&immutable_url) == Unpack::Tarball
@@ -148,7 +146,6 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<(LockedNode,
     Ok((node, sha256))
 }
 
-/// download a locked tree into dir for inspection
 pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> {
     match *node {
         LockedNode::Github {
@@ -191,7 +188,6 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
     }
 }
 
-/// fetch a tree by parsed url into dir
 pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<PathBuf> {
     match *source {
         Source::Github {
@@ -224,7 +220,6 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
     }
 }
 
-/// fetch the tree, return (locked node, rev)
 pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, String)> {
     fetch_pin_compared(source, submodules, None).map(|fetched| (fetched.node, fetched.rev))
 }
@@ -235,8 +230,7 @@ pub struct FetchedPin {
     pub comparison: BranchComparison,
 }
 
-/// fetch the tree and return branch topology against the old revision when
-/// available
+/// fetch the tree plus branch topology vs old rev when available
 pub fn fetch_pin_compared(
     source: &Source,
     submodules: bool,
@@ -338,7 +332,6 @@ fn git_pin_from_checkout(
     })
 }
 
-/// locked url for a tarball response
 fn immutable_url_of(resp: &ureq_http::Response<Body>, fallback: &str) -> String {
     resp.headers()
         .get("Link")
@@ -354,7 +347,7 @@ fn immutable_url_of(resp: &ureq_http::Response<Body>, fallback: &str) -> String 
         })
 }
 
-/// extract the immutable url from an http link header per rfc 8288
+/// extract the immutable url from a Link header (rfc 8288)
 fn parse_link_immutable(header: &str) -> Option<String> {
     for raw_part in header.split(',') {
         let part = raw_part.trim();
@@ -376,7 +369,6 @@ fn parse_link_immutable(header: &str) -> Option<String> {
     None
 }
 
-/// get a text resource
 pub fn raw(url: &str) -> FetchResult<String> {
     HttpClient::global().raw_text(url)
 }
@@ -429,18 +421,18 @@ mod tests {
             Some("https://releases.nixos.org/nixos/abc/nixexprs.tar.xz")
         );
 
-        // rel=immutable_link is the historic name used by some nix releases
+        // rel=immutable_link is an older name some nix releases use
         let immutable_link = "<https://x/y>; rel=\"immutable_link\"";
         assert_eq!(
             parse_link_immutable(immutable_link).as_deref(),
             Some("https://x/y")
         );
 
-        // link header without immutable rel yields no answer, not the wrong url
+        // no immutable rel: no answer, not the wrong url
         let canonical = "<https://x/y>; rel=\"canonical\"";
         assert!(parse_link_immutable(canonical).is_none());
 
-        // multiple values use the immutable one regardless of position
+        // immutable wins regardless of position
         let mixed = "<https://x/canon>; rel=\"canonical\", <https://x/imm>; rel=\"immutable\"";
         assert_eq!(
             parse_link_immutable(mixed).as_deref(),
