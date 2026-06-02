@@ -38,6 +38,11 @@ pub use commands::{
     undo,
     update,
 };
+pub use fetch::github::{
+    BranchComparison,
+    CommitLog,
+    CompareStatus,
+};
 pub use lock::{
     LockFile,
     LockedNode,
@@ -51,6 +56,14 @@ pub use pins::{
 pub use project::{
     ConfigError,
     Project,
+};
+pub use report::{
+    LookOutcome,
+    LookReport,
+    PinLook,
+    PinUpdate,
+    UpdateOutcome,
+    UpdateReport,
 };
 pub use source::{
     Source,
