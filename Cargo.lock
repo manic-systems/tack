@@ -407,12 +407,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
-name = "lexopt"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "803ec87c9cfb29b9d2633f20cba1f488db3fd53f2158b1024cbefb47ba05d413"
-
-[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -588,6 +582,26 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "pound"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e1459849f57b13daaf5d18ee3a5106b01e3eac535667b27a5c2177bae84b8ff"
+dependencies = [
+ "pound-derive",
+]
+
+[[package]]
+name = "pound-derive"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd76899805d943d725b249877fb28d1c04c4914adf787e41ec30ff80c2160dcc"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "venial",
+]
 
 [[package]]
 name = "prettyplease"
@@ -801,8 +815,8 @@ dependencies = [
  "flate2",
  "git2",
  "hmac-sha256",
- "lexopt",
  "native-tls",
+ "pound",
  "rayon",
  "serde",
  "serde_json",
@@ -1002,6 +1016,16 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "venial"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a42528baceab6c7784446df2a10f4185078c39bf73dc614f154353f1a6b1229"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
 
 [[package]]
 name = "wasip2"

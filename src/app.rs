@@ -8,11 +8,6 @@ use crate::{
 };
 
 pub fn run(cmd: Command) -> eyre::Result<()> {
-    if matches!(cmd, Command::Help) {
-        commands::help();
-        return Ok(());
-    }
-
     let project = Project::discover()?;
 
     // resolver-drift nag, after success so it trails output and never piles onto a
@@ -42,7 +37,6 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
         Command::Dedup => commands::dedup(&project),
         Command::Undo { list } => commands::undo(&project, list),
         Command::Redo => commands::redo(&project),
-        Command::Help => Ok(()),
         Command::Update { names, accept } => {
             let label = if names.is_empty() {
                 "update".to_owned()
