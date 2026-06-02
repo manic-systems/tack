@@ -101,7 +101,7 @@ impl<'a> UpdateRunner<'a> {
         self.display.set(index, PinStatus::Fetching { frame: 0 });
         let old_rev = old.and_then(LockedNode::rev);
         match UpdateFetch::fetch(input, expanded, old_rev) {
-            // for fixed pins sha256 is the identity, so any mismatch is drift
+            // for fixed pins sha256 is the identity; any mismatch is drift
             Ok(UpdateFetch { node, rev, .. })
                 if input.pin_type == PinType::Fixed
                     && old_rev.is_some()
@@ -115,7 +115,7 @@ impl<'a> UpdateRunner<'a> {
                 self.accept_or_record_drift(node)
             },
             Ok(UpdateFetch { node, rev, .. }) if old_rev == Some(rev.as_str()) => {
-                // same rev, if hash moved, upstream changed under a stable rev
+                // same rev but hash moved: upstream changed under a stable rev
                 if Self::hash_drifted(old, &node) {
                     self.display.set(index, PinStatus::Drift {
                         rev:      render::short(&rev),
@@ -280,9 +280,8 @@ pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<()> {
                     new:        render::short(&current.rev),
                     comparison: current.comparison,
                 });
-                // commit logs are adjunct to the already-rendered rev status,
-                // so keep them best-effort rather than surfacing fetch probes
-                // while the spinner owns the display
+                // commit logs are adjunct to rev status; keep failures quiet
+                // under the spinner
                 if verbose
                     && let Some(old_rev) = old.as_deref()
                     && let Ok(Some(log)) =

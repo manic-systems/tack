@@ -18,8 +18,8 @@ use eyre::Result;
 use super::Entry;
 use crate::project::Project;
 
-/// rewrite all three files from entry as one transaction
-/// if any write fails, every file is rolled back to where it started
+/// rewrite all three files as one transaction; any failure rolls every file
+/// back
 pub(super) fn restore(project: &Project, entry: &Entry) -> Result<()> {
     let specs = [
         (project.pins_path(), entry.toml.as_deref()),
@@ -69,7 +69,7 @@ impl RestoreTx {
         Self { steps: Vec::new() }
     }
 
-    /// write content to a sibling temp, or stage a removal
+    /// write content to a sibling temp, or stage a removal when content is none
     fn stage(&mut self, path: &Path, content: Option<&str>, tag: &str) -> Result<()> {
         let tmp = if let Some(text) = content {
             let tmp = temp_path(path, tag, "tmp");
@@ -118,7 +118,7 @@ impl RestoreTx {
         Ok(())
     }
 
-    /// undo a partial commit by dropping installed files and restoring backups
+    /// undo a partial commit: drop installed files, restore backups
     fn rollback(&mut self) {
         for step in self.steps.iter_mut().rev() {
             if step.installed && step.path.exists() {
@@ -138,7 +138,7 @@ impl RestoreTx {
         }
     }
 
-    /// drop temps staged before a failure that aborted ahead of commit
+    /// drop temps staged before a pre-commit failure
     fn cleanup_staged(&mut self) {
         for step in &mut self.steps {
             if let Some(tmp) = step.tmp.take()

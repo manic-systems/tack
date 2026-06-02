@@ -11,8 +11,8 @@ impl<'a> ShortUrls<'a> {
         Self { templates }
     }
 
-    /// expand scheme:rest via the {path} template
-    /// non-shorturl urls pass through
+    /// expand scheme:rest via the {path} template; non-shorturl urls pass
+    /// through
     pub fn expand(&self, url: &str) -> String {
         let Some((scheme, rest)) = url.split_once(':') else {
             return url.to_owned();
@@ -23,7 +23,7 @@ impl<'a> ShortUrls<'a> {
         Self::normalize_git_ref(&template.replace("{path}", rest))
     }
 
-    /// nix reads git+host/owner/repo/branch as a deeper path, not a ref
+    /// nix reads git+host/owner/repo/branch as a deeper path, not a ref;
     /// remap the trailing segment to ?ref=
     fn normalize_git_ref(url: &str) -> String {
         if !url.starts_with("git+") || url.contains('?') {

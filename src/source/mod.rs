@@ -16,7 +16,7 @@ use eyre::{
     bail,
 };
 
-/// fetchable pin source parsed from an expanded pins.toml url
+/// fetchable pin source, from an expanded pins.toml url
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Github {

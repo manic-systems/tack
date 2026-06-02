@@ -10,11 +10,10 @@ use crate::{
     },
 };
 
-/// body decoder applied after a raw-file http get
+/// decodes a raw-file body after the http get
 pub type DecoderError = Box<dyn Error + Send + Sync>;
 pub type Decoder = fn(&str) -> Result<String, DecoderError>;
 
-/// resolved raw-file request
 pub struct RawFile {
     pub url:     String,
     pub decoder: Option<Decoder>,

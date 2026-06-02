@@ -18,8 +18,7 @@ use crate::{
     },
 };
 
-/// canonical identity of a pin source
-/// parsed from either an expanded url or a locked node
+/// canonical identity of a pin source, from a url or a locked node
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum SourceId {
     Github {
@@ -31,7 +30,7 @@ pub enum SourceId {
         owner: String,
         repo:  String,
     },
-    /// a git+url source, query string stripped
+    /// git+url, query string stripped
     Git {
         url: String,
     },
@@ -47,7 +46,6 @@ pub enum SourceId {
 }
 
 impl SourceId {
-    /// identity of an expanded pins.toml url
     pub fn from_url(expanded: &str) -> Option<Self> {
         let source = expanded.parse::<Source>().ok()?;
         Some(Self::from_source(&source))

@@ -123,8 +123,7 @@ pub struct Input {
     pub unpack:     Option<Unpack>,
     /// per-pin `follows` from `[inputs.<name>.follows]`
     pub follows:    BTreeMap<String, String>,
-    /// per-pin `exclude_follow` from `[inputs.<name>]`, names that opt out of
-    /// the global `[all_follow]` rules
+    /// names that opt out of the global `[all_follow]` rules
     pub excludes:   BTreeSet<String>,
 }
 
@@ -300,11 +299,9 @@ impl PinsDoc {
     }
 }
 
-/// the global `[all_follow]` table flattened to child name -> target name
-///
-/// two value shapes are accepted under the same table
-/// * `alias = "target"` makes `alias` follow `target`
-/// * `target = [a, b, ...]` makes every listed alias follow `target`
+/// global `[all_follow]` flattened to child -> target. two shapes:
+/// `alias = "target"`, or `target = [a, b, ...]` where each listed alias
+/// follows target
 struct AllFollowTable<'a> {
     item: Option<&'a Item>,
 }
@@ -344,8 +341,8 @@ impl<'a> AllFollowTable<'a> {
     }
 }
 
-/// project a follows alias onto the flake side for the flake.lock walk
-/// `dep` and `flake:dep` are kept, `tack:dep` is dropped
+/// project a follows alias onto the flake side: `dep` and `flake:dep` kept,
+/// `tack:dep` dropped
 #[derive(Clone, Copy)]
 pub struct FollowAlias<'a> {
     raw: &'a str,
@@ -429,7 +426,6 @@ mod tests {
     fn all_follows_array_form_implies_key_alias() {
         let doc = doc("[all_follow]\ngit-hooks = [\"git-hooks-nix\"]\n");
         let map = doc.all_follows().unwrap();
-        // both key and array members alias to key
         assert_eq!(map.get("git-hooks").map(String::as_str), Some("git-hooks"));
         assert_eq!(
             map.get("git-hooks-nix").map(String::as_str),
@@ -470,7 +466,6 @@ mod tests {
         let doc = doc(raw);
         let map = doc.all_follows().unwrap();
 
-        // scoping is preserved raw, but consumers project per side
         assert_eq!(
             map.get("flake:dep").map(String::as_str),
             Some("replacement")

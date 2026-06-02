@@ -133,8 +133,8 @@ struct ScanBatch {
     diagnostics:  BTreeSet<ScanDiagnostic>,
 }
 
-/// For every `[all_follow]` entry whose target is not a declared input, walk
-/// top-level flake.locks once and write the freshest transitive observation.
+/// for each `[all_follow]` target that isn't a declared input, write the
+/// freshest transitive observation from top-level flake.locks
 pub fn auto_dedup(
     inputs: &[pins::Input],
     all_follow: &BTreeMap<String, String>,

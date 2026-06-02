@@ -112,7 +112,7 @@ impl Serialize for NodeRepr<'_> {
     }
 }
 
-/// nix flake.lock document exposed as locked nodes tack can compare
+/// flake.lock exposed as locked nodes tack can compare
 #[derive(Debug, Deserialize)]
 pub struct FlakeLock {
     #[serde(default = "default_root")]
@@ -435,7 +435,6 @@ const fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// parse pins.lock.json from an in-memory string
 pub fn parse(raw: &str) -> Result<LockFile, serde_json::Error> {
     LockFile::parse(raw)
 }
@@ -699,7 +698,7 @@ mod tests {
 
     #[test]
     fn roundtrip_preserves_extra_lock_fields() {
-        // github node pinned to a branch plus a field tack does not model
+        // github node with a field tack does not model
         let raw = r#"{"type":"github","owner":"o","repo":"r","ref":"nixos-unstable","rev":"abc","narHash":"sha256-z","lastModified":1700,"revCount":42}"#;
         let n = LockedNode::from_value(serde_json::from_str(raw).unwrap()).unwrap();
         let back = serde_json::to_string(&n).unwrap();

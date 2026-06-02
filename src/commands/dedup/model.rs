@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-/// which side of an upstream a finding came from
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Side {
     Flake,
@@ -17,13 +16,13 @@ impl Side {
 }
 
 pub(super) struct Entry {
-    /// lineage from top-pin down to the parent tree being scanned
+    /// lineage from top pin down to the parent tree scanned
     pub path: Vec<String>,
     pub name: String,
-    /// flake input vs upstream tack pin, for side-scoped follow matching
+    /// for side-scoped follow matching
     pub side: Side,
-    /// untruncated rev
+    /// untruncated
     pub rev:  String,
-    /// `lastModified` of the locked node
+    /// node lastModified
     pub lm:   Option<u64>,
 }

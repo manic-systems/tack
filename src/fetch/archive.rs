@@ -38,16 +38,14 @@ pub(super) fn detect_tar_format(url: &str) -> Result<TarFormat> {
     }
 }
 
-/// case-insensitive ascii suffix check that is bytes-based to dodge utf-8
-/// slicing
+/// case-insensitive ascii suffix check, bytes-based to dodge utf-8 slicing
 fn ends_with_ci(path: &str, ext: &str) -> bool {
     let bytes = path.as_bytes();
     let suffix = ext.as_bytes();
     bytes.len() >= suffix.len() && bytes[bytes.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
-/// unpack a tarball stream into `into`
-/// strip the single top-level directory and return the stripped root
+/// unpack a tarball stream, strip the single top-level dir, return the root
 pub(super) fn unpack_tar_stream<R>(reader: R, format: TarFormat, into: &Path) -> Result<PathBuf>
 where
     R: Read,
