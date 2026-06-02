@@ -19,6 +19,7 @@ let
     match
     pathExists
     readFile
+    substring
     tail
     trace
     ;
@@ -55,7 +56,16 @@ let
           acc
       ) { } (attrNames all_follow_raw);
 
-      fetchPin = name: fetchTree lock.${name};
+      # a path node's stored path is absolute, or relative to this resolver dir
+      fetchPin =
+        name:
+        let
+          node = lock.${name};
+        in
+        if (node.type or "") == "path" && substring 0 1 node.path != "/" then
+          fetchTree (node // { path = ./. + ("/" + node.path); })
+        else
+          fetchTree node;
 
       fetchFixed =
         name: entry:

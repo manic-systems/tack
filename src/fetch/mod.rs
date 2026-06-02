@@ -110,6 +110,13 @@ pub fn current_rev_compared(source: &Source, old_rev: Option<&str>) -> Result<Cu
             };
             Ok(CurrentRev { rev, comparison })
         },
+        // a path pin is read locally at eval time; nothing to compare upstream
+        Source::Path { ref path } => {
+            Ok(CurrentRev {
+                rev:        path.clone(),
+                comparison: BranchComparison::none(),
+            })
+        },
     }
 }
 
@@ -217,6 +224,7 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
             let format = detect_tar_format(url).wrap_err_with(|| format!("tarball {url}"))?;
             unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
         },
+        Source::Path { .. } => bail!("cannot fetch a tree for a local path pin"),
     }
 }
 
@@ -278,6 +286,15 @@ pub fn fetch_pin_compared(
                 comparison: BranchComparison::none(),
             })
         },
+        // a path pin locks to its spec with no fetch; the resolver reads the
+        // directory at nix eval time
+        Source::Path { ref path } => {
+            Ok(FetchedPin {
+                node:       LockedNode::new_path(path.clone()),
+                rev:        path.clone(),
+                comparison: BranchComparison::none(),
+            })
+        },
     }
 }
 
@@ -320,7 +337,7 @@ fn git_pin_from_checkout(
                 checkout.last_modified,
             )
         },
-        Source::Github { .. } | Source::Tarball { .. } => {
+        Source::Github { .. } | Source::Tarball { .. } | Source::Path { .. } => {
             bail!("non-git source cannot be locked from git checkout")
         },
     };

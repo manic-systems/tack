@@ -329,6 +329,16 @@ impl LockedNode {
         }
     }
 
+    pub fn new_path<P>(path: P) -> Self
+    where
+        P: Into<String>,
+    {
+        Self::Path {
+            path:  path.into(),
+            extra: BTreeMap::new(),
+        }
+    }
+
     pub fn new_fixed<Url, Sha256, Unpack>(url: Url, sha256: Sha256, unpack: Unpack) -> Self
     where
         Url: Into<String>,
