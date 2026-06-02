@@ -224,6 +224,9 @@ pub fn update(project: &Project, names: &[String], accept: bool) -> Result<()> {
     for cause in auto_dedup.surfaced_fetch_causes {
         eprintln!("tack: {cause}");
     }
+    for warning in fetch::http::drain_token_warnings() {
+        eprintln!("tack: {warning}");
+    }
 
     if drift_count > 0 {
         bail!(
@@ -315,6 +318,9 @@ pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<()> {
         display.finish_verbose(&collected);
     } else {
         display.finish();
+    }
+    for warning in fetch::http::drain_token_warnings() {
+        eprintln!("tack: {warning}");
     }
     Ok(())
 }
