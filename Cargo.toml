@@ -8,6 +8,10 @@ description = "flake-like toml nix pins, lazily fetched and transformed"
 keywords    = [ "nix", "flake", "pinning", "lockfile" ]
 categories  = [ "command-line-utilities", "development-tools" ]
 
+[lib]
+name = "tack"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tack"
 path = "src/main.rs"
@@ -72,6 +76,7 @@ missing_trait_methods              = "allow"
 mod_module_files                   = "allow"
 module_name_repetitions            = "allow"
 multiple_crate_versions            = "allow"
+must_use_candidate                 = "allow"
 needless_borrowed_reference        = "allow"
 print_stderr                       = "allow"
 print_stdout                       = "allow"
