@@ -7,6 +7,7 @@ use std::{
         Path,
         PathBuf,
     },
+    result::Result as StdResult,
 };
 
 use eyre::{
@@ -154,24 +155,7 @@ pub(super) fn fetch_pin_checkout(
 fn checkout_rev(url: &str, requested_rev: &str, submodules: bool, into: &Path) -> Result<()> {
     let repo = Repository::init(into)?;
     let mut remote = repo.remote_anonymous(url)?;
-    let mut fo = fetch_options(url);
-    remote
-        .fetch(
-            &[
-                "+refs/heads/*:refs/remotes/origin/*",
-                "+refs/tags/*:refs/tags/*",
-            ],
-            Some(&mut fo),
-            None,
-        )
-        .wrap_err_with(|| format!("fetch refs from {url}"))?;
-
-    let commit = repo
-        .revparse_single(requested_rev)
-        .wrap_err_with(|| format!("rev '{requested_rev}' not reachable from refs on {url}"))?
-        .peel_to_commit()
-        .wrap_err_with(|| format!("'{requested_rev}' is not a commit"))?;
-
+    let commit = fetch_pinned(&repo, &mut remote, None, requested_rev, url)?;
     repo.checkout_tree(
         commit.tree()?.as_object(),
         Some(CheckoutBuilder::new().force()),
@@ -192,71 +176,23 @@ fn checkout(
     let repo = Repository::init(into)?;
     let mut remote = repo.remote_anonymous(url)?;
 
-    let (refname, fetch_all_refs) = {
-        if use_auth_callbacks(url) {
-            let conn = remote.connect_auth(Direction::Fetch, Some(callbacks()), None)?;
-            let default_ref = branch_str(conn.default_branch());
-            let refname = if requested_rev.is_some() && reff.is_none() {
-                default_ref.unwrap_or_else(|| "HEAD".to_owned())
-            } else {
-                resolve_ref(
-                    default_ref,
-                    conn.list()?.iter().map(git2::RemoteHead::name),
-                    reff,
-                )
-            };
-            (refname, requested_rev.is_some() && reff.is_none())
-        } else {
-            remote.connect(Direction::Fetch)?;
-            let default_ref = branch_str(remote.default_branch());
-            let refname = if requested_rev.is_some() && reff.is_none() {
-                default_ref.unwrap_or_else(|| "HEAD".to_owned())
-            } else {
-                resolve_ref(
-                    default_ref,
-                    remote.list()?.iter().map(git2::RemoteHead::name),
-                    reff,
-                )
-            };
-            remote.disconnect()?;
-            (refname, requested_rev.is_some() && reff.is_none())
-        }
-    };
-
-    let mut fo = fetch_options(url);
-    // a specific rev can be anywhere in history, so fetch the ref in full;
-    // for a moving ref we only need the tip
-    if requested_rev.is_none() {
-        fo.depth(1);
-    }
-    let fetch_refspecs = if fetch_all_refs {
-        vec![
-            "+refs/heads/*:refs/remotes/origin/*".to_owned(),
-            "+refs/tags/*:refs/tags/*".to_owned(),
-        ]
-    } else {
-        vec![refname.clone()]
-    };
-    let fetch_refs = fetch_refspecs
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    remote
-        .fetch(&fetch_refs, Some(&mut fo), None)
-        .wrap_err_with(|| format!("fetch {refname} from {url}"))?;
-
-    let commit = match requested_rev {
+    let (commit, refname) = match requested_rev {
+        // a pinned rev can be anywhere in history and git2 0.21 can't want-sha,
+        // so widen a full-history fetch only as far as the rev needs
         Some(pinned) => {
-            repo.revparse_single(pinned)
-                .wrap_err_with(|| format!("rev '{pinned}' not reachable from {refname} on {url}"))?
-                .peel_to_commit()
-                .wrap_err_with(|| format!("'{pinned}' is not a commit"))?
+            let refname = reff.map_or_else(|| "HEAD".to_owned(), str::to_owned);
+            (
+                fetch_pinned(&repo, &mut remote, reff, pinned, url)?,
+                refname,
+            )
         },
-        None => repo.find_reference("FETCH_HEAD")?.peel_to_commit()?,
+        // a moving ref only needs its tip; fetch the refspec directly and read
+        // FETCH_HEAD, no preflight ls-remote to resolve it first
+        None => fetch_moving(&repo, &mut remote, reff, url)?,
     };
+
     let rev = commit.id().to_string();
     let time = commit.time().seconds();
-
     repo.checkout_tree(
         commit.tree()?.as_object(),
         Some(CheckoutBuilder::new().force()),
@@ -265,6 +201,106 @@ fn checkout(
         update_submodules(&repo)?;
     }
     Ok((rev, time, refname))
+}
+
+/// fetch the tip of a moving ref at `depth(1)` without a preflight ls-remote.
+/// an unqualified ref might be a branch or a tag, so try `refs/heads/<r>` then
+/// `refs/tags/<r>`, peeling `FETCH_HEAD` from whichever lands
+fn fetch_moving<'repo>(
+    repo: &'repo Repository,
+    remote: &mut git2::Remote<'_>,
+    reff: Option<&str>,
+    url: &str,
+) -> Result<(git2::Commit<'repo>, String)> {
+    let candidates: Vec<String> = match reff {
+        None => vec!["HEAD".to_owned()],
+        Some(target) if target.starts_with("refs/") => vec![target.to_owned()],
+        Some(target) => {
+            vec![
+                format!("refs/heads/{target}"),
+                format!("refs/tags/{target}"),
+                target.to_owned(),
+            ]
+        },
+    };
+
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let last = idx + 1 == candidates.len();
+        match fetch_refspecs(remote, &[candidate.as_str()], Some(1_i32)) {
+            // a fetch can "succeed" yet leave no usable FETCH_HEAD when the ref
+            // is absent; treat that like a miss and widen
+            Ok(()) => {
+                if let Ok(commit) = repo
+                    .find_reference("FETCH_HEAD")
+                    .and_then(|head| head.peel_to_commit())
+                {
+                    return Ok((commit, candidate.clone()));
+                }
+                if last {
+                    bail!("ref '{}' not found on {url}", reff.unwrap_or("HEAD"));
+                }
+            },
+            Err(err) if last => {
+                return Err(eyre::Report::new(err))
+                    .wrap_err_with(|| format!("fetch ref '{candidate}' from {url}"));
+            },
+            Err(_) => {},
+        }
+    }
+    bail!("ref '{}' not found on {url}", reff.unwrap_or("HEAD"))
+}
+
+/// fetch full history of the smallest ref that contains `pinned`, widening the
+/// fetch only on a miss: the named ref (or HEAD), then all branches, then tags.
+/// objects accumulate across rungs, so each `revparse` sees every fetched ref
+fn fetch_pinned<'repo>(
+    repo: &'repo Repository,
+    remote: &mut git2::Remote<'_>,
+    reff: Option<&str>,
+    pinned: &str,
+    url: &str,
+) -> Result<git2::Commit<'repo>> {
+    let primary = match reff {
+        Some(target) if target.starts_with("refs/") => target.to_owned(),
+        Some(target) => format!("refs/heads/{target}"),
+        None => "HEAD".to_owned(),
+    };
+    let rungs: Vec<Vec<&str>> = vec![
+        vec![primary.as_str()],
+        vec!["+refs/heads/*:refs/remotes/origin/*"],
+        vec!["+refs/tags/*:refs/tags/*"],
+    ];
+
+    for (idx, rung) in rungs.iter().enumerate() {
+        let last = idx + 1 == rungs.len();
+        if let Err(err) = fetch_refspecs(remote, rung, None) {
+            if last {
+                return Err(eyre::Report::new(err))
+                    .wrap_err_with(|| format!("fetch refs from {url}"));
+            }
+            continue;
+        }
+        if let Ok(commit) = repo
+            .revparse_single(pinned)
+            .and_then(|obj| obj.peel_to_commit())
+        {
+            return Ok(commit);
+        }
+    }
+    bail!("rev '{pinned}' not reachable from refs on {url}")
+}
+
+fn fetch_refspecs(
+    remote: &mut git2::Remote<'_>,
+    refspecs: &[&str],
+    depth: Option<i32>,
+) -> StdResult<(), git2::Error> {
+    let mut fo = FetchOptions::new();
+    fo.remote_callbacks(callbacks());
+    if let Some(limit) = depth {
+        fo.depth(limit);
+    }
+    remote.fetch(refspecs, Some(&mut fo), None)
 }
 
 fn update_submodules(repo: &Repository) -> Result<()> {
@@ -276,14 +312,6 @@ fn update_submodules(repo: &Repository) -> Result<()> {
         sm.update(true, Some(&mut opts))?;
     }
     Ok(())
-}
-
-fn fetch_options(url: &str) -> FetchOptions<'static> {
-    let mut fo = FetchOptions::new();
-    if use_auth_callbacks(url) {
-        fo.remote_callbacks(callbacks());
-    }
-    fo
 }
 
 fn use_auth_callbacks(url: &str) -> bool {
