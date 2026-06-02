@@ -1,14 +1,29 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
+    collections::{
+        BTreeSet,
+        HashMap,
+    },
     env,
     error::Error,
+    fs,
     io::Read as _,
+    mem,
+    path::{
+        Path,
+        PathBuf,
+    },
     result::Result as StdResult,
-    sync::OnceLock,
+    sync::{
+        Mutex,
+        OnceLock,
+        PoisonError,
+    },
     time::Duration,
 };
 
+use etcetera::BaseStrategy as _;
 use serde::{
     Deserialize,
     Serialize,
@@ -49,22 +64,131 @@ fn agent() -> &'static Agent {
     })
 }
 
-fn github_token() -> Option<&'static str> {
+/// an access token for `host`, from the environment first (the well-known
+/// public forges) then nix.conf `access-tokens`; self-hosted forges resolve
+/// only through nix.conf
+fn token_for_host(host: &str) -> Option<&'static str> {
+    if host == "github.com"
+        && let Some(token) = github_env_token()
+    {
+        return Some(token);
+    }
+    if host == "gitlab.com"
+        && let Some(token) = gitlab_env_token()
+    {
+        return Some(token);
+    }
+    nix_conf_tokens().get(host).map(String::as_str)
+}
+
+fn github_env_token() -> Option<&'static str> {
     static TOKEN: OnceLock<Option<String>> = OnceLock::new();
     TOKEN
-        .get_or_init(|| {
-            env::var("GITHUB_TOKEN")
-                .or_else(|_| env::var("GH_TOKEN"))
-                .ok()
-        })
+        .get_or_init(|| non_empty_env("GITHUB_TOKEN").or_else(|| non_empty_env("GH_TOKEN")))
         .as_deref()
 }
 
-fn gitlab_token() -> Option<&'static str> {
+fn gitlab_env_token() -> Option<&'static str> {
     static TOKEN: OnceLock<Option<String>> = OnceLock::new();
     TOKEN
-        .get_or_init(|| env::var("GITLAB_TOKEN").ok())
+        .get_or_init(|| non_empty_env("GITLAB_TOKEN"))
         .as_deref()
+}
+
+/// an env var only when set to a non-empty value; an empty token is no token
+fn non_empty_env(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.is_empty())
+}
+
+/// `host = token` pairs scraped from every nix.conf in the standard ladder,
+/// merged with later files winning
+fn nix_conf_tokens() -> &'static HashMap<String, String> {
+    static TOKENS: OnceLock<HashMap<String, String>> = OnceLock::new();
+    TOKENS.get_or_init(|| {
+        let mut tokens = HashMap::new();
+        for file in nix_conf_files() {
+            scrape_access_tokens(&file, &mut tokens, 0);
+        }
+        tokens
+    })
+}
+
+/// nix.conf locations, lowest precedence first: system, then user, then the
+/// explicit `NIX_USER_CONF_FILES` override list
+fn nix_conf_files() -> Vec<PathBuf> {
+    let mut files = vec![PathBuf::from("/etc/nix/nix.conf")];
+    if let Ok(strategy) = etcetera::choose_base_strategy() {
+        files.push(strategy.config_dir().join("nix/nix.conf"));
+    }
+    if let Some(list) = env::var_os("NIX_USER_CONF_FILES") {
+        files.extend(env::split_paths(&list));
+    }
+    files
+}
+
+/// read `access-tokens` / `extra-access-tokens` out of one nix.conf, following
+/// `!include` (bounded against include cycles)
+fn scrape_access_tokens(path: &Path, tokens: &mut HashMap<String, String>, depth: u8) {
+    const MAX_INCLUDE_DEPTH: u8 = 16;
+
+    if depth > MAX_INCLUDE_DEPTH {
+        return;
+    }
+    let Ok(contents) = fs::read_to_string(path) else {
+        return;
+    };
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("!include") {
+            let target = rest.trim_start_matches('?').trim();
+            if !target.is_empty() {
+                let included = path
+                    .parent()
+                    .filter(|_| !Path::new(target).is_absolute())
+                    .map_or_else(|| PathBuf::from(target), |base| base.join(target));
+                scrape_access_tokens(&included, tokens, depth + 1);
+            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if matches!(key.trim(), "access-tokens" | "extra-access-tokens") {
+            for pair in value.split_whitespace() {
+                if let Some((host, token)) = pair.split_once('=')
+                    && !host.is_empty()
+                    && !token.is_empty()
+                {
+                    tokens.insert(host.to_owned(), token.to_owned());
+                }
+            }
+        }
+    }
+}
+
+fn token_warnings() -> &'static Mutex<BTreeSet<String>> {
+    static WARNINGS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    WARNINGS.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+/// record a "no token for this host" notice once; surfaced after the spinner
+/// finishes so it does not corrupt the live display
+fn record_token_warning(message: String) {
+    token_warnings()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(message);
+}
+
+/// drain the deferred token warnings for a command to print after its display
+pub fn drain_token_warnings() -> Vec<String> {
+    let mut guard = token_warnings()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    mem::take(&mut *guard).into_iter().collect()
 }
 
 pub type FetchResult<T> = StdResult<T, FetchError>;
@@ -173,15 +297,15 @@ impl HttpClient {
     }
 
     fn with_optional_github_auth<B>(request: RequestBuilder<B>) -> RequestBuilder<B> {
-        if let Some(token) = github_token() {
+        if let Some(token) = token_for_host("github.com") {
             Self::with_github_auth(request, token)
         } else {
             request
         }
     }
 
-    fn with_optional_gitlab_auth<B>(request: RequestBuilder<B>) -> RequestBuilder<B> {
-        if let Some(token) = gitlab_token() {
+    fn with_optional_gitlab_auth<B>(request: RequestBuilder<B>, host: &str) -> RequestBuilder<B> {
+        if let Some(token) = token_for_host(host) {
             request.header(GITLAB_TOKEN_HEADER, token)
         } else {
             request
@@ -220,12 +344,23 @@ impl HttpClient {
             .map_err(|err| FetchError::Github(format!("api {url}: invalid json: {err}")))
     }
 
-    pub(super) fn gitlab_json<T>(self, url: &str, timeout_limit: Option<Duration>) -> FetchResult<T>
+    pub(super) fn gitlab_json<T>(
+        self,
+        url: &str,
+        host: &str,
+        timeout_limit: Option<Duration>,
+    ) -> FetchResult<T>
     where
         T: DeserializeOwned,
     {
+        if token_for_host(host).is_none() {
+            record_token_warning(format!(
+                "no access token for {host}; gitlab comparison may be rate-limited or unavailable \
+                 for private projects (set GITLAB_TOKEN or a nix.conf access-tokens entry)"
+            ));
+        }
         let mut req =
-            Self::with_optional_gitlab_auth(self.get(url).header(ACCEPT, APPLICATION_JSON));
+            Self::with_optional_gitlab_auth(self.get(url).header(ACCEPT, APPLICATION_JSON), host);
         if let Some(timeout) = timeout_limit {
             req = req.config().timeout_global(Some(timeout)).build();
         }
@@ -250,7 +385,12 @@ impl HttpClient {
         V: Serialize,
         T: DeserializeOwned,
     {
-        let token = github_token().ok_or_else(|| {
+        let token = token_for_host("github.com").ok_or_else(|| {
+            record_token_warning(
+                "no GitHub token; rev comparison falls back to the rate-limited REST API (set \
+                 GITHUB_TOKEN, GH_TOKEN, or a nix.conf access-tokens entry)"
+                    .to_owned(),
+            );
             FetchError::Auth {
                 what: "GITHUB_TOKEN or GH_TOKEN not set".to_owned(),
             }
@@ -363,7 +503,44 @@ impl GraphqlError {
 
 #[cfg(test)]
 mod tests {
-    use super::FetchError;
+    use std::{
+        collections::HashMap,
+        fs,
+    };
+
+    use super::{
+        FetchError,
+        scrape_access_tokens,
+    };
+
+    #[test]
+    fn access_tokens_scrape_follows_include_and_lets_later_lines_win() {
+        let dir = tempfile::tempdir().unwrap();
+        let included = dir.path().join("extra.conf");
+        fs::write(&included, "access-tokens = gitlab.example.com=inc\n").unwrap();
+        let main = dir.path().join("nix.conf");
+        fs::write(
+            &main,
+            "# a comment\naccess-tokens = github.com=gh gitlab.com=gl\nextra-access-tokens = \
+             gitlab.com=override\n!include extra.conf\n",
+        )
+        .unwrap();
+
+        let mut tokens = HashMap::new();
+        scrape_access_tokens(&main, &mut tokens, 0);
+
+        assert_eq!(tokens.get("github.com").map(String::as_str), Some("gh"));
+        // a later line (extra-access-tokens) overrides the earlier value
+        assert_eq!(
+            tokens.get("gitlab.com").map(String::as_str),
+            Some("override")
+        );
+        // a `!include`d file is followed, relative to the includer
+        assert_eq!(
+            tokens.get("gitlab.example.com").map(String::as_str),
+            Some("inc")
+        );
+    }
 
     #[test]
     fn status_classification_separates_auth_absent_and_transport() {
