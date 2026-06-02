@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-//! verbatim snapshots of `pins.toml`, `pins.lock.json`, and the resolver
-//! those three files fully determine tack's state
-//! history is an editor-style list of states plus a cursor pointing at the live
-//! one
+//! editor-style undo history over the three files that hold tack's state:
+//! `pins.toml`, `pins.lock.json`, resolver
 
 use std::time::{
     SystemTime,
@@ -20,8 +18,6 @@ pub use store::HistoryStore;
 const MAX_LEVELS: usize = 20;
 const MAX_AGE: u64 = 30 * 24 * 60 * 60;
 
-/// the state of the bytes of all three files, plus the command that produced it
-/// and when
 #[derive(Default)]
 struct Entry {
     label:    String,
@@ -51,13 +47,11 @@ impl History {
     }
 }
 
-/// a label + timestamp pair
 pub struct Row {
     pub label: String,
     pub ts:    u64,
 }
 
-/// the post-move state of the history
 pub struct View {
     pub cursor: usize,
     pub rows:   Vec<Row>,
@@ -69,8 +63,8 @@ pub fn now() -> u64 {
         .map_or(0, |dur| dur.as_secs())
 }
 
-/// capture a live edit as an `(edited)` entry so undo/redo never drop it
-/// this truncates the redo branch like a fresh mutation
+/// capture a live edit as an `(edited)` entry so undo/redo never drop it.
+/// truncates the redo branch like a fresh mutation
 fn capture_external(history: &mut History, state: &Snapshot, ts: u64) -> bool {
     if history.entries.is_empty() {
         return false;
@@ -78,7 +72,6 @@ fn capture_external(history: &mut History, state: &Snapshot, ts: u64) -> bool {
     if history.entries[history.cursor].matches(state) {
         return false;
     }
-    // the live edit becomes the new tip, dropping any redo branch
     history.entries.truncate(history.cursor + 1);
     history
         .entries
@@ -87,9 +80,8 @@ fn capture_external(history: &mut History, state: &Snapshot, ts: u64) -> bool {
     true
 }
 
-/// prune oldest entries first
-/// two caps, count and age, both refusing to drop the
-/// live state or anything redoable
+/// prune oldest first. count and age caps, neither drops the live state or
+/// anything redoable
 fn gc(history: &mut History, now: u64) {
     while history.entries.len() > MAX_LEVELS && history.cursor > 0 {
         history.entries.remove(0);
@@ -117,7 +109,7 @@ fn view(history: &History) -> View {
     }
 }
 
-/// `just now`, `2m ago`, `1h ago`, `3d ago` from two epochs
+/// `just now`, `2m ago`, `1h ago`, `3d ago`
 pub fn rel_time(now: u64, ts: u64) -> String {
     let delta = now.saturating_sub(ts);
     if delta < 60 {
@@ -171,8 +163,8 @@ mod tests {
         fs::read_to_string(project.pins_path()).unwrap()
     }
 
-    /// stand in for a recorded mutating command
-    /// returns whether an external edit was captured
+    /// stand-in for a recorded mutating command. returns whether an external
+    /// edit was captured
     fn run(project: &Project, store: &HistoryStore, label: &str, toml: &str) -> bool {
         let pre = Snapshot::capture(project);
         write(project, toml);
@@ -195,7 +187,7 @@ mod tests {
         assert_eq!(read(&project), "v2\n");
         store.undo(&project).unwrap();
         assert_eq!(read(&project), "v1\n");
-        assert!(store.undo(&project).unwrap().is_none()); // at the initial state
+        assert!(store.undo(&project).unwrap().is_none()); // initial state, can't go further
         assert_eq!(read(&project), "v1\n");
 
         store.redo(&project).unwrap();
@@ -214,10 +206,10 @@ mod tests {
         write(&project, "v1\n");
         run(&project, &store, "a", "v2\n");
 
-        // user hand-edits pins.toml outside tack, then undoes
+        // hand-edit outside tack, then undo
         write(&project, "manual\n");
         store.undo(&project).unwrap();
-        assert_eq!(read(&project), "v2\n"); // stepped back to the recorded state
+        assert_eq!(read(&project), "v2\n");
 
         // the manual edit must not be lost
         store.redo(&project).unwrap();
@@ -242,7 +234,7 @@ mod tests {
         assert!(!run(&project, &store, "a", "v2\n")); // nothing diverged yet
 
         write(&project, "manual\n"); // unrecorded edit
-        assert!(run(&project, &store, "b", "v3\n")); // recorder notices and captures it
+        assert!(run(&project, &store, "b", "v3\n")); // captured on next record
     }
 
     #[test]
@@ -273,12 +265,12 @@ mod tests {
         write(&project, "v1\n");
         run(&project, &store, "a", "v2\n");
         run(&project, &store, "b", "v3\n");
-        store.undo(&project).unwrap(); // back to v2 with v3 redoable
+        store.undo(&project).unwrap(); // back to v2, v3 redoable
         assert_eq!(read(&project), "v2\n");
 
         run(&project, &store, "c", "v4\n"); // forks a new branch
         assert_eq!(read(&project), "v4\n");
-        assert!(store.redo(&project).unwrap().is_none()); // the v3 future is gone
+        assert!(store.redo(&project).unwrap().is_none()); // v3 future gone
     }
 
     #[test]
@@ -314,7 +306,7 @@ mod tests {
         };
         gc(&mut history, now);
 
-        // the three aged undo entries are pruned, but the live state survives
+        // aged undo entries pruned, live state survives
         assert_eq!(history.entries.len(), 1);
         assert_eq!(history.cursor, 0);
         assert_eq!(history.entries[0].label, "live");
@@ -331,10 +323,10 @@ mod tests {
         fs::write(&resolver, "resolver-v1\n").unwrap();
         let pre = Snapshot::capture(&project);
 
-        // resolver-only change such as `tack init --resolver`
+        // resolver-only change
         fs::write(&resolver, "resolver-v2\n").unwrap();
         let post = Snapshot::capture(&project);
-        assert!(pre != post); // the 3-file snapshot notices the resolver change
+        assert!(pre != post); // snapshot notices the resolver change
         store.record("init --resolver", pre, post).unwrap();
 
         store.undo(&project).unwrap();

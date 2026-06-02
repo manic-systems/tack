@@ -29,7 +29,6 @@ pub fn init(project: &Project, force: bool, resolver_only: bool, flake: bool) ->
         project.resolver_path(),
     );
 
-    // `--resolver` only bumps the resolver to the bundled template
     if resolver_only {
         return write_resolver(project.dir(), &rp, force);
     }
@@ -59,8 +58,8 @@ pub fn init(project: &Project, force: bool, resolver_only: bool, flake: bool) ->
     Ok(())
 }
 
-/// (re)write just the resolver to the bundled template
-/// refuses to clobber a forked resolver unless `force`
+/// rewrite the resolver to the bundled template; won't clobber a fork unless
+/// `force`
 fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     if let Ok(current) = fs::read_to_string(path) {
         if current == RESOLVER_NIX {
@@ -80,8 +79,8 @@ fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// `--flake` scaffolds a wired flake and marks the project recomposable
-/// existing flake.nix belongs to the user
+/// `--flake` scaffolds a wired flake and marks the project recomposable;
+/// an existing flake.nix belongs to the user
 fn flake_awareness(scaffold: bool, project: &Project) -> Result<()> {
     let cwd = env::current_dir()?;
     let path = cwd.join("flake.nix");
@@ -105,7 +104,7 @@ fn flake_awareness(scaffold: bool, project: &Project) -> Result<()> {
         return Ok(());
     }
 
-    // never overwrite the user's flake, just reflect its wiring into pins.toml
+    // don't overwrite the user's flake; reflect its wiring into pins.toml
     if scaffold {
         eprintln!("tack: flake.nix exists; left untouched (tack won't overwrite your flake)");
     }
@@ -118,8 +117,7 @@ fn flake_awareness(scaffold: bool, project: &Project) -> Result<()> {
     Ok(())
 }
 
-/// whether `flake.nix` mentions `tackOverrides` in code rather than only a `#`
-/// comment
+/// whether `flake.nix` mentions `tackOverrides` in code, not just a comment
 pub(super) fn wires_overrides(flake: &str) -> bool {
     flake.lines().any(|line| {
         line.split_once('#')
@@ -128,7 +126,7 @@ pub(super) fn wires_overrides(flake: &str) -> bool {
     })
 }
 
-/// set `[tack] recomposable = true`, preserving any existing `[tack]` keys
+/// set `[tack] recomposable = true`, preserving existing `[tack]` keys
 fn mark_recomposable(project: &Project) -> Result<()> {
     let mut doc = project.load_pins()?;
     doc.mark_recomposable();

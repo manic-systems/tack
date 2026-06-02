@@ -5,8 +5,7 @@ use std::collections::{
     BTreeSet,
 };
 
-/// render-agnostic result of a dedup scan
-/// only diverging groups plus follow suggestions
+/// dedup scan result: only diverging groups, plus follow suggestions
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DedupReport {
     pub groups:  Vec<DedupGroup>,

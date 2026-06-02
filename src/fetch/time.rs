@@ -66,7 +66,6 @@ pub(super) fn epoch_from_iso(input: &str) -> Result<i64> {
     Ok(days_from_civil(year, month, day) * 86400 + hh * 3600 + mi * 60 + ss)
 }
 
-/// days since 1970-01-01
 const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let adjusted_year = if month <= 2 { year - 1 } else { year };
     let era = if adjusted_year >= 0 {

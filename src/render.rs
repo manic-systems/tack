@@ -55,15 +55,14 @@ pub fn scan_diagnostic(diagnostic: &ScanDiagnostic) -> String {
     format!("scan {}: {}", source_label(diagnostic.path()), diagnostic)
 }
 
-/// radius-1 window around the new cursor
+/// radius-1 window around the cursor
 pub fn render_window(view: &history::View) {
     let lo = view.cursor.saturating_sub(1);
     let hi = (view.cursor + 1).min(view.rows.len().saturating_sub(1));
     render(view, lo, hi);
 }
 
-/// rows `lo..=hi` newest-first with relative times aligned and `>` marking the
-/// cursor
+/// rows `lo..=hi` newest-first, `>` marks the cursor
 pub fn render(view: &history::View, lo: usize, hi: usize) {
     let now = history::now();
     let times = (lo..=hi)
