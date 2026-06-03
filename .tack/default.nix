@@ -102,8 +102,8 @@ let
         _: target: self.${target} or (throw "tack: follows target '${target}' is not a pin")
       );
 
-      # a follows key is `flake:name`, `tack:name`, or a bare `name`.
-      # project a follows set onto one side, rekeyed to bare names.
+      # follows key is `flake:name`, `tack:name`, or bare `name`
+      # project onto one side, rekeyed to bare names
       followsForSide =
         side: follows:
         listToAttrs (
@@ -174,8 +174,8 @@ let
           hasTack = pathExists tackPinsPath;
           upPins = if hasTack then fromTOML (readFile tackPinsPath) else { };
 
-          # project follows onto each side, then keep only the names that side has.
-          # note that a bare follow reaches both, a `flake:`/`tack:` follow just the one.
+          # project follows onto each side, keep only names that side has
+          # bare follow reaches both; `flake:`/`tack:` reaches just one
           tackOverrides = resolveFollows (
             intersectAttrs (upPins.inputs or { }) (followsForSide "tack" levelFollows)
           );
@@ -184,8 +184,8 @@ let
           # deep follows pass down raw, so each descendant re-projects per side
           callerInputs = mkCallerInputs upLock nodeName (raw.inputs or { }) flakeLevel deepFollows;
 
-          # upstream's own claim that its outputs forward tackOverrides. a closed
-          # `{ self }:` upstream would throw on the extra kwarg, so forward only here.
+          # upstream declares its outputs forward tackOverrides; a closed `{ self }:`
+          # would throw on the extra kwarg, so forward only when declared
           supportsOverrides = (upPins.tack or { }).recomposable or false;
 
           extraArgs = if supportsOverrides && tackOverrides != { } then { inherit tackOverrides; } else { };
@@ -231,8 +231,8 @@ let
             intersectAttrs (upPins.inputs or { }) (followsForSide "tack" f.level)
           );
         in
-        # a fetch pin is a source tree (a path). only when there are overrides to
-        # push into the upstream's own .tack do we hand back its resolved inputs
+        # a fetch pin is a source tree (path); hand back resolved inputs only when
+        # there are overrides to push into the upstream's .tack
         if hasTack && tackOverrides != { } then
           let
             upstream = import (path + "/.tack");
@@ -261,9 +261,8 @@ let
 
       declared = pins.inputs or { };
 
-      # undeclared lock entries are auto-dedup synthetics only when they are
-      # referenced as [all_follow] targets. stale locks left after hand-editing
-      # pins.toml are ignored, and can be cleaned with `tack rm <name>`.
+      # undeclared lock entries are auto-dedup synthetics only when referenced as
+      # [all_follow] targets; stale locks from hand-edits are ignored (tack rm to clean)
       autoTargets = listToAttrs (
         map (target: {
           name = target;

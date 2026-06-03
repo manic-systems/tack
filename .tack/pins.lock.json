@@ -1,18 +1,18 @@
 {
   "fenix": {
-    "lastModified": 1779963685,
-    "narHash": "sha256-tUa/5UJCc3eaUqlCU8U/9dXefsgdq3sGQR4PKYrRHUw=",
+    "type": "github",
     "owner": "nix-community",
     "repo": "fenix",
-    "rev": "e8a633e2794e74b3354cc8199ae53af649340036",
-    "type": "github"
+    "rev": "f6670530f53e69cc284f7aef818eb0f08fe81905",
+    "narHash": "sha256-SQmrkj17xBdvc8lVMbsY7pIJCjKftgNh42R1keP3dLQ=",
+    "lastModified": 1780397302
   },
   "nixpkgs": {
-    "lastModified": 1779955849,
-    "narHash": "sha256-31mhzm2HpzRr/rupWAFfWBmt9SUjzwr5+giv5Nmb/rA=",
+    "type": "github",
     "owner": "nixos",
     "repo": "nixpkgs",
-    "rev": "a2c6938835fca96e4a10c8561d461efd2f91d04f",
-    "type": "github"
+    "rev": "4df1b885d76a54e1aa1a318f8d16fd6005b6401f",
+    "narHash": "sha256-vhVhuXzFrIOfcssC/9hDHx7MHzDKjF3keHuREOQqQiQ=",
+    "lastModified": 1780336545
   }
 }
