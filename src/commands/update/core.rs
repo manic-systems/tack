@@ -15,10 +15,8 @@ use crate::{
     },
     fetch::{
         self,
-        github::{
-            BranchComparison,
-            CommitLog,
-        },
+        BranchComparison,
+        github::CommitLog,
     },
     lock::LockedNode,
     pins::{

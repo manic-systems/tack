@@ -64,6 +64,13 @@ impl LocalRemote {
         commit.to_string()
     }
 
+    pub(super) fn branch_from_current(&mut self, branch: &str) {
+        self.branch = branch.to_owned();
+        if let Some(tip) = self.tip {
+            self.set_ref(branch, tip);
+        }
+    }
+
     pub(super) fn reset_to(&mut self, rev: &str) {
         let id = parse_id(rev);
         self.tip = Some(id);

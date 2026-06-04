@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     commands::tolerate,
-    fetch::github::CompareStatus,
+    fetch::CompareStatus,
     lock::{
         self,
         LockedNode,
@@ -253,7 +253,7 @@ fn prune_stale_auto_entries(lock: &mut lock::LockFile, valid: &HashSet<String>) 
 mod tests {
     use super::LockObservation;
     use crate::{
-        fetch::github::CompareStatus,
+        fetch::CompareStatus,
         lock::LockedNode,
     };
 

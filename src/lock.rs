@@ -33,7 +33,7 @@ impl LockFile {
     }
 
     pub fn parse(raw: &str) -> Result<Self, serde_json::Error> {
-        let entries: BTreeMap<String, Value> = serde_json::from_str(raw)?;
+        let entries = serde_json::from_str::<BTreeMap<String, Value>>(raw)?;
         let mut lock = Self::new();
         for (name, value) in entries {
             if let Ok(node) = LockedNode::from_value(value.clone()) {
@@ -498,7 +498,7 @@ mod tests {
         lock.save(&path).unwrap();
 
         let written = fs::read_to_string(&path).unwrap();
-        let back: Value = serde_json::from_str(&written).unwrap();
+        let back = serde_json::from_str::<Value>(&written).unwrap();
         assert_eq!(
             back.pointer("/future/type").and_then(Value::as_str),
             Some("mercurial")
@@ -714,7 +714,7 @@ mod tests {
         let back = serde_json::to_string(&n).unwrap();
         println!("IN : {raw}");
         println!("OUT: {back}");
-        let back_json: Value = serde_json::from_str(&back).unwrap();
+        let back_json = serde_json::from_str::<Value>(&back).unwrap();
         assert_eq!(back_json.get("ref"), Some(&json!("nixos-unstable")));
         assert_eq!(back_json.get("revCount"), Some(&json!(42_i64)));
     }

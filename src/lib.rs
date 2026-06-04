@@ -33,10 +33,10 @@ pub use commands::{
     undo,
     update,
 };
-pub use fetch::github::{
+pub use fetch::{
     BranchComparison,
-    CommitLog,
     CompareStatus,
+    github::CommitLog,
 };
 pub use lock::{
     LockFile,

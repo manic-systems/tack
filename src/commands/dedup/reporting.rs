@@ -17,7 +17,7 @@ use super::{
     model::Entry,
 };
 use crate::{
-    fetch::github::CompareStatus,
+    fetch::CompareStatus,
     report::{
         DedupGroup,
         DedupReport,

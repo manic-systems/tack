@@ -5,7 +5,7 @@ use std::{
         Path,
         PathBuf,
     },
-    str::FromStr,
+    time::Duration,
 };
 
 use eyre::{
@@ -29,6 +29,11 @@ use super::{
         HttpClient,
     },
     time::epoch_from_iso,
+    topology::{
+        BranchComparison,
+        CompareStatus,
+        CurrentRev,
+    },
 };
 use crate::{
     lock::LockedNode,
@@ -71,8 +76,8 @@ impl GithubClient {
     }
 
     /// if graphql resolved the ref but left the comparison unavailable, the
-    /// rest compare endpoint may still classify the two revs; verified or
-    /// not-attempted comparisons are left alone
+    /// rest compare endpoint or, last, a generic DAG probe may still classify
+    /// the two revs; verified or not-attempted comparisons are left alone
     fn backfill_comparison(
         self,
         owner: &str,
@@ -97,7 +102,7 @@ impl GithubClient {
 
     fn commit(self, owner: &str, repo: &str, reff: &str) -> FetchResult<(String, i64)> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{reff}");
-        let parsed: GithubCommitResponse = self.http.github_json(&url, None)?;
+        let parsed = self.http.github_json::<GithubCommitResponse>(&url, None)?;
         parsed.rev_and_epoch(&format!("{owner}/{repo}@{reff}"))
     }
 
@@ -108,11 +113,41 @@ impl GithubClient {
         base: &str,
         head: &str,
     ) -> FetchResult<Option<CompareStatus>> {
-        super::git::compare_status(
-            &format!("https://github.com/{owner}/{repo}.git"),
-            base,
-            head,
-        )
+        self.rest_compare_status(owner, repo, base, head)
+            .or_else(|_| self.dag_compare_status(owner, repo, base, head))
+    }
+
+    fn rest_compare_status(
+        self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> FetchResult<Option<CompareStatus>> {
+        let url = Self::compare_url(owner, repo, base, head);
+        let parsed = self
+            .http
+            .github_json::<GithubCompareResponse>(&url, Some(Duration::from_secs(5)))?;
+        Ok(parsed.status())
+    }
+
+    fn dag_compare_status(
+        self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> FetchResult<Option<CompareStatus>> {
+        let _ = self;
+        super::git::compare_status(&Self::clone_url(owner, repo), base, head)
+    }
+
+    fn compare_url(owner: &str, repo: &str, base: &str, head: &str) -> String {
+        format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}?per_page=1")
+    }
+
+    fn clone_url(owner: &str, repo: &str) -> String {
+        format!("https://github.com/{owner}/{repo}.git")
     }
 
     fn commits_between(
@@ -131,7 +166,7 @@ impl GithubClient {
             return Ok(None);
         };
         let url = format!("https://api.github.com/repos/{owner}/{repo}/compare/{old}...{new}");
-        let parsed: GithubCompareResponse = self.http.github_json(&url, None)?;
+        let parsed = self.http.github_json::<GithubCompareResponse>(&url, None)?;
         Ok(Some(parsed.commit_log(limit)))
     }
 
@@ -237,6 +272,7 @@ struct GithubCommitter {
 
 #[derive(Deserialize)]
 struct GithubCompareResponse {
+    status:        Option<String>,
     #[serde(default)]
     commits:       Vec<GithubCompareCommit>,
     #[serde(rename = "total_commits")]
@@ -245,6 +281,10 @@ struct GithubCompareResponse {
 }
 
 impl GithubCompareResponse {
+    fn status(&self) -> Option<CompareStatus> {
+        self.status.as_deref()?.parse().ok()
+    }
+
     fn commit_log(&self, limit: usize) -> CommitLog {
         let total = self
             .total_commits
@@ -283,40 +323,6 @@ impl GithubCompareCommit {
         let subject = msg.lines().next().unwrap_or("").trim_end().to_owned();
         Some((sha, subject))
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct BranchComparison {
-    pub status:   Option<CompareStatus>,
-    pub expected: bool,
-}
-
-impl BranchComparison {
-    pub const fn none() -> Self {
-        Self {
-            status:   None,
-            expected: false,
-        }
-    }
-
-    pub const fn verified(status: CompareStatus) -> Self {
-        Self {
-            status:   Some(status),
-            expected: true,
-        }
-    }
-
-    pub const fn unavailable() -> Self {
-        Self {
-            status:   None,
-            expected: true,
-        }
-    }
-}
-
-pub struct CurrentRev {
-    pub rev:        String,
-    pub comparison: BranchComparison,
 }
 
 pub(super) fn current_rev_compared(
@@ -412,48 +418,6 @@ pub(super) fn fetch_pin_compared(
         rev,
         comparison: resolved.comparison,
     })
-}
-
-/// direction of head relative to base, per github's compare endpoint
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompareStatus {
-    /// head has commits base lacks
-    Ahead,
-    /// head is missing commits base has
-    Behind,
-    /// each side has unique commits
-    Diverged,
-    /// same commit
-    Identical,
-}
-
-impl FromStr for CompareStatus {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, ()> {
-        Ok(match s {
-            "ahead" => Self::Ahead,
-            "behind" => Self::Behind,
-            "diverged" => Self::Diverged,
-            "identical" => Self::Identical,
-            _ => return Err(()),
-        })
-    }
-}
-
-#[cfg(test)]
-impl CompareStatus {
-    pub const fn from_ancestry(
-        base_is_ancestor_of_head: bool,
-        head_is_ancestor_of_base: bool,
-    ) -> Self {
-        match (base_is_ancestor_of_head, head_is_ancestor_of_base) {
-            (true, true) => Self::Identical,
-            (true, false) => Self::Ahead,
-            (false, true) => Self::Behind,
-            (false, false) => Self::Diverged,
-        }
-    }
 }
 
 struct ResolvedGithubRef {
@@ -665,7 +629,7 @@ mod tests {
 
     #[test]
     fn parses_graphql_ref_compare_response() {
-        let parsed: GithubRefCompareData = serde_json::from_str(
+        let parsed = serde_json::from_str::<GithubRefCompareData>(
             r#"{
                 "repository": {
                     "targetRef": {
@@ -696,7 +660,7 @@ mod tests {
 
     #[test]
     fn parses_graphql_annotated_tag_target() {
-        let parsed: GithubRefCompareData = serde_json::from_str(
+        let parsed = serde_json::from_str::<GithubRefCompareData>(
             r#"{
                 "repository": {
                     "targetRef": {

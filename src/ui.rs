@@ -23,10 +23,10 @@ use std::{
     time::Duration,
 };
 
-use crate::fetch::github::{
+use crate::fetch::{
     BranchComparison,
-    CommitLog,
     CompareStatus,
+    github::CommitLog,
 };
 
 #[derive(Clone)]

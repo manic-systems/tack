@@ -22,7 +22,7 @@ use super::{
     model::Entry,
 };
 use crate::{
-    fetch::github::CompareStatus,
+    fetch::CompareStatus,
     report::Mark,
     source::id::SourceId,
 };
@@ -197,7 +197,7 @@ mod tests {
             Entry,
             Side,
         },
-        fetch::github::CompareStatus,
+        fetch::CompareStatus,
         report::Mark,
         source::id::SourceId,
     };
