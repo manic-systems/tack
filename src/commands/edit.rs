@@ -49,7 +49,11 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
     project.save_pins(&doc)?;
 
     let shorturls = doc.shorturls();
-    let expanded = source::localize_path_url(&shorturls.expand(url), project.dir());
+    let localized = source::localize_path_url_with_warning(&shorturls.expand(url), project.dir());
+    if let Some(warning) = localized.warning {
+        eprintln!("tack: {warning}");
+    }
+    let expanded = localized.url;
     let fetched = match pin_type {
         PinType::Fixed => fetch::fetch_fixed_pin(&expanded, unpack),
         PinType::Flake | PinType::Fetch => {

@@ -47,7 +47,7 @@ pub enum Source {
         url: String,
     },
     /// a directory on disk, read at nix eval time. the stored spec is either
-    /// absolute or relative to the resolver dir; see [`localize_path_url`]
+    /// absolute or relative to the resolver dir; see [`localize_path_url_with_warning`]
     Path {
         path: String,
     },
@@ -153,14 +153,26 @@ impl FromStr for Source {
 /// project's neighbourhood (so it travels with a moved project), absolute when
 /// it points somewhere unrelated. non-`path:` urls pass through untouched.
 /// warns but does not fail when the target is missing
-pub fn localize_path_url(expanded: &str, tack_dir: &Path) -> String {
-    let Some(spec) = expanded.strip_prefix("path:") else {
-        return expanded.to_owned();
-    };
-    format!("path:{}", localize_path_spec(spec, tack_dir))
+pub struct LocalizedUrl {
+    pub url:     String,
+    pub warning: Option<String>,
 }
 
-fn localize_path_spec(spec: &str, tack_dir: &Path) -> String {
+pub fn localize_path_url_with_warning(expanded: &str, tack_dir: &Path) -> LocalizedUrl {
+    let Some(spec) = expanded.strip_prefix("path:") else {
+        return LocalizedUrl {
+            url:     expanded.to_owned(),
+            warning: None,
+        };
+    };
+    let (path, warning) = localize_path_spec(spec, tack_dir);
+    LocalizedUrl {
+        url: format!("path:{path}"),
+        warning,
+    }
+}
+
+fn localize_path_spec(spec: &str, tack_dir: &Path) -> (String, Option<String>) {
     let root = project_root_of(tack_dir);
     let raw = if Path::new(spec).is_absolute() {
         PathBuf::from(spec)
@@ -168,17 +180,17 @@ fn localize_path_spec(spec: &str, tack_dir: &Path) -> String {
         root.join(spec)
     };
     let target = lexical_normalize(&raw);
-    if !target.exists() {
-        eprintln!("tack: path pin target not found: {}", target.display());
-    }
+    let warning =
+        (!target.exists()).then(|| format!("path pin target not found: {}", target.display()));
     // "near" the project = inside the directory that holds the project, so a
     // sibling checkout resolves relative; anything further out stays absolute
     let boundary = root.parent().unwrap_or(root.as_path());
-    if target.starts_with(boundary) {
+    let path = if target.starts_with(boundary) {
         relative_from(tack_dir, &target)
     } else {
         target.to_string_lossy().into_owned()
-    }
+    };
+    (path, warning)
 }
 
 /// the project root holding a `.tack` dir, else the dir itself (legacy layout)
@@ -290,7 +302,7 @@ mod tests {
 
     use super::{
         Source,
-        localize_path_url,
+        localize_path_url_with_warning,
     };
 
     #[test]
@@ -309,20 +321,23 @@ mod tests {
         let tack = Path::new("/home/u/proj/.tack");
         // a sibling checkout lives near the project: relative to the resolver
         assert_eq!(
-            localize_path_url("path:../sibling", tack),
+            localize_path_url_with_warning("path:../sibling", tack).url,
             "path:../../sibling"
         );
         assert_eq!(
-            localize_path_url("path:./vendor/dep", tack),
+            localize_path_url_with_warning("path:./vendor/dep", tack).url,
             "path:../vendor/dep"
         );
         // somewhere unrelated stays absolute so it survives a moved project
         assert_eq!(
-            localize_path_url("path:/etc/nixos", tack),
+            localize_path_url_with_warning("path:/etc/nixos", tack).url,
             "path:/etc/nixos"
         );
         // non-path urls pass through untouched
-        assert_eq!(localize_path_url("github:o/r", tack), "github:o/r");
+        assert_eq!(
+            localize_path_url_with_warning("github:o/r", tack).url,
+            "github:o/r"
+        );
     }
 
     #[test]
