@@ -16,11 +16,17 @@ use eyre::{
     WrapErr as _,
 };
 use gix::{
+    bstr::BStr,
     index::write::Options as IndexWriteOptions,
     progress::Discard,
     remote::{
+        Connection,
         Direction,
-        fetch::Shallow,
+        fetch::{
+            Shallow,
+            Tags,
+        },
+        ref_map::Options as RefMapOptions,
     },
     submodule::config::Update as SubmoduleUpdate,
     url::Scheme,
@@ -52,26 +58,29 @@ pub(super) fn current_rev_compared(
     pinned: Option<&str>,
     old_rev: Option<&str>,
 ) -> Result<CurrentRev> {
-    if let Some(pinned_rev) = pinned {
-        let comparison = if old_rev == Some(pinned_rev) {
+    let rev = current_rev(url, reff, pinned)?;
+    let comparison = if pinned.is_some() {
+        if old_rev == Some(rev.as_str()) {
             BranchComparison::verified(CompareStatus::Identical)
         } else {
             BranchComparison::none()
-        };
-        return Ok(CurrentRev {
-            rev: pinned_rev.to_owned(),
-            comparison,
-        });
-    }
-
-    let rev = dag::resolve_tip(url, reff)?;
-    let comparison = old_rev.map_or_else(BranchComparison::none, |old| {
-        compare_status(url, old, &rev)
-            .ok()
-            .flatten()
-            .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
-    });
+        }
+    } else {
+        old_rev.map_or_else(BranchComparison::none, |old| {
+            compare_status(url, old, &rev)
+                .ok()
+                .flatten()
+                .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
+        })
+    };
     Ok(CurrentRev { rev, comparison })
+}
+
+pub(super) fn current_rev(url: &str, reff: Option<&str>, pinned: Option<&str>) -> Result<String> {
+    pinned.map_or_else(
+        || Ok(dag::resolve_tip(url, reff)?),
+        |rev| Ok(rev.to_owned()),
+    )
 }
 
 pub(super) fn compare_status(
@@ -204,13 +213,11 @@ fn clone_fetch_candidate(
         .remote_at(url)
         .wrap_err_with(|| format!("prepare remote {url}"))?;
     remote.replace_refspecs(
-        refspecs
-            .iter()
-            .map(|refspec| gix::bstr::BStr::new(refspec.as_str())),
+        refspecs.iter().map(|refspec| BStr::new(refspec.as_str())),
         Direction::Fetch,
     )?;
-    remote = remote.with_fetch_tags(gix::remote::fetch::Tags::None);
-    fetch_into_repo(&repo, remote, url, shallow).wrap_err_with(|| format!("fetch {url}"))?;
+    remote = remote.with_fetch_tags(Tags::None);
+    fetch_into_repo(&repo, &remote, url, shallow).wrap_err_with(|| format!("fetch {url}"))?;
 
     if write_worktree {
         let commit = fetched_commit(&repo, &fetched_ref)
@@ -223,7 +230,7 @@ fn clone_fetch_candidate(
 
 fn fetch_into_repo(
     repo: &gix::Repository,
-    remote: gix::Remote<'_>,
+    remote: &gix::Remote<'_>,
     url: &str,
     shallow: bool,
 ) -> Result<()> {
@@ -237,7 +244,7 @@ fn fetch_into_repo(
                 shallow,
             )?;
         },
-        _ => {
+        Scheme::File | Scheme::Git | Scheme::Ssh | Scheme::Ext(_) => {
             let connection = remote.connect(Direction::Fetch)?;
             receive_fetch(repo, connection, shallow)?;
         },
@@ -247,15 +254,14 @@ fn fetch_into_repo(
 
 fn receive_fetch<T>(
     _repo: &gix::Repository,
-    connection: gix::remote::Connection<'_, '_, T>,
+    connection: Connection<'_, '_, T>,
     shallow: bool,
 ) -> Result<()>
 where
     T: Transport,
 {
     let interrupt = AtomicBool::new(false);
-    let mut prepare =
-        connection.prepare_fetch(Discard, gix::remote::ref_map::Options::default())?;
+    let mut prepare = connection.prepare_fetch(Discard, RefMapOptions::default())?;
     if shallow {
         prepare = prepare.with_shallow(Shallow::DepthAtRemote(
             NonZeroU32::new(1).expect("constant is non-zero"),

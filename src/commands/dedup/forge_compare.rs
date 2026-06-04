@@ -12,10 +12,7 @@ use crate::{
         github::CompareStatus,
     },
     lock::LockedNode,
-    source::{
-        gitlab,
-        id::SourceId,
-    },
+    source::id::SourceId,
 };
 
 #[derive(PartialEq, Eq, Hash)]
@@ -48,10 +45,7 @@ pub(super) fn compare(id: &SourceId, base: &str, head: &str) -> CompareAttempt {
             ref host,
             ref owner,
             ref repo,
-        } => {
-            let url = gitlab::clone_url(host, owner, repo);
-            tolerate(fetch::git_compare_status(&url, base, head))
-        },
+        } => tolerate(fetch::gitlab::compare_status(host, owner, repo, base, head)),
         SourceId::Git { ref url } => tolerate(fetch::git_compare_status(url, base, head)),
         SourceId::Tarball { .. } | SourceId::Indirect { .. } | SourceId::Path { .. } => {
             (None, None)

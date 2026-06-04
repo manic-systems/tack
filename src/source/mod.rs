@@ -47,7 +47,8 @@ pub enum Source {
         url: String,
     },
     /// a directory on disk, read at nix eval time. the stored spec is either
-    /// absolute or relative to the resolver dir; see [`localize_path_url_with_warning`]
+    /// absolute or relative to the resolver dir; see
+    /// [`localize_path_url_with_warning`]
     Path {
         path: String,
     },

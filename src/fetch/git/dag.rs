@@ -2,23 +2,39 @@
 
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
+    env,
     fs,
     io::{
         self,
         BufRead,
         Read,
     },
+    ops::ControlFlow,
     sync::atomic::AtomicBool,
 };
 
 use gix::{
+    credentials::{
+        helper::Action as CredentialsAction,
+        protocol::Result as CredentialsResult,
+    },
     progress::Discard,
     url::Scheme,
 };
+use gix_pack::bundle::write::Options as PackWriteOptions;
+use gix_protocol::{
+    fetch::{
+        Arguments,
+        Response,
+    },
+    handshake,
+    ls_refs::RefPrefixes,
+};
 use gix_transport::client::blocking_io::{
+    ExtendedBufRead,
     HandleProgress,
     Transport,
+    connect,
 };
 
 use crate::fetch::{
@@ -31,6 +47,9 @@ use crate::fetch::{
 };
 
 const PACK_BYTE_LIMIT: u64 = 64 * 1024 * 1024;
+const DEFAULT_DEEPEN_ROUNDS: usize = 3;
+const MAX_DEEPEN_ROUNDS: usize = 10;
+const DEEPEN_ROUNDS_ENV: &str = "TACK_GIT_DAG_ROUNDS";
 
 pub(super) fn compare_status(
     url: &str,
@@ -45,9 +64,9 @@ pub(super) fn resolve_tip(url: &str, reff: Option<&str>) -> FetchResult<String> 
         .map_err(|err| FetchError::Transport(format!("create ref probe repo: {err}")))?;
     let repo = gix::init_bare(dir.path())
         .map_err(|err| FetchError::Transport(format!("init ref probe repo: {err}")))?;
-    let refs = list_refs(&repo, url, Some(ref_prefixes(reff)))?;
+    let remote_refs = list_refs(&repo, url, Some(ref_prefixes(reff)))?;
     for candidate in ref_candidates(reff) {
-        if let Some(object) = refs
+        if let Some(object) = remote_refs
             .iter()
             .find_map(|reference| object_for_ref(reference, &candidate))
         {
@@ -57,7 +76,7 @@ pub(super) fn resolve_tip(url: &str, reff: Option<&str>) -> FetchResult<String> 
     Err(FetchError::NotFound {
         what: reff.map_or_else(
             || "git ref HEAD".to_owned(),
-            |reff| format!("git ref {reff}"),
+            |target_ref| format!("git ref {target_ref}"),
         ),
     })
 }
@@ -66,7 +85,6 @@ struct DagGraph {
     dir:        tempfile::TempDir,
     repo:       gix::Repository,
     remote_url: String,
-    shallows:   BTreeSet<gix::ObjectId>,
 }
 
 impl DagGraph {
@@ -79,19 +97,19 @@ impl DagGraph {
             return Ok(Some(CompareStatus::Identical));
         }
 
-        let mut graph = Self::new(url)?;
-        graph.fetch(base, &[], true)?;
-        graph.fetch(head, &[base], false)?;
-        if let Some(status) = graph.local_status(base, head)? {
-            return Ok(Some(status));
+        for depth in deepen_depths()? {
+            let mut graph = Self::new(url)?;
+            if let Err(err) = graph.fetch(&[base, head], depth) {
+                if is_pack_limit(&err) {
+                    return Ok(None);
+                }
+                return Err(err);
+            }
+            if let Some(status) = graph.local_status(base, head)? {
+                return Ok(Some(status));
+            }
         }
-
-        graph.fetch(base, &[head], false)?;
-        Ok(Some(
-            graph
-                .local_status(base, head)?
-                .unwrap_or(CompareStatus::Diverged),
-        ))
+        Ok(None)
     }
 
     fn new(url: &str) -> FetchResult<Self> {
@@ -103,24 +121,11 @@ impl DagGraph {
             dir,
             repo,
             remote_url: url.to_owned(),
-            shallows: BTreeSet::new(),
         })
     }
 
-    fn fetch(
-        &mut self,
-        want: gix::ObjectId,
-        haves: &[gix::ObjectId],
-        shallow: bool,
-    ) -> FetchResult<()> {
-        filtered_commit_fetch(
-            &self.repo,
-            &self.remote_url,
-            want,
-            haves,
-            shallow,
-            &mut self.shallows,
-        )?;
+    fn fetch(&mut self, wants: &[gix::ObjectId], depth: usize) -> FetchResult<()> {
+        filtered_commit_fetch(&self.repo, &self.remote_url, wants, depth)?;
         self.repo = gix::open(self.dir.path())
             .map_err(|err| FetchError::Transport(format!("reopen dag probe repo: {err}")))?;
         Ok(())
@@ -135,7 +140,7 @@ impl DagGraph {
             .repo
             .merge_bases_many(base, &[head])
             .map_err(|err| FetchError::Transport(format!("compute dag merge-base: {err}")))?;
-        let Some(merge_base) = bases.first().map(|base| base.detach()) else {
+        let Some(merge_base) = bases.first().map(|candidate| candidate.detach()) else {
             return Ok(None);
         };
         Ok(Some(if merge_base == base {
@@ -151,8 +156,8 @@ impl DagGraph {
 fn list_refs(
     repo: &gix::Repository,
     url: &str,
-    prefixes: Option<gix_protocol::ls_refs::RefPrefixes>,
-) -> FetchResult<Vec<gix_protocol::handshake::Ref>> {
+    prefixes: Option<RefPrefixes>,
+) -> FetchResult<Vec<handshake::Ref>> {
     let mut progress = Discard;
     let parsed_url = gix::Url::try_from(url)
         .map_err(|err| FetchError::Transport(format!("parse git url {url}: {err}")))?;
@@ -183,10 +188,8 @@ fn list_refs(
 fn filtered_commit_fetch(
     repo: &gix::Repository,
     url: &str,
-    want: gix::ObjectId,
-    haves: &[gix::ObjectId],
-    shallow: bool,
-    shallows: &mut BTreeSet<gix::ObjectId>,
+    wants: &[gix::ObjectId],
+    depth: usize,
 ) -> FetchResult<()> {
     let allow_unfiltered = gix::Url::try_from(url)
         .ok()
@@ -208,41 +211,24 @@ fn filtered_commit_fetch(
     let mut features = gix_protocol::Command::Fetch
         .default_features(handshake.server_protocol_version, &handshake.capabilities);
     features.push(("agent", Some(Cow::Borrowed("tack"))));
-    let sideband_all = features.iter().any(|(name, _)| *name == "sideband-all");
-    let mut args =
-        gix_protocol::fetch::Arguments::new(handshake.server_protocol_version, features, false);
-    if !args.can_use_filter() {
-        if !allow_unfiltered {
-            return Err(FetchError::Transport(format!(
-                "git remote does not support filtered fetch: {url}"
-            )));
-        }
-    } else {
+    let sideband_all = features.iter().any(|&(name, _)| name == "sideband-all");
+    let mut args = Arguments::new(handshake.server_protocol_version, features, false);
+    if args.can_use_filter() {
         args.filter("tree:0");
+    } else if !allow_unfiltered {
+        return Err(FetchError::Transport(format!(
+            "git remote does not support filtered fetch: {url}"
+        )));
     }
-    if !shallows.is_empty() && !args.can_use_shallow() {
-        if !allow_unfiltered {
-            return Err(FetchError::Transport(format!(
-                "git remote does not support shallow boundary negotiation: {url}"
-            )));
-        }
-    } else {
-        for shallow_boundary in shallows.iter().copied() {
-            args.shallow(shallow_boundary);
-        }
+    if args.can_use_deepen() {
+        args.deepen(depth);
+    } else if !allow_unfiltered {
+        return Err(FetchError::Transport(format!(
+            "git remote does not support shallow fetch: {url}"
+        )));
     }
-    if shallow && !args.can_use_deepen() {
-        if !allow_unfiltered {
-            return Err(FetchError::Transport(format!(
-                "git remote does not support shallow fetch: {url}"
-            )));
-        }
-    } else if shallow {
-        args.deepen(1);
-    }
-    args.want(want);
-    for have in haves {
-        args.have(have);
+    for want in wants {
+        args.want(want);
     }
 
     let mut reader = args
@@ -251,14 +237,11 @@ fn filtered_commit_fetch(
     if sideband_all {
         install_sideband_handler(&mut reader);
     }
-    let response = gix_protocol::fetch::Response::from_line_reader(
-        handshake.server_protocol_version,
-        &mut reader,
-        true,
-        false,
-    )
-    .map_err(|err| FetchError::Transport(format!("read git filtered fetch {url}: {err}")))?;
-    apply_shallow_updates(shallows, response.shallow_updates());
+    let response =
+        Response::from_line_reader(handshake.server_protocol_version, &mut reader, true, false)
+            .map_err(|err| {
+                FetchError::Transport(format!("read git filtered fetch {url}: {err}"))
+            })?;
     if !response.has_pack() {
         return Ok(());
     }
@@ -276,7 +259,7 @@ fn filtered_commit_fetch(
         &mut progress,
         &interrupt,
         Some(repo.objects.clone()),
-        gix_pack::bundle::write::Options {
+        PackWriteOptions {
             object_hash: repo.object_hash(),
             ..Default::default()
         },
@@ -288,8 +271,8 @@ fn filtered_commit_fetch(
     Ok(())
 }
 
-fn ref_prefixes(reff: Option<&str>) -> gix_protocol::ls_refs::RefPrefixes {
-    let mut prefixes = gix_protocol::ls_refs::RefPrefixes::new();
+fn ref_prefixes(reff: Option<&str>) -> RefPrefixes {
+    let mut prefixes = RefPrefixes::new();
     prefixes.extend(ref_candidates(reff).into_iter().map(Into::into));
     prefixes
 }
@@ -308,51 +291,37 @@ fn ref_candidates(reff: Option<&str>) -> Vec<String> {
     }
 }
 
-fn object_for_ref(
-    reference: &gix_protocol::handshake::Ref,
-    candidate: &str,
-) -> Option<gix::ObjectId> {
-    match reference {
-        gix_protocol::handshake::Ref::Peeled {
-            full_ref_name,
+fn object_for_ref(reference: &handshake::Ref, candidate: &str) -> Option<gix::ObjectId> {
+    match *reference {
+        handshake::Ref::Peeled {
+            ref full_ref_name,
             object,
             ..
         }
-        | gix_protocol::handshake::Ref::Direct {
-            full_ref_name,
+        | handshake::Ref::Direct {
+            ref full_ref_name,
             object,
         }
-        | gix_protocol::handshake::Ref::Symbolic {
-            full_ref_name,
+        | handshake::Ref::Symbolic {
+            ref full_ref_name,
             object,
             ..
-        } if full_ref_name.as_slice() == candidate.as_bytes() => Some(*object),
-        _ => None,
+        } if full_ref_name.as_slice() == candidate.as_bytes() => Some(object),
+        handshake::Ref::Peeled { .. }
+        | handshake::Ref::Direct { .. }
+        | handshake::Ref::Symbolic { .. }
+        | handshake::Ref::Unborn { .. } => None,
     }
 }
 
-fn apply_shallow_updates(
-    shallows: &mut BTreeSet<gix::ObjectId>,
-    updates: &[gix_protocol::fetch::response::ShallowUpdate],
-) {
-    for update in updates {
-        match update {
-            gix_protocol::fetch::response::ShallowUpdate::Shallow(id) => {
-                shallows.insert(*id);
-            },
-            gix_protocol::fetch::response::ShallowUpdate::Unshallow(id) => {
-                shallows.remove(id);
-            },
-        }
-    }
-}
-
+#[expect(
+    clippy::result_large_err,
+    reason = "gix dictates the credential closure's return type"
+)]
 fn configured_credentials(
     repo: &gix::Repository,
     url: gix::Url,
-) -> FetchResult<
-    impl FnMut(gix::credentials::helper::Action) -> gix::credentials::protocol::Result + 'static,
-> {
+) -> FetchResult<impl FnMut(CredentialsAction) -> CredentialsResult + 'static> {
     let (mut cascade, _action, prompt_options) = repo
         .config_snapshot()
         .credential_helpers(url)
@@ -363,14 +332,11 @@ fn configured_credentials(
 fn low_level_transport(parsed_url: gix::Url, url: &str) -> FetchResult<Box<dyn Transport + Send>> {
     match parsed_url.scheme {
         Scheme::Http | Scheme::Https => Ok(git_http::boxed(parsed_url)),
-        _ => {
-            gix_transport::client::blocking_io::connect::connect(
-                url,
-                gix_transport::client::blocking_io::connect::Options {
-                    version: gix_transport::Protocol::V2,
-                    ..Default::default()
-                },
-            )
+        Scheme::File | Scheme::Git | Scheme::Ssh | Scheme::Ext(_) => {
+            connect::connect(url, connect::Options {
+                version: gix_transport::Protocol::V2,
+                ..Default::default()
+            })
             .map_err(|err| FetchError::Transport(format!("connect git transport {url}: {err}")))
         },
     }
@@ -381,14 +347,69 @@ fn parse_object_id(rev: &str) -> FetchResult<gix::ObjectId> {
         .map_err(|err| FetchError::Transport(format!("parse git object id {rev}: {err}")))
 }
 
-fn install_sideband_handler<'a>(
-    reader: &mut Box<dyn gix_transport::client::blocking_io::ExtendedBufRead<'a> + Unpin + 'a>,
-) {
+fn deepen_depths() -> FetchResult<impl Iterator<Item = usize>> {
+    configured_rounds().map(|rounds| (0..rounds).map(deepen_depth))
+}
+
+fn configured_rounds() -> FetchResult<usize> {
+    match env::var(DEEPEN_ROUNDS_ENV) {
+        Ok(raw) => parse_rounds(Some(raw.as_str())),
+        Err(env::VarError::NotPresent) => Ok(DEFAULT_DEEPEN_ROUNDS),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(FetchError::Transport(format!(
+                "{DEEPEN_ROUNDS_ENV} must be unicode"
+            )))
+        },
+    }
+}
+
+fn parse_rounds(raw_value: Option<&str>) -> FetchResult<usize> {
+    let Some(raw) = raw_value else {
+        return Ok(DEFAULT_DEEPEN_ROUNDS);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_DEEPEN_ROUNDS);
+    }
+    let rounds = trimmed.parse::<usize>().map_err(|err| {
+        FetchError::Transport(format!(
+            "{DEEPEN_ROUNDS_ENV} must be an integer from 1 to {MAX_DEEPEN_ROUNDS}: {err}"
+        ))
+    })?;
+    if (1..=MAX_DEEPEN_ROUNDS).contains(&rounds) {
+        Ok(rounds)
+    } else {
+        Err(FetchError::Transport(format!(
+            "{DEEPEN_ROUNDS_ENV} must be an integer from 1 to {MAX_DEEPEN_ROUNDS}, got {rounds}"
+        )))
+    }
+}
+
+const fn deepen_depth(round: usize) -> usize {
+    match round {
+        0 => 1,
+        1 => 8,
+        _ => 1 << (round + 2),
+    }
+}
+
+fn is_pack_limit(err: &FetchError) -> bool {
+    match *err {
+        FetchError::Transport(ref message) => message.contains("git DAG pack exceeded"),
+        FetchError::NotFound { .. }
+        | FetchError::Auth { .. }
+        | FetchError::Decode { .. }
+        | FetchError::Github(_)
+        | FetchError::Gitlab(_) => false,
+    }
+}
+
+fn install_sideband_handler<'a>(reader: &mut Box<dyn ExtendedBufRead<'a> + Unpin + 'a>) {
     reader.set_progress_handler(Some(Box::new(|is_err: bool, data: &[u8]| {
         if is_err && !data.is_empty() {
             eprintln!("remote: {}", String::from_utf8_lossy(data));
         }
-        std::ops::ControlFlow::Continue(())
+        ControlFlow::Continue(())
     }) as HandleProgress<'a>));
 }
 
@@ -399,7 +420,7 @@ struct CappedBufRead<'a, R: BufRead + ?Sized> {
 }
 
 impl<'a, R: BufRead + ?Sized> CappedBufRead<'a, R> {
-    fn new(inner: &'a mut R, limit: u64) -> Self {
+    const fn new(inner: &'a mut R, limit: u64) -> Self {
         Self {
             inner,
             remaining: limit,
@@ -409,6 +430,10 @@ impl<'a, R: BufRead + ?Sized> CappedBufRead<'a, R> {
 
     fn limit_error(&self) -> io::Error {
         io::Error::other(format!("git DAG pack exceeded {} bytes", self.limit))
+    }
+
+    fn cap(remaining: u64, len: usize) -> usize {
+        usize::try_from(remaining).map_or(len, |fits| len.min(fits))
     }
 }
 
@@ -420,7 +445,7 @@ impl<R: BufRead + ?Sized> Read for CappedBufRead<'_, R> {
         if self.remaining == 0 {
             return Err(self.limit_error());
         }
-        let max = buf.len().min(self.remaining as usize);
+        let max = Self::cap(self.remaining, buf.len());
         let read = self.inner.read(&mut buf[..max])?;
         self.remaining -= read as u64;
         Ok(read)
@@ -432,24 +457,27 @@ impl<R: BufRead + ?Sized> BufRead for CappedBufRead<'_, R> {
         if self.remaining == 0 {
             return Err(self.limit_error());
         }
+        let remaining = self.remaining;
         let available = self.inner.fill_buf()?;
         if available.is_empty() {
             return Ok(available);
         }
-        let visible = available.len().min(self.remaining as usize);
+        let visible = Self::cap(remaining, available.len());
         Ok(&available[..visible])
     }
 
-    fn consume(&mut self, amt: usize) {
-        let consumed = amt.min(self.remaining as usize);
+    fn consume(&mut self, amount: usize) {
+        let consumed = Self::cap(self.remaining, amount);
         self.remaining -= consumed as u64;
         self.inner.consume(consumed);
     }
 }
 
 #[cfg(test)]
+#[expect(clippy::panic, reason = "panic is the test-failure coping mechanism")]
 mod tests {
     use std::{
+        fs,
         io::{
             Cursor,
             Read as _,
@@ -464,6 +492,8 @@ mod tests {
     use super::{
         CappedBufRead,
         compare_status,
+        deepen_depth,
+        parse_rounds,
         resolve_tip,
     };
     use crate::fetch::github::CompareStatus;
@@ -472,6 +502,8 @@ mod tests {
         let output = Command::new("git")
             .args(args)
             .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output()
             .unwrap_or_else(|err| panic!("run git {args:?}: {err}"));
         assert!(
@@ -515,7 +547,7 @@ mod tests {
         }
 
         fn commit(&self, body: &str, message: &str) -> String {
-            std::fs::write(self.work.join("file.txt"), body).unwrap();
+            fs::write(self.work.join("file.txt"), body).unwrap();
             git(&self.work, &["add", "file.txt"]);
             git(&self.work, &["commit", "-m", message]);
             git(&self.work, &["rev-parse", "HEAD"])
@@ -598,6 +630,40 @@ mod tests {
             compare_status(&url, &old, &new).unwrap(),
             Some(CompareStatus::Diverged)
         );
+    }
+
+    #[test]
+    fn compare_returns_unverified_when_merge_base_exceeds_probe_depth() {
+        let remote = LocalRemote::new();
+        let root = remote.commit("root\n", "root");
+        git(&remote.work, &["branch", "-M", "main"]);
+        let mut old = String::new();
+        for idx in 0..20_u8 {
+            old = remote.commit(&format!("old {idx}\n"), &format!("old {idx}"));
+        }
+        remote.push(false);
+        git(&remote.work, &["reset", "--hard", &root]);
+        let mut new = String::new();
+        for idx in 0..20_u8 {
+            new = remote.commit(&format!("new {idx}\n"), &format!("new {idx}"));
+        }
+        remote.push(true);
+        let url = remote.url();
+
+        assert_eq!(compare_status(&url, &old, &new).unwrap(), None);
+    }
+
+    #[test]
+    fn deepen_rounds_are_configured_as_iterations() {
+        let depths = (0..5).map(deepen_depth).collect::<Vec<_>>();
+
+        assert_eq!(depths, vec![1, 8, 16, 32, 64]);
+        assert_eq!(parse_rounds(None).unwrap(), 3);
+        assert_eq!(parse_rounds(Some("")).unwrap(), 3);
+        assert_eq!(parse_rounds(Some("4")).unwrap(), 4);
+        parse_rounds(Some("0")).unwrap_err();
+        parse_rounds(Some("11")).unwrap_err();
+        parse_rounds(Some("deep")).unwrap_err();
     }
 
     #[test]

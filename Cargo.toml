@@ -17,28 +17,41 @@ name = "tack"
 path = "src/main.rs"
 
 [dependencies]
-color-eyre    = "0.6.5"
+color-eyre = "0.6.5"
 data-encoding = "2.11.0"
-etcetera      = "0.11.0"
-eyre          = "0.6.12"
-flate2        = "1.1.9"
-gix           = { default-features = false, features = [ "blocking-network-client", "revision", "sha1", "worktree-mutation" ], version = "0.84.0" }
-gix-pack      = "0.71.0"
-gix-protocol  = { default-features = false, features = [ "blocking-client", "fetch", "handshake", "sha1" ], version = "0.62.0" }
-gix-transport = { default-features = false, features = [ "blocking-client", "http-client" ], version = "0.57.1" }
+etcetera = "0.11.0"
+eyre = "0.6.12"
+flate2 = "1.1.9"
+gix = { default-features = false, features = [
+  "blocking-network-client",
+  "revision",
+  "sha1",
+  "worktree-mutation",
+], version = "0.84.0" }
+gix-pack = "0.71.0"
+gix-protocol = { default-features = false, features = [
+  "blocking-client",
+  "fetch",
+  "handshake",
+  "sha1",
+], version = "0.62.0" }
+gix-transport = { default-features = false, features = [
+  "blocking-client",
+  "http-client",
+], version = "0.57.1" }
 gix-worktree-state = "0.31.0"
-hmac-sha256        = "1.1.14"
-native-tls         = "0.2.18"
-pound              = "0.1.4"
-rayon              = "1.12.0"
-serde              = { features = [ "derive" ], version = "1.0.228" }
-serde_json         = "1.0.150"
-tar                = { default-features = false, version = "0.4.46" }
-tempfile           = "3.27.0"
-thiserror          = "2.0.18"
-toml_edit          = "0.25.12"
-ureq               = { default-features = false, features = [ "native-tls" ], version = "3.3.0" }
-xz2                = "0.1.7"
+hmac-sha256 = "1.1.14"
+native-tls = "0.2.18"
+pound = "0.1.4"
+rayon = "1.12.0"
+serde = { features = [ "derive" ], version = "1.0.228" }
+serde_json = "1.0.150"
+tar = { default-features = false, version = "0.4.46" }
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+toml_edit = "0.25.12"
+ureq = { default-features = false, features = [ "native-tls" ], version = "3.3.0" }
+xz2 = "0.1.7"
 
 [profile.release]
 codegen-units = 1

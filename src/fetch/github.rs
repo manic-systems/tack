@@ -6,6 +6,7 @@ use std::{
         PathBuf,
     },
     str::FromStr,
+    time::Duration,
 };
 
 use eyre::{
@@ -71,8 +72,8 @@ impl GithubClient {
     }
 
     /// if graphql resolved the ref but left the comparison unavailable, the
-    /// rest compare endpoint may still classify the two revs; verified or
-    /// not-attempted comparisons are left alone
+    /// rest compare endpoint or, last, a generic DAG probe may still classify
+    /// the two revs; verified or not-attempted comparisons are left alone
     fn backfill_comparison(
         self,
         owner: &str,
@@ -108,11 +109,40 @@ impl GithubClient {
         base: &str,
         head: &str,
     ) -> FetchResult<Option<CompareStatus>> {
-        super::git::compare_status(
-            &format!("https://github.com/{owner}/{repo}.git"),
-            base,
-            head,
-        )
+        self.rest_compare_status(owner, repo, base, head)
+            .or_else(|_| self.dag_compare_status(owner, repo, base, head))
+    }
+
+    fn rest_compare_status(
+        self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> FetchResult<Option<CompareStatus>> {
+        let url = Self::compare_url(owner, repo, base, head);
+        let parsed: GithubCompareResponse =
+            self.http.github_json(&url, Some(Duration::from_secs(5)))?;
+        Ok(parsed.status())
+    }
+
+    fn dag_compare_status(
+        self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> FetchResult<Option<CompareStatus>> {
+        let _ = self;
+        super::git::compare_status(&Self::clone_url(owner, repo), base, head)
+    }
+
+    fn compare_url(owner: &str, repo: &str, base: &str, head: &str) -> String {
+        format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}?per_page=1")
+    }
+
+    fn clone_url(owner: &str, repo: &str) -> String {
+        format!("https://github.com/{owner}/{repo}.git")
     }
 
     fn commits_between(
@@ -237,6 +267,7 @@ struct GithubCommitter {
 
 #[derive(Deserialize)]
 struct GithubCompareResponse {
+    status:        Option<String>,
     #[serde(default)]
     commits:       Vec<GithubCompareCommit>,
     #[serde(rename = "total_commits")]
@@ -245,6 +276,10 @@ struct GithubCompareResponse {
 }
 
 impl GithubCompareResponse {
+    fn status(&self) -> Option<CompareStatus> {
+        self.status.as_deref()?.parse().ok()
+    }
+
     fn commit_log(&self, limit: usize) -> CommitLog {
         let total = self
             .total_commits
