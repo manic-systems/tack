@@ -12,7 +12,10 @@ use crate::{
         github::CompareStatus,
     },
     lock::LockedNode,
-    source::id::SourceId,
+    source::{
+        gitlab,
+        id::SourceId,
+    },
 };
 
 #[derive(PartialEq, Eq, Hash)]
@@ -27,9 +30,12 @@ pub(super) struct CompareAttempt {
     cause:  Option<String>,
 }
 
-/// whether `compare` has a forge api to ask for this identity
+/// whether `compare` has a branch-topology backend to ask for this identity
 pub(super) const fn comparable(id: &SourceId) -> bool {
-    matches!(*id, SourceId::Github { .. } | SourceId::Gitlab { .. })
+    matches!(
+        *id,
+        SourceId::Github { .. } | SourceId::Gitlab { .. } | SourceId::Git { .. }
+    )
 }
 
 pub(super) fn compare(id: &SourceId, base: &str, head: &str) -> CompareAttempt {
@@ -42,11 +48,14 @@ pub(super) fn compare(id: &SourceId, base: &str, head: &str) -> CompareAttempt {
             ref host,
             ref owner,
             ref repo,
-        } => tolerate(fetch::gitlab::compare_status(host, owner, repo, base, head)),
-        SourceId::Git { .. }
-        | SourceId::Tarball { .. }
-        | SourceId::Indirect { .. }
-        | SourceId::Path { .. } => (None, None),
+        } => {
+            let url = gitlab::clone_url(host, owner, repo);
+            tolerate(fetch::git_compare_status(&url, base, head))
+        },
+        SourceId::Git { ref url } => tolerate(fetch::git_compare_status(url, base, head)),
+        SourceId::Tarball { .. } | SourceId::Indirect { .. } | SourceId::Path { .. } => {
+            (None, None)
+        },
     };
     CompareAttempt {
         status: maybe_status.flatten(),
