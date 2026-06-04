@@ -5,8 +5,6 @@
   stdenv,
   pkg-config,
   openssl,
-  libgit2,
-  libssh2,
   zlib,
   clang,
   wild ? null,
@@ -31,14 +29,11 @@ rustPlatform.buildRustPackage {
   ];
   buildInputs = [
     openssl
-    libgit2
-    libssh2
     zlib
   ];
 
   # link nixpkgs c libs without vendored copies
   env = {
-    LIBGIT2_NO_VENDOR = 1;
     OPENSSL_NO_VENDOR = 1;
   }
   // lib.optionalAttrs hasWild {

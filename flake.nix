@@ -26,8 +26,6 @@
         ];
       linkDeps = pkgs: [
         pkgs.openssl
-        pkgs.libgit2
-        pkgs.libssh2
         pkgs.zlib
       ];
     in
@@ -71,7 +69,6 @@
 
             env = {
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-              LIBGIT2_NO_VENDOR = 1;
               OPENSSL_NO_VENDOR = 1;
             };
           };

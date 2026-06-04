@@ -1,36 +1,43 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    env,
     fs,
+    num::NonZeroU32,
     path::{
         Path,
         PathBuf,
     },
-    result::Result as StdResult,
+    sync::atomic::AtomicBool,
 };
 
 use eyre::{
+    ContextCompat as _,
     Result,
     WrapErr as _,
-    bail,
 };
-use git2::{
-    Cred,
-    CredentialType,
-    Direction,
-    FetchOptions,
-    RemoteCallbacks,
-    Repository,
-    build::CheckoutBuilder,
+use gix::{
+    index::write::Options as IndexWriteOptions,
+    progress::Discard,
+    remote::{
+        Direction,
+        fetch::Shallow,
+    },
+    submodule::config::Update as SubmoduleUpdate,
+    url::Scheme,
+    worktree::stack::state::attributes::Source as AttributeSource,
 };
+use gix_transport::client::blocking_io::Transport;
 
 use super::{
     BranchComparison,
     CompareStatus,
     CurrentRev,
+    git_http,
+    http::FetchResult,
 };
 use crate::nar;
+
+mod dag;
 
 pub(super) struct PinCheckout {
     pub rev:           String,
@@ -45,7 +52,6 @@ pub(super) fn current_rev_compared(
     pinned: Option<&str>,
     old_rev: Option<&str>,
 ) -> Result<CurrentRev> {
-    // a pinned rev never moves, skip the network
     if let Some(pinned_rev) = pinned {
         let comparison = if old_rev == Some(pinned_rev) {
             BranchComparison::verified(CompareStatus::Identical)
@@ -58,57 +64,22 @@ pub(super) fn current_rev_compared(
         });
     }
 
-    let mut remote = git2::Remote::create_detached(url)?;
-    let wanted;
-    if use_auth_callbacks(url) {
-        let conn = remote.connect_auth(Direction::Fetch, Some(callbacks()), None)?;
-        let default_ref = branch_str(conn.default_branch());
-        let want = resolve_ref(
-            default_ref,
-            conn.list()?.iter().map(git2::RemoteHead::name),
-            reff,
-        );
-        wanted = want.clone();
-        for head in conn.list()? {
-            if head.name() == want {
-                let head_rev = head.oid().to_string();
-                let comparison = if old_rev == Some(head_rev.as_str()) {
-                    BranchComparison::verified(CompareStatus::Identical)
-                } else {
-                    BranchComparison::none()
-                };
-                return Ok(CurrentRev {
-                    rev: head_rev,
-                    comparison,
-                });
-            }
-        }
-    } else {
-        remote.connect(Direction::Fetch)?;
-        let default_ref = branch_str(remote.default_branch());
-        let want = resolve_ref(
-            default_ref,
-            remote.list()?.iter().map(git2::RemoteHead::name),
-            reff,
-        );
-        wanted = want.clone();
-        for head in remote.list()? {
-            if head.name() == want {
-                let head_rev = head.oid().to_string();
-                let comparison = if old_rev == Some(head_rev.as_str()) {
-                    BranchComparison::verified(CompareStatus::Identical)
-                } else {
-                    BranchComparison::none()
-                };
-                return Ok(CurrentRev {
-                    rev: head_rev,
-                    comparison,
-                });
-            }
-        }
-        remote.disconnect()?;
-    }
-    bail!("ref {wanted} not found on {url}")
+    let rev = dag::resolve_tip(url, reff)?;
+    let comparison = old_rev.map_or_else(BranchComparison::none, |old| {
+        compare_status(url, old, &rev)
+            .ok()
+            .flatten()
+            .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
+    });
+    Ok(CurrentRev { rev, comparison })
+}
+
+pub(super) fn compare_status(
+    url: &str,
+    base: &str,
+    head: &str,
+) -> FetchResult<Option<CompareStatus>> {
+    dag::compare_status(url, base, head)
 }
 
 pub(super) fn fetch_tree_into(
@@ -119,7 +90,7 @@ pub(super) fn fetch_tree_into(
     dir: &Path,
 ) -> Result<PathBuf> {
     checkout(url, reff, rev, submodules, dir)?;
-    let _ = fs::remove_dir_all(dir.join(".git"));
+    remove_root_git_dir(dir);
     Ok(dir.to_owned())
 }
 
@@ -130,7 +101,7 @@ pub(super) fn fetch_tree_rev_into(
     dir: &Path,
 ) -> Result<PathBuf> {
     checkout_rev(url, rev, submodules, dir)?;
-    let _ = fs::remove_dir_all(dir.join(".git"));
+    remove_root_git_dir(dir);
     Ok(dir.to_owned())
 }
 
@@ -142,7 +113,7 @@ pub(super) fn fetch_pin_checkout(
 ) -> Result<PinCheckout> {
     let dir = tempfile::tempdir()?;
     let (rev, last_modified, refname) = checkout(url, reff, rev_arg, submodules, dir.path())?;
-    let _ = fs::remove_dir_all(dir.path().join(".git"));
+    remove_root_git_dir(dir.path());
     let nar_hash = nar::hash_path(dir.path())?;
     Ok(PinCheckout {
         rev,
@@ -153,13 +124,9 @@ pub(super) fn fetch_pin_checkout(
 }
 
 fn checkout_rev(url: &str, requested_rev: &str, submodules: bool, into: &Path) -> Result<()> {
-    let repo = Repository::init(into)?;
-    let mut remote = repo.remote_anonymous(url)?;
-    let commit = fetch_pinned(&repo, &mut remote, None, requested_rev, url)?;
-    repo.checkout_tree(
-        commit.tree()?.as_object(),
-        Some(CheckoutBuilder::new().force()),
-    )?;
+    let (repo, ..) = clone_fetch(url, None, false, into, false)?;
+    checkout_existing_commit(&repo, requested_rev)
+        .wrap_err_with(|| format!("checkout rev '{requested_rev}' from {url}"))?;
     if submodules {
         update_submodules(&repo)?;
     }
@@ -173,224 +140,237 @@ fn checkout(
     submodules: bool,
     into: &Path,
 ) -> Result<(String, i64, String)> {
-    let repo = Repository::init(into)?;
-    let mut remote = repo.remote_anonymous(url)?;
-
-    let (commit, refname) = match requested_rev {
-        // a pinned rev can be anywhere in history and git2 0.21 can't want-sha,
-        // so widen a full-history fetch only as far as the rev needs
-        Some(pinned) => {
+    let (repo, refname, fetched_ref) = match requested_rev {
+        Some(_) => {
+            let (repo, _, fetched_ref) = clone_fetch(url, reff, false, into, false)?;
             let refname = reff.map_or_else(|| "HEAD".to_owned(), str::to_owned);
-            (
-                fetch_pinned(&repo, &mut remote, reff, pinned, url)?,
-                refname,
-            )
+            (repo, refname, fetched_ref)
         },
-        // a moving ref only needs its tip; fetch the refspec directly and read
-        // FETCH_HEAD, no preflight ls-remote to resolve it first
-        None => fetch_moving(&repo, &mut remote, reff, url)?,
+        None => clone_fetch(url, reff, true, into, true)?,
     };
 
-    let rev = commit.id().to_string();
-    let time = commit.time().seconds();
-    repo.checkout_tree(
-        commit.tree()?.as_object(),
-        Some(CheckoutBuilder::new().force()),
-    )?;
+    let (rev, time) = if let Some(rev) = requested_rev {
+        checkout_existing_commit(&repo, rev)
+            .wrap_err_with(|| format!("checkout rev '{rev}' from {url}"))?
+    } else {
+        let commit = fetched_commit(&repo, &fetched_ref)
+            .wrap_err_with(|| format!("resolve fetched head from {url}"))?;
+        (commit.id().detach().to_string(), commit.time()?.seconds)
+    };
     if submodules {
         update_submodules(&repo)?;
     }
     Ok((rev, time, refname))
 }
 
-/// fetch the tip of a moving ref at `depth(1)` without a preflight ls-remote.
-/// an unqualified ref might be a branch or a tag, so try `refs/heads/<r>` then
-/// `refs/tags/<r>`, peeling `FETCH_HEAD` from whichever lands
-fn fetch_moving<'repo>(
-    repo: &'repo Repository,
-    remote: &mut git2::Remote<'_>,
-    reff: Option<&str>,
+fn clone_fetch(
     url: &str,
-) -> Result<(git2::Commit<'repo>, String)> {
-    let candidates: Vec<String> = match reff {
-        None => vec!["HEAD".to_owned()],
-        Some(target) if target.starts_with("refs/") => vec![target.to_owned()],
-        Some(target) => {
-            vec![
-                format!("refs/heads/{target}"),
-                format!("refs/tags/{target}"),
-                target.to_owned(),
-            ]
+    reff: Option<&str>,
+    shallow: bool,
+    into: &Path,
+    checkout: bool,
+) -> Result<(gix::Repository, String, String)> {
+    let candidates = ref_candidates(reff);
+    let mut last_err = None;
+
+    for candidate in candidates {
+        match clone_fetch_candidate(url, candidate.as_deref(), shallow, into, checkout) {
+            Ok((repo, fetched_ref)) => {
+                let refname = candidate.unwrap_or_else(|| "HEAD".to_owned());
+                return Ok((repo, refname, fetched_ref));
+            },
+            Err(err) => {
+                last_err = Some(err);
+                let _ = fs::remove_dir_all(into);
+                let _ = fs::create_dir_all(into);
+            },
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("no ref candidates for {url}")))
+}
+
+fn clone_fetch_candidate(
+    url: &str,
+    reff: Option<&str>,
+    shallow: bool,
+    into: &Path,
+    write_worktree: bool,
+) -> Result<(gix::Repository, String)> {
+    let repo =
+        gix::init(into).wrap_err_with(|| format!("init repository at {}", into.display()))?;
+    let (refspecs, fetched_ref) = fetch_refspecs(reff, shallow);
+    let mut remote = repo
+        .remote_at(url)
+        .wrap_err_with(|| format!("prepare remote {url}"))?;
+    remote.replace_refspecs(
+        refspecs
+            .iter()
+            .map(|refspec| gix::bstr::BStr::new(refspec.as_str())),
+        Direction::Fetch,
+    )?;
+    remote = remote.with_fetch_tags(gix::remote::fetch::Tags::None);
+    fetch_into_repo(&repo, remote, url, shallow).wrap_err_with(|| format!("fetch {url}"))?;
+
+    if write_worktree {
+        let commit = fetched_commit(&repo, &fetched_ref)
+            .wrap_err_with(|| format!("resolve {fetched_ref}"))?;
+        checkout_commit(&repo, &commit).wrap_err_with(|| format!("checkout {url}"))?;
+    }
+
+    Ok((repo, fetched_ref))
+}
+
+fn fetch_into_repo(
+    repo: &gix::Repository,
+    remote: gix::Remote<'_>,
+    url: &str,
+    shallow: bool,
+) -> Result<()> {
+    let parsed_url = gix::Url::try_from(url)?;
+    match parsed_url.scheme {
+        Scheme::Http | Scheme::Https => {
+            let transport = git_http::connect(parsed_url);
+            receive_fetch(
+                repo,
+                remote.to_connection_with_transport(transport),
+                shallow,
+            )?;
         },
-    };
-
-    for (idx, candidate) in candidates.iter().enumerate() {
-        let last = idx + 1 == candidates.len();
-        match fetch_refspecs(remote, &[candidate.as_str()], Some(1_i32)) {
-            // a fetch can "succeed" yet leave no usable FETCH_HEAD when the ref
-            // is absent; treat that like a miss and widen
-            Ok(()) => {
-                if let Ok(commit) = repo
-                    .find_reference("FETCH_HEAD")
-                    .and_then(|head| head.peel_to_commit())
-                {
-                    return Ok((commit, candidate.clone()));
-                }
-                if last {
-                    bail!("ref '{}' not found on {url}", reff.unwrap_or("HEAD"));
-                }
-            },
-            Err(err) if last => {
-                return Err(eyre::Report::new(err))
-                    .wrap_err_with(|| format!("fetch ref '{candidate}' from {url}"));
-            },
-            Err(_) => {},
-        }
-    }
-    bail!("ref '{}' not found on {url}", reff.unwrap_or("HEAD"))
-}
-
-/// fetch full history of the smallest ref that contains `pinned`, widening the
-/// fetch only on a miss: the named ref (or HEAD), then all branches, then tags.
-/// objects accumulate across rungs, so each `revparse` sees every fetched ref
-fn fetch_pinned<'repo>(
-    repo: &'repo Repository,
-    remote: &mut git2::Remote<'_>,
-    reff: Option<&str>,
-    pinned: &str,
-    url: &str,
-) -> Result<git2::Commit<'repo>> {
-    let primary = match reff {
-        Some(target) if target.starts_with("refs/") => target.to_owned(),
-        Some(target) => format!("refs/heads/{target}"),
-        None => "HEAD".to_owned(),
-    };
-    let rungs: Vec<Vec<&str>> = vec![
-        vec![primary.as_str()],
-        vec!["+refs/heads/*:refs/remotes/origin/*"],
-        vec!["+refs/tags/*:refs/tags/*"],
-    ];
-
-    for (idx, rung) in rungs.iter().enumerate() {
-        let last = idx + 1 == rungs.len();
-        if let Err(err) = fetch_refspecs(remote, rung, None) {
-            if last {
-                return Err(eyre::Report::new(err))
-                    .wrap_err_with(|| format!("fetch refs from {url}"));
-            }
-            continue;
-        }
-        if let Ok(commit) = repo
-            .revparse_single(pinned)
-            .and_then(|obj| obj.peel_to_commit())
-        {
-            return Ok(commit);
-        }
-    }
-    bail!("rev '{pinned}' not reachable from refs on {url}")
-}
-
-fn fetch_refspecs(
-    remote: &mut git2::Remote<'_>,
-    refspecs: &[&str],
-    depth: Option<i32>,
-) -> StdResult<(), git2::Error> {
-    let mut fo = FetchOptions::new();
-    fo.remote_callbacks(callbacks());
-    if let Some(limit) = depth {
-        fo.depth(limit);
-    }
-    remote.fetch(refspecs, Some(&mut fo), None)
-}
-
-fn update_submodules(repo: &Repository) -> Result<()> {
-    for mut sm in repo.submodules()? {
-        let mut opts = git2::SubmoduleUpdateOptions::new();
-        let mut fo = FetchOptions::new();
-        fo.remote_callbacks(callbacks());
-        opts.fetch(fo);
-        sm.update(true, Some(&mut opts))?;
+        _ => {
+            let connection = remote.connect(Direction::Fetch)?;
+            receive_fetch(repo, connection, shallow)?;
+        },
     }
     Ok(())
 }
 
-fn use_auth_callbacks(url: &str) -> bool {
-    !url.starts_with("https://") && !url.starts_with("http://")
+fn receive_fetch<T>(
+    _repo: &gix::Repository,
+    connection: gix::remote::Connection<'_, '_, T>,
+    shallow: bool,
+) -> Result<()>
+where
+    T: Transport,
+{
+    let interrupt = AtomicBool::new(false);
+    let mut prepare =
+        connection.prepare_fetch(Discard, gix::remote::ref_map::Options::default())?;
+    if shallow {
+        prepare = prepare.with_shallow(Shallow::DepthAtRemote(
+            NonZeroU32::new(1).expect("constant is non-zero"),
+        ));
+    }
+    prepare.receive(Discard, &interrupt)?;
+    Ok(())
 }
 
-fn branch_str(raw: Result<git2::Buf, git2::Error>) -> Option<String> {
-    let buf = raw.ok()?;
-    buf.as_str().ok().map(str::to_owned)
+fn fetched_commit<'repo>(
+    repo: &'repo gix::Repository,
+    fetched_ref: &str,
+) -> Result<gix::Commit<'repo>> {
+    Ok(repo
+        .rev_parse_single(fetched_ref)?
+        .object()?
+        .peel_to_commit()?)
 }
 
-fn resolve_ref<'a>(
-    default_ref: Option<String>,
-    heads: impl IntoIterator<Item = &'a str>,
-    reff: Option<&str>,
-) -> String {
+fn checkout_existing_commit(repo: &gix::Repository, rev: &str) -> Result<(String, i64)> {
+    let commit = repo
+        .rev_parse_single(rev)?
+        .object()?
+        .peel_to_commit()
+        .wrap_err_with(|| format!("peel '{rev}' to commit"))?;
+    let id = commit.id().detach().to_string();
+    let time = commit.time()?.seconds;
+    checkout_commit(repo, &commit)?;
+    Ok((id, time))
+}
+
+fn checkout_commit(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<()> {
+    let workdir = repo.workdir().context("gix repository has no worktree")?;
+    let tree_id = commit.tree_id()?;
+    let mut index = repo.index_from_tree(&tree_id)?;
+    let mut opts = repo.checkout_options(AttributeSource::IdMapping)?;
+    opts.destination_is_initially_empty = false;
+    gix_worktree_state::checkout(
+        &mut index,
+        workdir,
+        repo.objects.clone().into_arc()?,
+        &Discard,
+        &Discard,
+        &AtomicBool::new(false),
+        opts,
+    )?;
+    index.write(IndexWriteOptions::default())?;
+    Ok(())
+}
+
+fn update_submodules(repo: &gix::Repository) -> Result<()> {
+    let Some(submodules) = repo.submodules()? else {
+        return Ok(());
+    };
+
+    for submodule in submodules {
+        if !submodule.is_active()? {
+            continue;
+        }
+        if matches!(submodule.update()?, Some(SubmoduleUpdate::None)) {
+            continue;
+        }
+        let Some(expected) = submodule.head_id()?.or(submodule.index_id()?) else {
+            continue;
+        };
+        let url = submodule.url()?.to_bstring().to_string();
+        let work_dir = submodule.work_dir()?;
+        let _ = fs::create_dir_all(&work_dir);
+        let (sub_repo, ..) = clone_fetch(&url, None, false, &work_dir, false)
+            .wrap_err_with(|| format!("clone submodule {url}"))?;
+        checkout_existing_commit(&sub_repo, &expected.to_string())
+            .wrap_err_with(|| format!("checkout submodule {} at {expected}", submodule.name()))?;
+    }
+
+    Ok(())
+}
+
+fn ref_candidates(reff: Option<&str>) -> Vec<Option<String>> {
     match reff {
-        Some(target) if target.starts_with("refs/") => target.to_owned(),
+        None => vec![None],
+        Some(target) if target.starts_with("refs/") => vec![Some(target.to_owned())],
         Some(target) => {
-            let candidates = [
-                format!("refs/heads/{target}"),
-                format!("refs/tags/{target}"),
-                target.to_owned(),
-            ];
-            heads
-                .into_iter()
-                .find_map(|name| {
-                    candidates
-                        .iter()
-                        .find(|candidate| name == candidate.as_str())
-                })
-                .cloned()
-                .unwrap_or_else(|| candidates[0].clone())
+            vec![
+                Some(format!("refs/heads/{target}")),
+                Some(format!("refs/tags/{target}")),
+                Some(target.to_owned()),
+            ]
         },
-        None => default_ref.unwrap_or_else(|| "HEAD".to_owned()),
     }
 }
 
-fn callbacks() -> RemoteCallbacks<'static> {
-    const NAMES: &[&str] = &["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"];
+fn fetch_refspecs(reff: Option<&str>, shallow: bool) -> (Vec<String>, String) {
+    match reff {
+        Some(source) => {
+            let fetched_ref = "refs/tack/fetched".to_owned();
+            (vec![format!("+{source}:{fetched_ref}")], fetched_ref)
+        },
+        None if shallow => {
+            let fetched_ref = "refs/remotes/origin/HEAD".to_owned();
+            (vec![format!("+HEAD:{fetched_ref}")], fetched_ref)
+        },
+        None => {
+            let fetched_ref = "refs/remotes/origin/HEAD".to_owned();
+            (
+                vec![
+                    "+HEAD:refs/remotes/origin/HEAD".to_owned(),
+                    "+refs/heads/*:refs/remotes/origin/*".to_owned(),
+                    "+refs/tags/*:refs/tags/*".to_owned(),
+                ],
+                fetched_ref,
+            )
+        },
+    }
+}
 
-    let mut cb = RemoteCallbacks::new();
-    let mut tried_agent = false;
-    let mut key_idx = 0_usize;
-    cb.credentials(move |_url, username, allowed| {
-        let user = username.unwrap_or("git");
-        if allowed.contains(CredentialType::DEFAULT)
-            && let Ok(cred) = Cred::default()
-        {
-            return Ok(cred);
-        }
-        if allowed.contains(CredentialType::USERNAME) {
-            return Cred::username(user);
-        }
-        if !allowed.contains(CredentialType::SSH_KEY) {
-            return Err(git2::Error::from_str("no supported credential type"));
-        }
-        if !tried_agent {
-            tried_agent = true;
-            if env::var_os("SSH_AUTH_SOCK").is_some()
-                && let Ok(cred) = Cred::ssh_key_from_agent(user)
-            {
-                return Ok(cred);
-            }
-        }
-        let ssh_dir = env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join(".ssh"))
-            .ok_or_else(|| git2::Error::from_str("ssh: $HOME unset, cannot locate keys"))?;
-        while key_idx < NAMES.len() {
-            let path = ssh_dir.join(NAMES[key_idx]);
-            key_idx += 1;
-            if path.is_file() {
-                return Cred::ssh_key(user, None, &path, None);
-            }
-        }
-        Err(git2::Error::from_str(
-            "ssh: no agent and no usable key under ~/.ssh",
-        ))
-    });
-    cb
+fn remove_root_git_dir(dir: &Path) {
+    let _ = fs::remove_dir_all(dir.join(".git"));
 }

@@ -53,9 +53,8 @@ const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const GITHUB_GRAPHQL_TIMEOUT: Duration = Duration::from_secs(15);
 const APPLICATION_JSON: &str = "application/json";
-const GITLAB_TOKEN_HEADER: &str = "PRIVATE-TOKEN";
 
-fn agent() -> &'static Agent {
+pub(super) fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         let config = TlsConfig::builder()
@@ -65,17 +64,11 @@ fn agent() -> &'static Agent {
     })
 }
 
-/// an access token for `host`, from the environment first (the well-known
-/// public forges) then nix.conf `access-tokens`; self-hosted forges resolve
-/// only through nix.conf
+/// an access token for `host`, from the environment first (for GitHub) then
+/// nix.conf `access-tokens`; self-hosted forges resolve only through nix.conf
 fn token_for_host(host: &str) -> Option<&'static str> {
     if host == "github.com"
         && let Some(token) = github_env_token()
-    {
-        return Some(token);
-    }
-    if host == "gitlab.com"
-        && let Some(token) = gitlab_env_token()
     {
         return Some(token);
     }
@@ -86,13 +79,6 @@ fn github_env_token() -> Option<&'static str> {
     static TOKEN: OnceLock<Option<String>> = OnceLock::new();
     TOKEN
         .get_or_init(|| non_empty_env("GITHUB_TOKEN").or_else(|| non_empty_env("GH_TOKEN")))
-        .as_deref()
-}
-
-fn gitlab_env_token() -> Option<&'static str> {
-    static TOKEN: OnceLock<Option<String>> = OnceLock::new();
-    TOKEN
-        .get_or_init(|| non_empty_env("GITLAB_TOKEN"))
         .as_deref()
 }
 
@@ -236,10 +222,6 @@ pub enum FetchError {
     /// response shape tack does not recognize
     #[error("unexpected github response: {0}")]
     Github(String),
-
-    /// gitlab returned a response shape tack does not recognize
-    #[error("unexpected gitlab response: {0}")]
-    Gitlab(String),
 }
 
 impl FetchError {
@@ -323,14 +305,6 @@ impl HttpClient {
         }
     }
 
-    fn with_optional_gitlab_auth<B>(request: RequestBuilder<B>, host: &str) -> RequestBuilder<B> {
-        if let Some(token) = token_for_host(host) {
-            request.header(GITLAB_TOKEN_HEADER, token)
-        } else {
-            request
-        }
-    }
-
     fn with_github_auth<B>(request: RequestBuilder<B>, token: &str) -> RequestBuilder<B> {
         request.header(AUTHORIZATION, Self::bearer(token))
     }
@@ -363,43 +337,6 @@ impl HttpClient {
             .map_err(|err| FetchError::Github(format!("api {url}: invalid json: {err}")))
     }
 
-    pub(super) fn gitlab_json<T>(
-        self,
-        url: &str,
-        host: &str,
-        timeout_limit: Option<Duration>,
-    ) -> FetchResult<T>
-    where
-        T: DeserializeOwned,
-    {
-        if token_for_host(host).is_none() {
-            record_token_warning(format!(
-                "no access token for {host}; gitlab comparison may be rate-limited or unavailable \
-                 for private projects (set GITLAB_TOKEN, or opt into nix.conf access-tokens with \
-                 TACK_NIX_CONF_TOKENS=1)"
-            ));
-        }
-        let mut req =
-            Self::with_optional_gitlab_auth(self.get(url).header(ACCEPT, APPLICATION_JSON), host);
-        if let Some(timeout) = timeout_limit {
-            req = req.config().timeout_global(Some(timeout)).build();
-        }
-
-        let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
-        let status = resp.status();
-        if status != 200 {
-            return Err(FetchError::from_status(status.as_u16(), url));
-        }
-
-        let body = resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|err| FetchError::Transport(format!("read gitlab api {url}: {err}")))?;
-
-        serde_json::from_str::<T>(&body)
-            .map_err(|err| FetchError::Gitlab(format!("api {url}: invalid json: {err}")))
-    }
-
     pub(super) fn github_graphql<V, T>(self, query: &str, variables: &V) -> FetchResult<T>
     where
         V: Serialize,
@@ -407,8 +344,8 @@ impl HttpClient {
     {
         let token = token_for_host("github.com").ok_or_else(|| {
             record_token_warning(
-                "no GitHub token; rev comparison falls back to the rate-limited REST API (set \
-                 GITHUB_TOKEN or GH_TOKEN, or opt into nix.conf access-tokens with \
+                "no GitHub token; rev comparison falls back to commit lookup plus git DAG compare \
+                 (set GITHUB_TOKEN or GH_TOKEN, or opt into nix.conf access-tokens with \
                  TACK_NIX_CONF_TOKENS=1)"
                     .to_owned(),
             );
