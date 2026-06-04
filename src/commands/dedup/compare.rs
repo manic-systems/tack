@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_jobs_cover_gitlab_but_skip_plain_git() {
+    fn compare_jobs_cover_gitlab_and_plain_git() {
         let mut groups = BTreeMap::new();
         groups.insert(source_id("gitlab:o/r"), vec![
             entry(&[], "base", "base", Some(10)),
@@ -324,8 +324,9 @@ mod tests {
 
         let (jobs, capped) = compare_jobs(&groups);
 
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].id, source_id("gitlab:o/r"));
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].id, source_id("git+https://example.com/o/r.git"));
+        assert_eq!(jobs[1].id, source_id("gitlab:o/r"));
         assert_eq!(capped, 0);
     }
 

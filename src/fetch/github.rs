@@ -6,7 +6,6 @@ use std::{
         PathBuf,
     },
     str::FromStr,
-    time::Duration,
 };
 
 use eyre::{
@@ -109,14 +108,11 @@ impl GithubClient {
         base: &str,
         head: &str,
     ) -> FetchResult<Option<CompareStatus>> {
-        let url = Self::compare_url(owner, repo, base, head);
-        let parsed: GithubCompareResponse =
-            self.http.github_json(&url, Some(Duration::from_secs(5)))?;
-        Ok(parsed.status())
-    }
-
-    fn compare_url(owner: &str, repo: &str, base: &str, head: &str) -> String {
-        format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}?per_page=1")
+        super::git::compare_status(
+            &format!("https://github.com/{owner}/{repo}.git"),
+            base,
+            head,
+        )
     }
 
     fn commits_between(
@@ -241,7 +237,6 @@ struct GithubCommitter {
 
 #[derive(Deserialize)]
 struct GithubCompareResponse {
-    status:        Option<String>,
     #[serde(default)]
     commits:       Vec<GithubCompareCommit>,
     #[serde(rename = "total_commits")]
@@ -250,11 +245,6 @@ struct GithubCompareResponse {
 }
 
 impl GithubCompareResponse {
-    fn status(&self) -> Option<CompareStatus> {
-        let status = self.status.as_deref()?;
-        status.parse().ok()
-    }
-
     fn commit_log(&self, limit: usize) -> CommitLog {
         let total = self
             .total_commits
@@ -643,8 +633,6 @@ pub fn commits_between(
 
 #[cfg(test)]
 mod tests {
-    use git2::Repository;
-
     use super::{
         BranchComparison,
         CompareStatus,
@@ -737,41 +725,44 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rest_compare_url_limits_payload() {
-        assert_eq!(
-            GithubClient::compare_url("o", "r", "base", "head"),
-            "https://api.github.com/repos/o/r/compare/base...head?per_page=1"
-        );
+    fn commit(
+        repo: &gix::Repository,
+        parent_ids: &[gix::ObjectId],
+        message: &str,
+        time: i64,
+    ) -> gix::ObjectId {
+        let signature_text = format!("tack <tack@example.invalid> {time} +0000");
+        let signature = gix::actor::SignatureRef::from_bytes(signature_text.as_bytes()).unwrap();
+        repo.new_commit_as(
+            signature,
+            signature,
+            message,
+            gix::ObjectId::empty_tree(repo.object_hash()),
+            parent_ids.iter().copied(),
+        )
+        .unwrap()
+        .id()
+        .detach()
     }
 
-    fn commit(repo: &Repository, parent_ids: &[git2::Oid], message: &str, time: i64) -> git2::Oid {
-        let sig = git2::Signature::new("tack", "tack@example.invalid", &git2::Time::new(time, 0))
-            .unwrap();
-        let tree_id = repo.treebuilder(None).unwrap().write().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let parent_commits = parent_ids
-            .iter()
-            .map(|oid| repo.find_commit(*oid).unwrap())
-            .collect::<Vec<_>>();
-        let parent_refs = parent_commits.iter().collect::<Vec<_>>();
-        repo.commit(None, &sig, &sig, message, &tree, &parent_refs)
-            .unwrap()
-    }
-
-    fn local_compare(repo: &Repository, base: git2::Oid, head: git2::Oid) -> CompareStatus {
+    fn local_compare(
+        repo: &gix::Repository,
+        base: gix::ObjectId,
+        head: gix::ObjectId,
+    ) -> CompareStatus {
         if base == head {
             return CompareStatus::Identical;
         }
-        let base_is_ancestor = repo.graph_descendant_of(head, base).unwrap();
-        let head_is_ancestor = repo.graph_descendant_of(base, head).unwrap();
+        let merge_base = repo.merge_base(base, head).unwrap().detach();
+        let base_is_ancestor = merge_base == base;
+        let head_is_ancestor = merge_base == head;
         CompareStatus::from_ancestry(base_is_ancestor, head_is_ancestor)
     }
 
     #[test]
     fn compare_status_from_local_merge_base_semantics() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::init(tmp.path()).unwrap();
+        let repo = gix::init(tmp.path()).unwrap();
         let root = commit(&repo, &[], "root", 100);
         let base = commit(&repo, &[root], "base", 300);
         let ahead_with_older_timestamp = commit(&repo, &[base], "ahead", 200);
