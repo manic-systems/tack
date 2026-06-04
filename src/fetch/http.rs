@@ -51,6 +51,7 @@ use ureq::{
 const TACK_USER_AGENT: &str = "tack";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
+const GITHUB_GRAPHQL_TIMEOUT: Duration = Duration::from_secs(15);
 const APPLICATION_JSON: &str = "application/json";
 const GITLAB_TOKEN_HEADER: &str = "PRIVATE-TOKEN";
 
@@ -422,7 +423,7 @@ impl HttpClient {
         let mut resp = self
             .github_post(GITHUB_GRAPHQL_URL, token)
             .config()
-            .timeout_global(Some(Duration::from_secs(2)))
+            .timeout_global(Some(GITHUB_GRAPHQL_TIMEOUT))
             .build()
             .send(payload)
             .map_err(|err| FetchError::from_ureq(err, "github graphql"))?;
