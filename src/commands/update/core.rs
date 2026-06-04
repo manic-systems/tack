@@ -345,7 +345,7 @@ pub(super) fn look(
     let lock = project.load_lock()?;
     progress.begin(&pin_names(&selected));
 
-    let pins = selected
+    let look_results = selected
         .par_iter()
         .enumerate()
         .map(|(index, input)| {
@@ -372,11 +372,11 @@ pub(super) fn look(
         .collect::<Vec<(PinLook, Option<String>)>>();
 
     let mut warnings = Vec::new();
-    let pins = pins
+    let pins = look_results
         .into_iter()
-        .map(|(pin, warning)| {
-            if let Some(warning) = warning {
-                warnings.push(warning);
+        .map(|(pin, maybe_warning)| {
+            if let Some(message) = maybe_warning {
+                warnings.push(message);
             }
             pin
         })
