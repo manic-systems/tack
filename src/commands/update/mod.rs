@@ -10,7 +10,7 @@ use eyre::{
 mod core;
 
 use crate::{
-    fetch::github::BranchComparison,
+    fetch::BranchComparison,
     project::Project,
     render,
     report::{

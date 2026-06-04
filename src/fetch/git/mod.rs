@@ -30,12 +30,16 @@ use gix::{
     progress::Discard,
     refs::transaction::PreviousValue,
     remote::{
+        Connection,
         Direction,
-        fetch::Shallow,
+        fetch::{
+            Shallow,
+            Tags,
+        },
+        ref_map::Options as RefMapOptions,
     },
     submodule::config::Update as SubmoduleUpdate,
     url::Scheme,
-    worktree::stack::state::attributes::Source as AttributeSource,
 };
 use gix_transport::client::blocking_io::Transport;
 
@@ -50,9 +54,7 @@ use crate::nar;
 
 mod dag;
 
-#[cfg(test)]
-#[path = "git/test_remote.rs"]
-mod test_remote;
+#[cfg(test)] mod test_remote;
 
 pub(super) struct PinCheckout {
     pub rev:           String,
@@ -67,26 +69,39 @@ pub(super) fn current_rev_compared(
     pinned: Option<&str>,
     old_rev: Option<&str>,
 ) -> Result<CurrentRev> {
-    if let Some(pinned_rev) = pinned {
-        let comparison = if old_rev == Some(pinned_rev) {
-            BranchComparison::verified(CompareStatus::Identical)
-        } else {
-            BranchComparison::none()
-        };
-        return Ok(CurrentRev {
-            rev: pinned_rev.to_owned(),
-            comparison,
-        });
-    }
+    let rev = current_rev(url, reff, pinned)?;
+    let comparison = git_comparison(url, pinned, old_rev, &rev);
+    Ok(CurrentRev { rev, comparison })
+}
 
-    let rev = dag::resolve_tip(url, reff)?;
-    let comparison = old_rev.map_or_else(BranchComparison::none, |old| {
-        compare_status(url, old, &rev)
+/// branch topology of `new_rev` against the previously locked `old_rev`. a
+/// pinned source can only report identical or none, since its rev never drifts,
+/// whereas a moving ref runs the DAG comparison and degrades to unavailable
+pub(super) fn git_comparison(
+    url: &str,
+    pinned: Option<&str>,
+    old_rev: Option<&str>,
+    new_rev: &str,
+) -> BranchComparison {
+    if pinned.is_some() {
+        return match old_rev {
+            Some(old) if old == new_rev => BranchComparison::verified(CompareStatus::Identical),
+            _ => BranchComparison::none(),
+        };
+    }
+    old_rev.map_or_else(BranchComparison::none, |old| {
+        compare_status(url, old, new_rev)
             .ok()
             .flatten()
             .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
-    });
-    Ok(CurrentRev { rev, comparison })
+    })
+}
+
+pub(super) fn current_rev(url: &str, reff: Option<&str>, pinned: Option<&str>) -> Result<String> {
+    pinned.map_or_else(
+        || Ok(dag::resolve_tip(url, reff)?),
+        |rev| Ok(rev.to_owned()),
+    )
 }
 
 pub(super) fn compare_status(
@@ -139,7 +154,7 @@ pub(super) fn fetch_pin_checkout(
 }
 
 fn checkout_rev(url: &str, requested_rev: &str, submodules: bool, into: &Path) -> Result<()> {
-    let (repo, ..) = clone_fetch(url, None, false, into, false)?;
+    let repo = fetch_pinned(url, None, requested_rev, into)?;
     checkout_existing_commit(&repo, requested_rev)
         .wrap_err_with(|| format!("checkout rev '{requested_rev}' from {url}"))?;
     if submodules {
@@ -155,27 +170,26 @@ fn checkout(
     submodules: bool,
     into: &Path,
 ) -> Result<(String, i64, String)> {
-    let (repo, refname, fetched_ref) = match requested_rev {
-        Some(_) => {
-            let (repo, _, fetched_ref) = clone_fetch(url, reff, false, into, false)?;
-            let refname = reff.map_or_else(|| "HEAD".to_owned(), str::to_owned);
-            (repo, refname, fetched_ref)
-        },
-        None => clone_fetch(url, reff, true, into, true)?,
-    };
-
-    let (rev, time) = if let Some(rev) = requested_rev {
-        checkout_existing_commit(&repo, rev)
-            .wrap_err_with(|| format!("checkout rev '{rev}' from {url}"))?
+    if let Some(rev) = requested_rev {
+        let repo = fetch_pinned(url, reff, rev, into)?;
+        let (id, time) = checkout_existing_commit(&repo, rev)
+            .wrap_err_with(|| format!("checkout rev '{rev}' from {url}"))?;
+        if submodules {
+            update_submodules(&repo)?;
+        }
+        let refname = reff.map_or_else(|| "HEAD".to_owned(), str::to_owned);
+        Ok((id, time, refname))
     } else {
+        let (repo, refname, fetched_ref) = clone_fetch(url, reff, true, into, true)?;
         let commit = fetched_commit(&repo, &fetched_ref)
             .wrap_err_with(|| format!("resolve fetched head from {url}"))?;
-        (commit.id().detach().to_string(), commit.time()?.seconds)
-    };
-    if submodules {
-        update_submodules(&repo)?;
+        let id = commit.id().detach().to_string();
+        let time = commit.time()?.seconds;
+        if submodules {
+            update_submodules(&repo)?;
+        }
+        Ok((id, time, refname))
     }
-    Ok((rev, time, refname))
 }
 
 fn clone_fetch(
@@ -214,20 +228,8 @@ fn clone_fetch_candidate(
 ) -> Result<(gix::Repository, String)> {
     let repo =
         gix::init(into).wrap_err_with(|| format!("init repository at {}", into.display()))?;
-    let (refspecs, fetched_ref) = fetch_refspecs(reff, shallow);
-    if let Some(source) = local_file_repo(url)? {
-        fetch_local_refspecs_into(&repo, &source, &refspecs)?;
-    } else {
-        let mut remote = repo
-            .remote_at(url)
-            .wrap_err_with(|| format!("prepare remote {url}"))?;
-        remote.replace_refspecs(
-            refspecs.iter().map(|refspec| BStr::new(refspec.as_str())),
-            Direction::Fetch,
-        )?;
-        remote = remote.with_fetch_tags(gix::remote::fetch::Tags::None);
-        fetch_into_repo(&repo, remote, url, shallow).wrap_err_with(|| format!("fetch {url}"))?;
-    }
+    let (refspecs, fetched_ref) = fetch_refspecs(reff);
+    fetch_refspecs_into(&repo, url, &refspecs, shallow)?;
 
     if write_worktree {
         let commit = fetched_commit(&repo, &fetched_ref)
@@ -236,6 +238,64 @@ fn clone_fetch_candidate(
     }
 
     Ok((repo, fetched_ref))
+}
+
+/// fetch the full history of the smallest ref set that contains `pinned`,
+/// widening only on a miss
+fn fetch_pinned(
+    url: &str,
+    reff: Option<&str>,
+    pinned: &str,
+    into: &Path,
+) -> Result<gix::Repository> {
+    let repo =
+        gix::init(into).wrap_err_with(|| format!("init repository at {}", into.display()))?;
+    let primary = match reff {
+        Some(target) if target.starts_with("refs/") => target.to_owned(),
+        Some(target) => format!("refs/heads/{target}"),
+        None => "HEAD".to_owned(),
+    };
+    let rungs = [
+        vec![format!("+{primary}:refs/tack/fetched")],
+        vec!["+refs/heads/*:refs/remotes/origin/*".to_owned()],
+        vec!["+refs/tags/*:refs/tags/*".to_owned()],
+    ];
+
+    let mut last_err = None;
+    for rung in rungs {
+        if let Err(err) = fetch_refspecs_into(&repo, url, &rung, false) {
+            last_err = Some(err);
+            continue;
+        }
+        if commit_present(&repo, pinned) {
+            return Ok(repo);
+        }
+    }
+    Err(last_err.map_or_else(
+        || eyre::eyre!("rev '{pinned}' not reachable from refs on {url}"),
+        |err| err.wrap_err(format!("rev '{pinned}' not reachable from refs on {url}")),
+    ))
+}
+
+fn fetch_refspecs_into(
+    repo: &gix::Repository,
+    url: &str,
+    refspecs: &[String],
+    shallow: bool,
+) -> Result<()> {
+    if let Some(source) = local_file_repo(url)? {
+        return fetch_local_refspecs_into(repo, &source, refspecs);
+    }
+
+    let mut remote = repo
+        .remote_at(url)
+        .wrap_err_with(|| format!("prepare remote {url}"))?;
+    remote.replace_refspecs(
+        refspecs.iter().map(|refspec| BStr::new(refspec.as_str())),
+        Direction::Fetch,
+    )?;
+    remote = remote.with_fetch_tags(Tags::None);
+    fetch_into_repo(&remote, url, shallow).wrap_err_with(|| format!("fetch {url}"))
 }
 
 fn local_file_repo(url: &str) -> Result<Option<gix::Repository>> {
@@ -389,41 +449,35 @@ fn copy_reachable_object(
     Ok(())
 }
 
-fn fetch_into_repo(
-    repo: &gix::Repository,
-    remote: gix::Remote<'_>,
-    url: &str,
-    shallow: bool,
-) -> Result<()> {
+fn commit_present(repo: &gix::Repository, rev: &str) -> bool {
+    repo.rev_parse_single(rev)
+        .ok()
+        .and_then(|id| id.object().ok())
+        .and_then(|object| object.peel_to_commit().ok())
+        .is_some()
+}
+
+fn fetch_into_repo(remote: &gix::Remote<'_>, url: &str, shallow: bool) -> Result<()> {
     let parsed_url = gix::Url::try_from(url)?;
     match parsed_url.scheme {
         Scheme::Http | Scheme::Https => {
             let transport = git_http::connect(parsed_url);
-            receive_fetch(
-                repo,
-                remote.to_connection_with_transport(transport),
-                shallow,
-            )?;
+            receive_fetch(remote.to_connection_with_transport(transport), shallow)?;
         },
-        _ => {
+        Scheme::File | Scheme::Git | Scheme::Ssh | Scheme::Ext(_) => {
             let connection = remote.connect(Direction::Fetch)?;
-            receive_fetch(repo, connection, shallow)?;
+            receive_fetch(connection, shallow)?;
         },
     }
     Ok(())
 }
 
-fn receive_fetch<T>(
-    _repo: &gix::Repository,
-    connection: gix::remote::Connection<'_, '_, T>,
-    shallow: bool,
-) -> Result<()>
+fn receive_fetch<T>(connection: Connection<'_, '_, T>, shallow: bool) -> Result<()>
 where
     T: Transport,
 {
     let interrupt = AtomicBool::new(false);
-    let mut prepare =
-        connection.prepare_fetch(Discard, gix::remote::ref_map::Options::default())?;
+    let mut prepare = connection.prepare_fetch(Discard, RefMapOptions::default())?;
     if shallow {
         prepare = prepare.with_shallow(Shallow::DepthAtRemote(
             NonZeroU32::new(1).expect("constant is non-zero"),
@@ -459,8 +513,10 @@ fn checkout_commit(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<(
     let workdir = repo.workdir().context("gix repository has no worktree")?;
     let tree_id = commit.tree_id()?;
     let mut index = repo.index_from_tree(&tree_id)?;
-    let mut opts = repo.checkout_options(AttributeSource::IdMapping)?;
-    opts.destination_is_initially_empty = false;
+    let opts = gix_worktree_state::checkout::Options {
+        destination_is_initially_empty: true,
+        ..Default::default()
+    };
     gix_worktree_state::checkout(
         &mut index,
         workdir,
@@ -492,7 +548,7 @@ fn update_submodules(repo: &gix::Repository) -> Result<()> {
         let url = submodule.url()?.to_bstring().to_string();
         let work_dir = submodule.work_dir()?;
         let _ = fs::create_dir_all(&work_dir);
-        let (sub_repo, ..) = clone_fetch(&url, None, false, &work_dir, false)
+        let sub_repo = fetch_pinned(&url, None, &expected.to_string(), &work_dir)
             .wrap_err_with(|| format!("clone submodule {url}"))?;
         checkout_existing_commit(&sub_repo, &expected.to_string())
             .wrap_err_with(|| format!("checkout submodule {} at {expected}", submodule.name()))?;
@@ -515,30 +571,50 @@ fn ref_candidates(reff: Option<&str>) -> Vec<Option<String>> {
     }
 }
 
-fn fetch_refspecs(reff: Option<&str>, shallow: bool) -> (Vec<String>, String) {
-    match reff {
-        Some(source) => {
-            let fetched_ref = "refs/tack/fetched".to_owned();
-            (vec![format!("+{source}:{fetched_ref}")], fetched_ref)
-        },
-        None if shallow => {
+/// refspec for a moving ref's tip
+fn fetch_refspecs(reff: Option<&str>) -> (Vec<String>, String) {
+    reff.map_or_else(
+        || {
             let fetched_ref = "refs/remotes/origin/HEAD".to_owned();
             (vec![format!("+HEAD:{fetched_ref}")], fetched_ref)
         },
-        None => {
-            let fetched_ref = "refs/remotes/origin/HEAD".to_owned();
-            (
-                vec![
-                    "+HEAD:refs/remotes/origin/HEAD".to_owned(),
-                    "+refs/heads/*:refs/remotes/origin/*".to_owned(),
-                    "+refs/tags/*:refs/tags/*".to_owned(),
-                ],
-                fetched_ref,
-            )
+        |source| {
+            let fetched_ref = "refs/tack/fetched".to_owned();
+            (vec![format!("+{source}:{fetched_ref}")], fetched_ref)
         },
-    }
+    )
 }
 
 fn remove_root_git_dir(dir: &Path) {
     let _ = fs::remove_dir_all(dir.join(".git"));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::{
+        fetch_tree_into,
+        test_remote::LocalRemote,
+    };
+
+    #[test]
+    fn pinned_rev_reachable_only_off_named_ref_is_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut remote = LocalRemote::new();
+        remote.commit("main\n", "main");
+        remote.branch_from_current("refs/heads/feature");
+        let pinned = remote.commit("feature\n", "feature");
+        let dest = tmp.path().join("out");
+        fs::create_dir_all(&dest).unwrap();
+
+        // ref names main, but the pinned rev only lives on feature, so the fetch must
+        // widen past the named ref to find it
+        fetch_tree_into(&remote.url(), Some("main"), Some(&pinned), false, &dest).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dest.join("file.txt")).unwrap(),
+            "feature\n"
+        );
+    }
 }

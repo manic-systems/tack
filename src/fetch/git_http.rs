@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
+    any::Any,
+    error::Error,
     io::{
         self,
         BufRead,
@@ -26,6 +28,8 @@ use gix_transport::{
             Http,
             PostBodyDataKind,
             PostResponse,
+            Transport as HttpTransport,
+            connect_http,
         },
     },
 };
@@ -38,10 +42,10 @@ use ureq::{
 
 use super::http;
 
-type UreqTransport = gix_transport::client::blocking_io::http::Transport<UreqHttp>;
+type UreqTransport = HttpTransport<UreqHttp>;
 
 pub(super) fn connect(parsed_url: gix::Url) -> UreqTransport {
-    gix_transport::client::blocking_io::http::connect_http(
+    connect_http(
         UreqHttp::default(),
         parsed_url,
         gix_transport::Protocol::V2,
@@ -112,8 +116,8 @@ impl Http for UreqHttp {
 
     fn configure(
         &mut self,
-        _config: &dyn std::any::Any,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        _config: &dyn Any,
+    ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         Ok(())
     }
 }
@@ -125,7 +129,7 @@ enum Method {
 }
 
 impl Method {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Get => "GET",
             Self::Post => "POST",
@@ -134,17 +138,17 @@ impl Method {
 }
 
 struct UreqResponse {
-    headers: Result<Vec<u8>, ResponseFailure>,
+    headers: Result<Vec<u8>, HttpFailure>,
     body:    LazyBody,
 }
 
 #[derive(Clone)]
-struct ResponseFailure {
+struct HttpFailure {
     kind:    io::ErrorKind,
     message: String,
 }
 
-impl ResponseFailure {
+impl HttpFailure {
     fn from_status(method: Method, url: &str, status: u16) -> Self {
         let kind = if status == 401 {
             io::ErrorKind::PermissionDenied
@@ -156,8 +160,8 @@ impl ResponseFailure {
         let detail = match status {
             401 => "authentication required".to_owned(),
             403 => "permission denied".to_owned(),
-            status if status >= 500 => "remote server error".to_owned(),
-            status => format!("unexpected HTTP status {status}"),
+            500.. => "remote server error".to_owned(),
+            _ => format!("unexpected HTTP status {status}"),
         };
         Self {
             kind,
@@ -168,51 +172,7 @@ impl ResponseFailure {
         }
     }
 
-    fn into_error(self) -> io::Error {
-        io::Error::new(self.kind, self.message)
-    }
-}
-
-enum LazyBody {
-    Ready(Box<dyn Read + Send>),
-    Error(Option<ResponseFailure>),
-}
-
-impl Read for LazyBody {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Ready(body) => body.read(buf),
-            Self::Error(failure) => {
-                Err(failure.take().map_or_else(
-                    || io::Error::other("response body already failed"),
-                    ResponseFailure::into_error,
-                ))
-            },
-        }
-    }
-}
-
-struct PendingResponse {
-    headers: Result<Vec<u8>, ResponseFailure>,
-    body:    Option<LazyBody>,
-}
-
-struct PendingPost {
-    agent:        &'static Agent,
-    url:          String,
-    headers:      Vec<String>,
-    request_body: Vec<u8>,
-    response:     Option<Result<PendingResponse, DeferredPostFailure>>,
-}
-
-#[derive(Clone)]
-struct DeferredPostFailure {
-    kind:    io::ErrorKind,
-    message: String,
-}
-
-impl DeferredPostFailure {
-    fn from_http_error(url: &str, error: HttpError) -> Self {
+    fn from_http_error(url: &str, error: &HttpError) -> Self {
         let kind = if error.is_spurious() {
             io::ErrorKind::ConnectionAborted
         } else {
@@ -229,17 +189,55 @@ impl DeferredPostFailure {
     }
 }
 
+enum LazyBody {
+    Ready(Box<dyn Read + Send>),
+    Error(Option<HttpFailure>),
+}
+
+impl Read for LazyBody {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match *self {
+            Self::Ready(ref mut body) => body.read(buf),
+            Self::Error(ref mut failure) => {
+                Err(failure.take().map_or_else(
+                    || io::Error::other("response body already failed"),
+                    HttpFailure::into_error,
+                ))
+            },
+        }
+    }
+}
+
+struct PendingResponse {
+    headers: Result<Vec<u8>, HttpFailure>,
+    body:    Option<LazyBody>,
+}
+
+struct PendingPost {
+    agent:        &'static Agent,
+    url:          String,
+    headers:      Vec<String>,
+    request_body: Vec<u8>,
+    response:     Option<Result<PendingResponse, HttpFailure>>,
+}
+
 pub(super) struct LazyPostBody {
     state: Arc<Mutex<PendingPost>>,
 }
 
 impl Write for LazyPostBody {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.state
+        let mut guard = self
+            .state
             .lock()
-            .map_err(|_| io::Error::other("poisoned post body"))?
-            .request_body
-            .extend_from_slice(buf);
+            .map_err(|_| io::Error::other("poisoned post body"))?;
+        if guard.response.is_some() {
+            return Err(io::Error::other(
+                "git HTTP POST body written after the request was sent",
+            ));
+        }
+        guard.request_body.extend_from_slice(buf);
+        drop(guard);
         Ok(buf.len())
     }
 
@@ -261,7 +259,7 @@ impl LazyResponseBody {
         }
     }
 
-    fn pending(state: Arc<Mutex<PendingPost>>) -> Self {
+    const fn pending(state: Arc<Mutex<PendingPost>>) -> Self {
         Self {
             pending: Some(state),
             reader:  None,
@@ -296,9 +294,9 @@ impl BufRead for LazyResponseBody {
         self.reader()?.fill_buf()
     }
 
-    fn consume(&mut self, amt: usize) {
+    fn consume(&mut self, amount: usize) {
         if let Ok(reader) = self.reader() {
-            reader.consume(amt);
+            reader.consume(amount);
         }
     }
 }
@@ -306,16 +304,16 @@ impl BufRead for LazyResponseBody {
 pub(super) struct LazyHeaders {
     pending: Option<Arc<Mutex<PendingPost>>>,
     cursor:  Option<Cursor<Vec<u8>>>,
-    failure: Option<ResponseFailure>,
+    failure: Option<HttpFailure>,
 }
 
 impl LazyHeaders {
-    fn ready(headers: Result<Vec<u8>, ResponseFailure>) -> Self {
+    fn ready(headers: Result<Vec<u8>, HttpFailure>) -> Self {
         match headers {
-            Ok(headers) => {
+            Ok(bytes) => {
                 Self {
                     pending: None,
-                    cursor:  Some(Cursor::new(headers)),
+                    cursor:  Some(Cursor::new(bytes)),
                     failure: None,
                 }
             },
@@ -329,7 +327,7 @@ impl LazyHeaders {
         }
     }
 
-    fn pending(state: Arc<Mutex<PendingPost>>) -> Self {
+    const fn pending(state: Arc<Mutex<PendingPost>>) -> Self {
         Self {
             pending: Some(state),
             cursor:  None,
@@ -370,9 +368,9 @@ impl BufRead for LazyHeaders {
         self.cursor()?.fill_buf()
     }
 
-    fn consume(&mut self, amt: usize) {
+    fn consume(&mut self, amount: usize) {
         if let Ok(cursor) = self.cursor() {
-            cursor.consume(amt);
+            cursor.consume(amount);
         }
     }
 }
@@ -392,14 +390,12 @@ fn ensure_pending_response(guard: &mut PendingPost) {
                 body:    Some(response.body),
             }
         })
-        .map_err(|err| DeferredPostFailure::from_http_error(&guard.url, err));
+        .map_err(|err| HttpFailure::from_http_error(&guard.url, &err));
         guard.response = Some(response);
     }
 }
 
-fn pending_headers(
-    state: &Arc<Mutex<PendingPost>>,
-) -> io::Result<Result<Vec<u8>, ResponseFailure>> {
+fn pending_headers(state: &Arc<Mutex<PendingPost>>) -> io::Result<Result<Vec<u8>, HttpFailure>> {
     let mut guard = state
         .lock()
         .map_err(|_| io::Error::other("poisoned post headers"))?;
@@ -437,18 +433,18 @@ fn send_ureq(
     headers: impl IntoIterator<Item = impl AsRef<str>>,
     body: Vec<u8>,
 ) -> Result<UreqResponse, HttpError> {
-    let headers: Vec<String> = headers
+    let header_lines = headers
         .into_iter()
         .map(|header| header.as_ref().to_owned())
-        .collect();
-    let response = match method {
-        Method::Get => apply_headers(agent.get(url), &headers, url).call(),
-        Method::Post => apply_headers(agent.post(url), &headers, url).send(body),
+        .collect::<Vec<String>>();
+    let sent = match method {
+        Method::Get => apply_headers(agent.get(url), &header_lines).call(),
+        Method::Post => apply_headers(agent.post(url), &header_lines).send(body),
     };
-    let response = match response {
+    let response = match sent {
         Ok(response) => response,
         Err(UreqError::StatusCode(status)) => {
-            let failure = ResponseFailure::from_status(method, url, status);
+            let failure = HttpFailure::from_status(method, url, status);
             return Ok(UreqResponse {
                 headers: Err(failure.clone()),
                 body:    LazyBody::Error(Some(failure)),
@@ -462,25 +458,21 @@ fn send_ureq(
     };
     let status = response.status();
     if !status.is_success() {
-        let failure = ResponseFailure::from_status(method, url, status.as_u16());
+        let failure = HttpFailure::from_status(method, url, status.as_u16());
         return Ok(UreqResponse {
             headers: Err(failure.clone()),
             body:    LazyBody::Error(Some(failure)),
         });
     }
-    let headers = format_headers(response.headers());
-    let (_parts, body) = response.into_parts();
+    let formatted_headers = format_headers(response.headers());
+    let (_parts, response_body) = response.into_parts();
     Ok(UreqResponse {
-        headers: Ok(headers),
-        body:    LazyBody::Ready(Box::new(body.into_reader())),
+        headers: Ok(formatted_headers),
+        body:    LazyBody::Ready(Box::new(response_body.into_reader())),
     })
 }
 
-fn apply_headers<B>(
-    mut request: RequestBuilder<B>,
-    headers: &[String],
-    _url: &str,
-) -> RequestBuilder<B> {
+fn apply_headers<B>(mut request: RequestBuilder<B>, headers: &[String]) -> RequestBuilder<B> {
     for header in headers {
         if let Some((name, value)) = header.split_once(':') {
             request = request.header(name.trim(), value.trim());
@@ -504,6 +496,7 @@ fn format_headers(headers: &HeaderMap) -> Vec<u8> {
 mod tests {
     use std::{
         io::{
+            ErrorKind,
             Read as _,
             Write as _,
         },
@@ -529,7 +522,7 @@ mod tests {
         response_body: &'static str,
     ) -> (String, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let status = status.to_owned();
+        let status_line = status.to_owned();
         let url = format!(
             "http://{}/repo.git/git-upload-pack",
             listener.local_addr().unwrap()
@@ -554,13 +547,12 @@ mod tests {
             let headers_end = request
                 .windows(4)
                 .position(|window| window == b"\r\n\r\n")
-                .map(|idx| idx + 4)
-                .unwrap_or(request.len());
+                .map_or(request.len(), |idx| idx + 4);
             let headers = String::from_utf8_lossy(&request[..headers_end]);
             let content_length = headers
                 .lines()
                 .find_map(|line| line.split_once(':'))
-                .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .filter(|&(name, _)| name.eq_ignore_ascii_case("content-length"))
                 .and_then(|(_, value)| value.trim().parse::<usize>().ok())
                 .unwrap_or(0);
             while request.len().saturating_sub(headers_end) < content_length {
@@ -572,7 +564,7 @@ mod tests {
             }
 
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nX-Test: yes\r\nConnection: \
+                "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nX-Test: yes\r\nConnection: \
                  close\r\n\r\n{response_body}",
                 response_body.len()
             );
@@ -596,10 +588,7 @@ mod tests {
         .unwrap();
         let failure = response.headers.err().unwrap();
 
-        assert_eq!(
-            failure.into_error().kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
+        assert_eq!(failure.into_error().kind(), ErrorKind::PermissionDenied);
         assert!(server.join().unwrap().starts_with("GET "));
     }
 

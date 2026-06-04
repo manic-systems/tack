@@ -5,9 +5,9 @@ use std::collections::{
     BTreeSet,
 };
 
-use crate::fetch::github::{
+use crate::fetch::{
     BranchComparison,
-    CommitLog,
+    github::CommitLog,
 };
 
 /// what `update` did to one pin

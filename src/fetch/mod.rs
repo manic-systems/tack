@@ -24,23 +24,25 @@ mod archive;
 mod git;
 mod git_http;
 pub mod github;
+pub mod gitlab;
 pub mod http;
 mod time;
+mod topology;
 
 use archive::{
     detect_tar_format,
     unpack_tar_stream,
-};
-use github::{
-    BranchComparison,
-    CompareStatus,
-    CurrentRev,
 };
 use http::{
     FetchResult,
     HttpClient,
 };
 use time::epoch_from_http_date;
+pub use topology::{
+    BranchComparison,
+    CompareStatus,
+    CurrentRev,
+};
 
 use crate::{
     lock::LockedNode,
@@ -48,7 +50,7 @@ use crate::{
     pins::Unpack,
     source::{
         Source,
-        gitlab,
+        gitlab as source_gitlab,
     },
 };
 
@@ -61,11 +63,26 @@ pub fn current_rev_compared(source: &Source, old_rev: Option<&str>) -> Result<Cu
             ref reff,
             rev: ref pinned,
         } => github::current_rev_compared(owner, repo, reff.as_deref(), pinned.as_deref(), old_rev),
-        Source::Git { .. } | Source::Gitlab { .. } => {
+        Source::Git { .. } => {
             let target = source
                 .git_target()
                 .context("git-backed source missing git target")?;
             git::current_rev_compared(target.url.as_ref(), target.reff, target.rev, old_rev)
+        },
+        Source::Gitlab {
+            ref host,
+            ref owner,
+            ref repo,
+            rev: ref pinned,
+            ..
+        } => {
+            let target = source
+                .git_target()
+                .context("git-backed source missing git target")?;
+            let rev = git::current_rev(target.url.as_ref(), target.reff, target.rev)?;
+            let comparison =
+                gitlab::compare_revs(host, owner, repo, pinned.as_deref(), old_rev, &rev);
+            Ok(CurrentRev { rev, comparison })
         },
         Source::Tarball { ref url } => {
             let http = HttpClient::global();
@@ -92,11 +109,7 @@ pub fn current_rev_compared(source: &Source, old_rev: Option<&str>) -> Result<Cu
     }
 }
 
-pub(crate) fn git_compare_status(
-    url: &str,
-    base: &str,
-    head: &str,
-) -> FetchResult<Option<CompareStatus>> {
+pub fn git_compare_status(url: &str, base: &str, head: &str) -> FetchResult<Option<CompareStatus>> {
     git::compare_status(url, base, head)
 }
 
@@ -167,7 +180,7 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
             ..
         } => {
             let resolved_rev = locked_rev.as_deref().context("gitlab node missing rev")?;
-            let url = gitlab::clone_url(host, owner, repo);
+            let url = source_gitlab::clone_url(host, owner, repo);
             git::fetch_tree_rev_into(&url, resolved_rev, false, dir)
         },
         LockedNode::Fixed { .. } | LockedNode::Indirect { .. } | LockedNode::Path { .. } => {
@@ -232,19 +245,32 @@ pub fn fetch_pin_compared(
             ref reff,
             rev: ref pinned,
         } => github::fetch_pin_compared(owner, repo, reff.as_deref(), pinned.clone(), old_rev),
-        Source::Git { .. } | Source::Gitlab { .. } => {
+        Source::Git { .. } => {
             reject_gitlab_submodules(source, submodules)?;
             let target = source
                 .git_target()
                 .context("git-backed source missing git target")?;
             let checkout =
                 git::fetch_pin_checkout(target.url.as_ref(), target.reff, target.rev, submodules)?;
-            let comparison = old_rev.map_or_else(BranchComparison::none, |old| {
-                git::compare_status(target.url.as_ref(), old, &checkout.rev)
-                    .ok()
-                    .flatten()
-                    .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
-            });
+            let comparison =
+                git::git_comparison(target.url.as_ref(), target.rev, old_rev, &checkout.rev);
+            git_pin_from_checkout(source, checkout, submodules, comparison)
+        },
+        Source::Gitlab {
+            ref host,
+            ref owner,
+            ref repo,
+            rev: ref pinned,
+            ..
+        } => {
+            reject_gitlab_submodules(source, submodules)?;
+            let target = source
+                .git_target()
+                .context("git-backed source missing git target")?;
+            let checkout =
+                git::fetch_pin_checkout(target.url.as_ref(), target.reff, target.rev, submodules)?;
+            let comparison =
+                gitlab::compare_revs(host, owner, repo, pinned.as_deref(), old_rev, &checkout.rev);
             git_pin_from_checkout(source, checkout, submodules, comparison)
         },
         Source::Tarball { ref url } => {
@@ -383,14 +409,12 @@ mod tests {
     use serde_json::json;
 
     use super::{
+        BranchComparison,
+        CompareStatus,
         current_rev_compared,
         fetch_locked_tree_into,
         git,
         git_pin_from_checkout,
-        github::{
-            BranchComparison,
-            CompareStatus,
-        },
         parse_link_immutable,
         reject_gitlab_submodules,
     };
