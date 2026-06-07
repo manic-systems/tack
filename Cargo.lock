@@ -1826,6 +1826,7 @@ dependencies = [
  "gix-transport",
  "gix-worktree-state",
  "hmac-sha256",
+ "percent-encoding",
  "pound",
  "rayon",
  "serde",

@@ -42,6 +42,7 @@ use gix::{
     url::Scheme,
 };
 use gix_transport::client::blocking_io::Transport;
+use gix_worktree_state::checkout::Options as CheckoutOptions;
 
 use super::{
     BranchComparison,
@@ -109,7 +110,10 @@ pub(super) fn compare_status(
     base: &str,
     head: &str,
 ) -> FetchResult<Option<CompareStatus>> {
-    dag::compare_status(url, base, head)
+    match super::forge::compare_status_from_git_url(url, base, head) {
+        Ok(Some(status)) => Ok(Some(status)),
+        Ok(None) | Err(_) => dag::compare_status(url, base, head),
+    }
 }
 
 pub(super) fn fetch_tree_into(
@@ -512,7 +516,7 @@ fn checkout_commit(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<(
     let workdir = repo.workdir().context("gix repository has no worktree")?;
     let tree_id = commit.tree_id()?;
     let mut index = repo.index_from_tree(&tree_id)?;
-    let opts = gix_worktree_state::checkout::Options {
+    let opts = CheckoutOptions {
         destination_is_initially_empty: true,
         ..Default::default()
     };

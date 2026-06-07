@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::time::Duration;
+use std::{
+    borrow::Cow,
+    time::Duration,
+};
 
 use serde::Deserialize;
 
@@ -106,8 +109,8 @@ pub(super) fn compare_revs(
 }
 
 fn merge_base_url(host: &str, owner: &str, repo: &str, old: &str, new: &str) -> String {
-    // the nested-group owner must survive as a single `:id` path segment
-    let project = percent_encode(&format!("{owner}/{repo}"));
+    let raw_project = format!("{owner}/{repo}");
+    let project = percent_encode(&raw_project);
     let (old_ref, new_ref) = (percent_encode(old), percent_encode(new));
     format!(
         "https://{host}/api/v4/projects/{project}/repository/merge_base?refs[]={old_ref}&refs[]=\
@@ -127,25 +130,8 @@ fn classify(merge_base: &str, old: &str, new: &str) -> CompareStatus {
     }
 }
 
-/// rfc 3986 unreserved-set encoding, strict enough for path segments and
-/// query values alike
-fn percent_encode(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-
-    let mut encoded = String::with_capacity(value.len());
-    for &byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(char::from(byte));
-            },
-            other => {
-                encoded.push('%');
-                encoded.push(char::from(HEX[usize::from(other / 16)]));
-                encoded.push(char::from(HEX[usize::from(other % 16)]));
-            },
-        }
-    }
-    encoded
+fn percent_encode(value: &str) -> Cow<'_, str> {
+    percent_encoding::percent_encode(value.as_bytes(), super::PERCENT_ENCODE_SET).into()
 }
 
 #[derive(Deserialize)]
