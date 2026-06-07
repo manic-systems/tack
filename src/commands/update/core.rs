@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use eyre::Result;
-use rayon::prelude::{
-    IndexedParallelIterator as _,
-    IntoParallelRefIterator as _,
-    ParallelIterator as _,
-};
 
 use super::LOG_LIMIT;
 use crate::{
@@ -13,9 +8,15 @@ use crate::{
         dedup,
         select,
     },
+    dispatcher,
     fetch::{
         self,
         BranchComparison,
+        CompareStatus,
+        compare_planner::{
+            CompareJob,
+            CompareSession,
+        },
         github::CommitLog,
     },
     lock::LockedNode,
@@ -39,6 +40,9 @@ use crate::{
     },
 };
 
+const UPDATE_IN_FLIGHT: usize = 16;
+const LOOK_IN_FLIGHT: usize = 16;
+
 pub(super) trait Progress<O>: Sync {
     fn begin(&self, names: &[String]);
 
@@ -58,32 +62,19 @@ impl<O> Progress<O> for NoProgress {
 }
 
 struct UpdateFetch {
-    node:       LockedNode,
-    rev:        String,
-    comparison: BranchComparison,
+    node: LockedNode,
+    rev:  String,
 }
 
 impl UpdateFetch {
-    fn fetch(input: &pins::Input, expanded: &str, old_rev: Option<&str>) -> Result<Self> {
+    fn fetch(input: &pins::Input, expanded: &str) -> Result<Self> {
         match input.pin_type {
             PinType::Fixed => {
-                fetch::fetch_fixed_pin(expanded, input.unpack).map(|(node, rev)| {
-                    Self {
-                        node,
-                        rev,
-                        comparison: BranchComparison::none(),
-                    }
-                })
+                fetch::fetch_fixed_pin(expanded, input.unpack).map(|(node, rev)| Self { node, rev })
             },
             PinType::Flake | PinType::Fetch => {
                 let source = expanded.parse::<Source>()?;
-                fetch::fetch_pin_compared(&source, input.submodules, old_rev).map(|fetched| {
-                    Self {
-                        node:       fetched.node,
-                        rev:        fetched.rev,
-                        comparison: fetched.comparison,
-                    }
-                })
+                fetch::fetch_pin(&source, input.submodules).map(|(node, rev)| Self { node, rev })
             },
         }
     }
@@ -102,23 +93,25 @@ fn classify(
     old: Option<&LockedNode>,
     accept: bool,
     warning: Option<String>,
+    session: &CompareSession,
 ) -> PinResolution {
     let old_rev = old.and_then(LockedNode::rev);
 
-    if input.pin_type != PinType::Fixed
-        && old_rev.is_some()
+    let resolved = if input.pin_type != PinType::Fixed
         && let Ok(source) = expanded.parse::<Source>()
-        && let Ok(current) = fetch::current_rev_compared(&source, old_rev)
+    {
+        session.resolve_and_compare(&source, old_rev).ok()
+    } else {
+        None
+    };
+
+    if let Some(ref current) = resolved
         && old_rev == Some(current.rev.as_str())
     {
         return unchanged(warning);
     }
 
-    let UpdateFetch {
-        node,
-        rev,
-        comparison,
-    } = match UpdateFetch::fetch(input, expanded, old_rev) {
+    let UpdateFetch { node, rev } = match UpdateFetch::fetch(input, expanded) {
         Ok(fetched) => fetched,
         Err(err) => {
             return PinResolution {
@@ -160,6 +153,19 @@ fn classify(
             unchanged(warning)
         };
     }
+
+    let comparison = resolved.filter(|current| current.rev == rev).map_or_else(
+        || {
+            expanded
+                .parse::<Source>()
+                .ok()
+                .map_or_else(BranchComparison::none, |source| {
+                    compare_with_planner(session, &source, old_rev, &rev)
+                })
+        },
+        |current| current.comparison,
+    );
+
     PinResolution {
         outcome: UpdateOutcome::Updated {
             old: old_rev.map(str::to_owned),
@@ -170,6 +176,27 @@ fn classify(
         drift: false,
         warning,
     }
+}
+
+fn compare_with_planner(
+    session: &CompareSession,
+    source: &Source,
+    old_rev: Option<&str>,
+    new_rev: &str,
+) -> BranchComparison {
+    let Some(previous_rev) = old_rev else {
+        return BranchComparison::none();
+    };
+    if previous_rev == new_rev {
+        return BranchComparison::verified(CompareStatus::Identical);
+    }
+    let Some(job) = CompareJob::from_source(source, previous_rev, new_rev) else {
+        return BranchComparison::none();
+    };
+    session
+        .compare(&job)
+        .status
+        .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
 }
 
 const fn unchanged(warning: Option<String>) -> PinResolution {
@@ -232,21 +259,24 @@ pub(super) fn update(
     let mut lock = project.load_lock()?;
     progress.begin(&pin_names(&selected));
 
-    let resolutions = selected
-        .par_iter()
-        .enumerate()
-        .map(|(index, input)| {
-            progress.fetching(index);
-            let localized = source::localize_path_url_with_warning(
-                &shorturls.expand(&input.url),
-                project.dir(),
-            );
-            let old = lock.get(&input.name);
-            let resolution = classify(input, &localized.url, old, accept, localized.warning);
-            progress.finished(index, &resolution.outcome);
-            resolution
-        })
-        .collect::<Vec<PinResolution>>();
+    let session = CompareSession::new();
+    let resolution_jobs = selected.clone();
+    let resolutions = dispatcher::ordered(resolution_jobs, UPDATE_IN_FLIGHT, |index, input| {
+        progress.fetching(index);
+        let localized =
+            source::localize_path_url_with_warning(&shorturls.expand(&input.url), project.dir());
+        let old = lock.get(&input.name);
+        let resolution = classify(
+            input,
+            &localized.url,
+            old,
+            accept,
+            localized.warning,
+            &session,
+        );
+        progress.finished(index, &resolution.outcome);
+        resolution
+    });
 
     let mut changed = false;
     let mut drift = 0_usize;
@@ -286,6 +316,7 @@ pub(super) fn update(
     for diagnostic in auto_dedup.scan_diagnostics {
         warnings.push(render::scan_diagnostic(&diagnostic));
     }
+    warnings.extend(session.into_surfaced());
     warnings.extend(auto_dedup.surfaced_fetch_causes);
     warnings.extend(fetch::http::drain_token_warnings());
 
@@ -301,6 +332,7 @@ fn classify_look(
     expanded: &str,
     old: Option<&str>,
     verbose: bool,
+    session: &CompareSession,
 ) -> (LookOutcome, Option<CommitLog>) {
     if input.pin_type == PinType::Fixed {
         return (
@@ -315,7 +347,7 @@ fn classify_look(
     if matches!(source, Source::Path { .. }) {
         return (LookOutcome::Skipped("local path".to_owned()), None);
     }
-    match fetch::current_rev_compared(&source, old) {
+    match session.resolve_and_compare(&source, old) {
         Ok(current) if old == Some(current.rev.as_str()) => (LookOutcome::Unchanged, None),
         Ok(current) => {
             let log = match (verbose, old) {
@@ -355,31 +387,28 @@ pub(super) fn look(
     let lock = project.load_lock()?;
     progress.begin(&pin_names(&selected));
 
-    let look_results = selected
-        .par_iter()
-        .enumerate()
-        .map(|(index, input)| {
-            progress.fetching(index);
-            let localized = source::localize_path_url_with_warning(
-                &shorturls.expand(&input.url),
-                project.dir(),
-            );
-            let old = lock
-                .get(&input.name)
-                .and_then(LockedNode::rev)
-                .map(str::to_owned);
-            let (outcome, log) = classify_look(input, &localized.url, old.as_deref(), verbose);
-            progress.finished(index, &outcome);
-            (
-                PinLook {
-                    name: input.name.clone(),
-                    outcome,
-                    log,
-                },
-                localized.warning,
-            )
-        })
-        .collect::<Vec<(PinLook, Option<String>)>>();
+    let session = CompareSession::new();
+    let look_jobs = selected.clone();
+    let look_results = dispatcher::ordered(look_jobs, LOOK_IN_FLIGHT, |index, input| {
+        progress.fetching(index);
+        let localized =
+            source::localize_path_url_with_warning(&shorturls.expand(&input.url), project.dir());
+        let old = lock
+            .get(&input.name)
+            .and_then(LockedNode::rev)
+            .map(str::to_owned);
+        let (outcome, log) =
+            classify_look(input, &localized.url, old.as_deref(), verbose, &session);
+        progress.finished(index, &outcome);
+        (
+            PinLook {
+                name: input.name.clone(),
+                outcome,
+                log,
+            },
+            localized.warning,
+        )
+    });
 
     let mut warnings = Vec::new();
     let pins = look_results
@@ -391,6 +420,7 @@ pub(super) fn look(
             pin
         })
         .collect::<Vec<PinLook>>();
+    warnings.extend(session.into_surfaced());
     warnings.extend(fetch::http::drain_token_warnings());
 
     Ok(LookReport { pins, warnings })

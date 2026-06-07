@@ -3,7 +3,6 @@
 mod auto;
 mod compare;
 mod follows;
-mod forge_compare;
 mod model;
 mod reporting;
 mod scan;
@@ -17,10 +16,6 @@ use std::{
 };
 
 use eyre::Result;
-use rayon::prelude::{
-    IntoParallelIterator as _,
-    ParallelIterator as _,
-};
 
 pub(super) use self::auto::{
     AutoDedupReport,
@@ -40,6 +35,7 @@ use self::{
     },
 };
 use crate::{
+    dispatcher,
     lock::{
         LockFile,
         LockedNode,
@@ -52,6 +48,8 @@ use crate::{
     render,
     source::id::SourceId,
 };
+
+const DEDUP_SCAN_IN_FLIGHT: usize = 16;
 
 fn top_map<T>(
     inputs: &[pins::Input],
@@ -128,13 +126,13 @@ pub fn dedup(project: &Project) -> Result<()> {
     // parallel, expand into next frontier
     let mut visited = HashSet::<String>::new();
     while !frontier.is_empty() {
-        let results = mem::take(&mut frontier)
+        let scan_jobs = mem::take(&mut frontier)
             .into_iter()
             .filter(|item| visited.insert(item.source.key()))
-            .collect::<Vec<_>>()
-            .into_par_iter()
-            .map(|item| (item.path.clone(), item.fetch_and_scan()))
             .collect::<Vec<_>>();
+        let results = dispatcher::ordered(scan_jobs, DEDUP_SCAN_IN_FLIGHT, |_, item| {
+            (item.path.clone(), item.fetch_and_scan())
+        });
 
         for (path, res) in results {
             match res {
