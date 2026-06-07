@@ -38,10 +38,7 @@ use ureq::{
         CONTENT_TYPE,
         USER_AGENT,
     },
-    tls::{
-        TlsConfig,
-        TlsProvider,
-    },
+    tls::TlsConfig,
     typestate::{
         WithBody,
         WithoutBody,
@@ -58,9 +55,7 @@ const GITLAB_TOKEN_HEADER: &str = "PRIVATE-TOKEN";
 pub(super) fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        let config = TlsConfig::builder()
-            .provider(TlsProvider::NativeTls)
-            .build();
+        let config = TlsConfig::builder().build();
         Agent::config_builder().tls_config(config).build().into()
     })
 }

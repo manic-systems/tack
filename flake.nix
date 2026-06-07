@@ -19,15 +19,10 @@
 
       nativeDeps =
         pkgs:
-        [ pkgs.pkg-config ]
-        ++ lib.optionals (hasWild pkgs.stdenv.hostPlatform) [
+        lib.optionals (hasWild pkgs.stdenv.hostPlatform) [
           pkgs.wild
           pkgs.clang
         ];
-      linkDeps = pkgs: [
-        pkgs.openssl
-        pkgs.zlib
-      ];
     in
     {
       templates.default = {
@@ -78,12 +73,10 @@
               nightlyRustfmt
               pkgs.rust-analyzer
             ]
-            ++ nativeDeps pkgs
-            ++ linkDeps pkgs;
+            ++ nativeDeps pkgs;
 
             env = {
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-              OPENSSL_NO_VENDOR = 1;
             };
           };
 
