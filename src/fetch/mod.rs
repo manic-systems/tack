@@ -21,6 +21,7 @@ use ureq::{
 };
 
 mod archive;
+pub mod forge;
 mod git;
 mod git_http;
 pub mod github;
@@ -403,6 +404,12 @@ fn parse_link_immutable(header: &str) -> Option<String> {
 pub fn raw(url: &str) -> FetchResult<String> {
     HttpClient::global().raw_text(url)
 }
+
+const PERCENT_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 #[cfg(test)]
 mod tests {

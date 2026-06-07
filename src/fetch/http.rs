@@ -235,10 +235,14 @@ pub enum FetchError {
     /// gitlab returned a response shape tack does not recognize
     #[error("unexpected gitlab response: {0}")]
     Gitlab(String),
+
+    /// forgejo/gitea returned a response shape tack does not recognize
+    #[error("unexpected forge response: {0}")]
+    Forge(String),
 }
 
 impl FetchError {
-    fn from_status(status: u16, what: &str) -> Self {
+    pub(super) fn from_status(status: u16, what: &str) -> Self {
         match status {
             401 | 403 => {
                 Self::Auth {
@@ -258,7 +262,7 @@ impl FetchError {
         clippy::wildcard_enum_match_arm,
         reason = "ureq::Error is #[non_exhaustive]"
     )]
-    fn from_ureq(err: ureq::Error, what: &str) -> Self {
+    pub(super) fn from_ureq(err: ureq::Error, what: &str) -> Self {
         match err {
             ureq::Error::StatusCode(code) => Self::from_status(code, what),
             other => Self::Transport(format!("{what}: {other}")),
