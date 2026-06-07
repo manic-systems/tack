@@ -25,6 +25,7 @@ use super::{
         detect_tar_format,
         unpack_tar_stream,
     },
+    forge,
     git,
     github,
     http::{
@@ -55,6 +56,11 @@ pub fn current_rev(source: &Source) -> Result<String> {
             let target = source
                 .git_target()
                 .context("git-backed source missing git target")?;
+            if target.rev.is_none()
+                && let Some(rev) = forge_resolve_ref(target.url.as_ref(), target.reff)
+            {
+                return Ok(rev);
+            }
             git::current_rev(target.url.as_ref(), target.reff, target.rev)
         },
         Source::Tarball { ref url } => {
@@ -69,6 +75,13 @@ pub fn current_rev(source: &Source) -> Result<String> {
         // a path pin is read locally at eval time; nothing to compare upstream
         Source::Path { ref path } => Ok(path.clone()),
     }
+}
+
+fn forge_resolve_ref(url: &str, reff: Option<&str>) -> Option<String> {
+    let repo = forge::detect_git_url(url)?;
+    forge::resolve_ref(repo.kind, &repo.host, &repo.owner, &repo.repo, reff)
+        .ok()
+        .flatten()
 }
 
 /// fetch a fixed pin: sha256 the raw bytes (not nar), return the node plus that

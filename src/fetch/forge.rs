@@ -75,6 +75,54 @@ pub fn compare_status(
     compare_detected(kind, host, owner, repo, base, head)
 }
 
+pub fn resolve_ref(
+    kind: ForgeKind,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    reff: Option<&str>,
+) -> FetchResult<Option<String>> {
+    match kind {
+        ForgeKind::Forgejo | ForgeKind::Gitea => {
+            resolve_forgejo_gitea(host, owner, repo, reff).map(Some)
+        },
+        ForgeKind::Gitlab | ForgeKind::Cgit | ForgeKind::Unknown => Ok(None),
+    }
+}
+
+fn resolve_forgejo_gitea(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    reff: Option<&str>,
+) -> FetchResult<String> {
+    let mut url = format!(
+        "{}/commits?limit=1&stat=false&verification=false&files=false",
+        forgejo_repo_api(host, owner, repo)
+    );
+    if let Some(target) = reff {
+        url.push_str("&sha=");
+        url.push_str(&percent_encode(target));
+    }
+    json::<Vec<ForgeCommitRef>>(&url, COMPARE_TIMEOUT)?
+        .into_iter()
+        .next()
+        .map(|commit| commit.sha)
+        .ok_or_else(|| FetchError::Forge(format!("no commits resolving {owner}/{repo}")))
+}
+
+fn forgejo_repo_api(host: &str, owner: &str, repo: &str) -> String {
+    let encoded_owner = owner
+        .split('/')
+        .map(percent_encode)
+        .collect::<Vec<_>>()
+        .join("/");
+    format!(
+        "https://{host}/api/v1/repos/{encoded_owner}/{}",
+        percent_encode(repo),
+    )
+}
+
 fn compare_detected(
     kind: ForgeKind,
     host: &str,
@@ -114,14 +162,9 @@ fn compare_forgejo_gitea(
 }
 
 fn compare_count(host: &str, owner: &str, repo: &str, base: &str, head: &str) -> FetchResult<u64> {
-    let encoded_owner = owner
-        .split('/')
-        .map(percent_encode)
-        .collect::<Vec<_>>()
-        .join("/");
     let url = format!(
-        "https://{host}/api/v1/repos/{encoded_owner}/{}/compare/{}...{}",
-        percent_encode(repo),
+        "{}/compare/{}...{}",
+        forgejo_repo_api(host, owner, repo),
         percent_encode(base),
         percent_encode(head),
     );
@@ -286,4 +329,9 @@ struct GitlabProbe {
 #[derive(Deserialize)]
 struct ForgeCompare {
     total_commits: u64,
+}
+
+#[derive(Deserialize)]
+struct ForgeCommitRef {
+    sha: String,
 }
