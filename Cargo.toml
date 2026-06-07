@@ -48,7 +48,7 @@ tar = { default-features = false, version = "0.4.46" }
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 toml_edit = "0.25.12"
-ureq = { default-features = false, features = [ "native-tls" ], version = "3.3.0" }
+ureq = { default-features = false, features = [ "rustls" ], version = "3.3.0" }
 xz2 = "0.1.7"
 
 [profile.release]

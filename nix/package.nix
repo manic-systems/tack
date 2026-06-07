@@ -3,9 +3,6 @@
   lib,
   rustPlatform,
   stdenv,
-  pkg-config,
-  openssl,
-  zlib,
   clang,
   wild ? null,
 }:
@@ -20,23 +17,12 @@ rustPlatform.buildRustPackage {
   src = ../.;
   cargoLock.lockFile = ../Cargo.lock;
 
-  nativeBuildInputs = [
-    pkg-config
-  ]
-  ++ lib.optionals hasWild [
+  nativeBuildInputs = lib.optionals hasWild [
     wild
     clang
   ];
-  buildInputs = [
-    openssl
-    zlib
-  ];
 
-  # link nixpkgs c libs without vendored copies
-  env = {
-    OPENSSL_NO_VENDOR = 1;
-  }
-  // lib.optionalAttrs hasWild {
+  env = lib.optionalAttrs hasWild {
     RUSTFLAGS = "-Clinker=${clang}/bin/clang -Clink-arg=--ld-path=wild";
   };
 

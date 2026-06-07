@@ -159,7 +159,7 @@ pins.
 ## build
 
 ```
-nix develop   # rust toolchain + openssl/libgit2
+nix develop   # rust toolchain
 nix build     # the binary
 ```
 
