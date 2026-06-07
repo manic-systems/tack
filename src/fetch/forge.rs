@@ -34,7 +34,7 @@ const COMPARE_TIMEOUT: Duration = Duration::from_secs(5);
 const APPLICATION_JSON: &str = "application/json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DetectedForge {
+pub enum ForgeKind {
     Gitlab,
     Forgejo,
     Gitea,
@@ -42,33 +42,53 @@ enum DetectedForge {
     Unknown,
 }
 
-pub fn compare_status_from_git_url(
-    url: &str,
-    base: &str,
-    head: &str,
-) -> FetchResult<Option<CompareStatus>> {
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Ok(None);
-    }
-    let Some(repo) = git_url::parse(url) else {
-        return Ok(None);
-    };
-    compare_detected(&repo.host, &repo.owner, &repo.repo, base, head)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedRepo {
+    pub kind:  ForgeKind,
+    pub host:  String,
+    pub owner: String,
+    pub repo:  String,
 }
 
-fn compare_detected(
+pub fn detect_git_url(url: &str) -> Option<HostedRepo> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return None;
+    }
+    let repo = git_url::parse(url)?;
+    let kind = detect_host(&repo.host);
+    Some(HostedRepo {
+        kind,
+        host: repo.host,
+        owner: repo.owner,
+        repo: repo.repo,
+    })
+}
+
+pub fn compare_status(
+    kind: ForgeKind,
     host: &str,
     owner: &str,
     repo: &str,
     base: &str,
     head: &str,
 ) -> FetchResult<Option<CompareStatus>> {
-    Ok(match detect_host(host) {
-        DetectedForge::Gitlab => gitlab::compare_status(host, owner, repo, base, head)?,
-        DetectedForge::Forgejo | DetectedForge::Gitea => {
+    compare_detected(kind, host, owner, repo, base, head)
+}
+
+fn compare_detected(
+    kind: ForgeKind,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    base: &str,
+    head: &str,
+) -> FetchResult<Option<CompareStatus>> {
+    Ok(match kind {
+        ForgeKind::Gitlab => gitlab::compare_status(host, owner, repo, base, head)?,
+        ForgeKind::Forgejo | ForgeKind::Gitea => {
             Some(compare_forgejo_gitea(host, owner, repo, base, head)?)
         },
-        DetectedForge::Cgit | DetectedForge::Unknown => None,
+        ForgeKind::Cgit | ForgeKind::Unknown => None,
     })
 }
 
@@ -109,7 +129,7 @@ fn compare_count(host: &str, owner: &str, repo: &str, base: &str, head: &str) ->
     Ok(parsed.total_commits)
 }
 
-fn detect_host(host: &str) -> DetectedForge {
+fn detect_host(host: &str) -> ForgeKind {
     let cache = host_cache();
     {
         let cached = cache
@@ -123,7 +143,7 @@ fn detect_host(host: &str) -> DetectedForge {
     }
 
     let detected = probe_host(host);
-    if detected != DetectedForge::Unknown {
+    if detected != ForgeKind::Unknown {
         cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -132,25 +152,25 @@ fn detect_host(host: &str) -> DetectedForge {
     detected
 }
 
-fn host_cache() -> &'static Mutex<HashMap<String, DetectedForge>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, DetectedForge>>> = OnceLock::new();
+fn host_cache() -> &'static Mutex<HashMap<String, ForgeKind>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, ForgeKind>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn probe_host(host: &str) -> DetectedForge {
+fn probe_host(host: &str) -> ForgeKind {
     if probe_version(&format!("https://{host}/api/forgejo/v1/version")) {
-        return DetectedForge::Forgejo;
+        return ForgeKind::Forgejo;
     }
     if probe_version(&format!("https://{host}/api/v1/version")) {
-        return DetectedForge::Gitea;
+        return ForgeKind::Gitea;
     }
     if probe_gitlab(host, "metadata") || probe_gitlab(host, "version") {
-        return DetectedForge::Gitlab;
+        return ForgeKind::Gitlab;
     }
     if probe_cgit(host) {
-        return DetectedForge::Cgit;
+        return ForgeKind::Cgit;
     }
-    DetectedForge::Unknown
+    ForgeKind::Unknown
 }
 
 fn probe_version(url: &str) -> bool {

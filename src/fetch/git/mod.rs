@@ -45,9 +45,7 @@ use gix_transport::client::blocking_io::Transport;
 use gix_worktree_state::checkout::Options as CheckoutOptions;
 
 use super::{
-    BranchComparison,
     CompareStatus,
-    CurrentRev,
     git_http,
     http::FetchResult,
 };
@@ -64,40 +62,6 @@ pub(super) struct PinCheckout {
     pub refname:       String,
 }
 
-pub(super) fn current_rev_compared(
-    url: &str,
-    reff: Option<&str>,
-    pinned: Option<&str>,
-    old_rev: Option<&str>,
-) -> Result<CurrentRev> {
-    let rev = current_rev(url, reff, pinned)?;
-    let comparison = git_comparison(url, pinned, old_rev, &rev);
-    Ok(CurrentRev { rev, comparison })
-}
-
-/// branch topology of `new_rev` against the previously locked `old_rev`. a
-/// pinned source can only report identical or none, since its rev never drifts,
-/// whereas a moving ref runs the DAG comparison and degrades to unavailable
-pub(super) fn git_comparison(
-    url: &str,
-    pinned: Option<&str>,
-    old_rev: Option<&str>,
-    new_rev: &str,
-) -> BranchComparison {
-    if pinned.is_some() {
-        return match old_rev {
-            Some(old) if old == new_rev => BranchComparison::verified(CompareStatus::Identical),
-            _ => BranchComparison::none(),
-        };
-    }
-    old_rev.map_or_else(BranchComparison::none, |old| {
-        compare_status(url, old, new_rev)
-            .ok()
-            .flatten()
-            .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
-    })
-}
-
 pub(super) fn current_rev(url: &str, reff: Option<&str>, pinned: Option<&str>) -> Result<String> {
     pinned.map_or_else(
         || Ok(dag::resolve_tip(url, reff)?),
@@ -110,10 +74,7 @@ pub(super) fn compare_status(
     base: &str,
     head: &str,
 ) -> FetchResult<Option<CompareStatus>> {
-    match super::forge::compare_status_from_git_url(url, base, head) {
-        Ok(Some(status)) => Ok(Some(status)),
-        Ok(None) | Err(_) => dag::compare_status(url, base, head),
-    }
+    dag::compare_status(url, base, head)
 }
 
 pub(super) fn fetch_tree_into(

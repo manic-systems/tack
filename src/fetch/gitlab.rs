@@ -8,7 +8,6 @@ use std::{
 use serde::Deserialize;
 
 use super::{
-    BranchComparison,
     CompareStatus,
     http::{
         FetchResult,
@@ -56,58 +55,6 @@ pub fn compare_status(
     GitlabClient::global().merge_base(host, owner, repo, base, head)
 }
 
-/// upgrade an un-attempted gitlab comparison to a directional one via the
-/// merge-base api; degrade to `unavailable` when the api can't classify
-/// (no token for a private project, old gitlab, unrelated histories)
-pub(super) fn refine_comparison(
-    host: &str,
-    owner: &str,
-    repo: &str,
-    old_rev: Option<&str>,
-    new_rev: &str,
-    base: BranchComparison,
-) -> BranchComparison {
-    let Some(old) = old_rev else {
-        return base;
-    };
-    // identical revs, or an already-classified comparison, need no api call
-    if old == new_rev || base.status.is_some() {
-        return base;
-    }
-    GitlabClient::global()
-        .merge_base(host, owner, repo, old, new_rev)
-        .ok()
-        .flatten()
-        .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
-}
-
-pub(super) fn compare_revs(
-    host: &str,
-    owner: &str,
-    repo: &str,
-    pinned: Option<&str>,
-    old_rev: Option<&str>,
-    new_rev: &str,
-) -> BranchComparison {
-    let Some(old) = old_rev else {
-        return BranchComparison::none();
-    };
-    if old == new_rev {
-        return BranchComparison::verified(CompareStatus::Identical);
-    }
-    if pinned.is_some() {
-        return BranchComparison::none();
-    }
-    refine_comparison(
-        host,
-        owner,
-        repo,
-        old_rev,
-        new_rev,
-        BranchComparison::unavailable(),
-    )
-}
-
 fn merge_base_url(host: &str, owner: &str, repo: &str, old: &str, new: &str) -> String {
     let raw_project = format!("{owner}/{repo}");
     let project = percent_encode(&raw_project);
@@ -142,12 +89,10 @@ struct GitlabCommit {
 #[cfg(test)]
 mod tests {
     use super::{
-        BranchComparison,
         CompareStatus,
         classify,
         merge_base_url,
         percent_encode,
-        refine_comparison,
     };
 
     #[test]
@@ -175,32 +120,6 @@ mod tests {
             merge_base_url("gitlab.com", "o", "r", "a&b", "c#d"),
             "https://gitlab.com/api/v4/projects/o%2Fr/repository/\
              merge_base?refs[]=a%26b&refs[]=c%23d"
-        );
-    }
-
-    #[test]
-    fn refine_leaves_new_identical_and_classified_comparisons_untouched() {
-        // a new pin has no old rev to compare against
-        assert_eq!(
-            refine_comparison("h", "o", "r", None, "new", BranchComparison::none()),
-            BranchComparison::none()
-        );
-        // identical revs need no api call
-        assert_eq!(
-            refine_comparison("h", "o", "r", Some("rev"), "rev", BranchComparison::none()),
-            BranchComparison::none()
-        );
-        // an already-classified comparison is left as-is
-        assert_eq!(
-            refine_comparison(
-                "h",
-                "o",
-                "r",
-                Some("old"),
-                "new",
-                BranchComparison::verified(CompareStatus::Identical)
-            ),
-            BranchComparison::verified(CompareStatus::Identical)
         );
     }
 }

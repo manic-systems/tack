@@ -9,20 +9,16 @@ use std::{
     },
 };
 
-use rayon::prelude::{
-    IntoParallelIterator as _,
-    ParallelIterator as _,
-};
-
-use super::{
-    forge_compare::{
-        self,
-        SurfacedCauses,
-    },
-    model::Entry,
-};
+use super::model::Entry;
 use crate::{
-    fetch::CompareStatus,
+    fetch::{
+        CompareStatus,
+        compare_planner::{
+            CompareJob as PlannerCompareJob,
+            CompareSession,
+            CompareSource,
+        },
+    },
     report::Mark,
     source::id::SourceId,
 };
@@ -31,10 +27,10 @@ pub(super) const MAX_COMPARE_JOBS: usize = 100;
 const MAX_LIVE_COMPARE_JOBS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct CompareJob {
+pub(super) struct CompareWork {
     pub id:   SourceId,
-    pub base: String,
     pub head: String,
+    pub job:  PlannerCompareJob,
 }
 
 /// the entry a group is measured against: top pin, else newest transitive by
@@ -66,14 +62,14 @@ pub(super) const fn entry_compare_rev(entry: &Entry) -> &str {
 
 /// forge compare work for each divergent rev vs its comparator
 /// jobs carry full revs (request + map keys); abbreviation happens at render
-pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<CompareJob>, usize) {
+pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<CompareWork>, usize) {
     let mut jobs = groups
         .iter()
         .filter(|group| group_diverges(group.1))
         .filter_map(|(id, entries)| {
             let base = comparator(entries)?;
-            if base.rev.is_empty() || !forge_compare::comparable(id) {
-                return None; // nothing concrete to compare, or no api to ask
+            if base.rev.is_empty() || CompareSource::from_source_id(id).is_none() {
+                return None; // nothing concrete to compare
             }
             let mut seen = HashSet::new();
             let heads = entries
@@ -83,12 +79,14 @@ pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<Comp
                         && !entry.rev.is_empty()
                         && seen.insert(entry.rev.as_str())
                 })
-                .map(|entry| {
-                    CompareJob {
-                        id:   id.clone(),
-                        base: base.rev.clone(),
-                        head: entry.rev.clone(),
-                    }
+                .filter_map(|entry| {
+                    PlannerCompareJob::from_source_id(id, &base.rev, &entry.rev).map(|job| {
+                        CompareWork {
+                            id: id.clone(),
+                            head: entry.rev.clone(),
+                            job,
+                        }
+                    })
                 })
                 .collect::<Vec<_>>();
             Some(heads)
@@ -110,20 +108,22 @@ pub(super) fn ahead_behind(
     let (jobs, capped) = compare_jobs(groups);
     let attempted = jobs.len();
     let mut compares = HashMap::<(SourceId, String), CompareStatus>::new();
-    let mut surfaced = SurfacedCauses::default();
-    for chunk in jobs.chunks(MAX_LIVE_COMPARE_JOBS) {
-        let batch = chunk
-            .into_par_iter()
-            .map(|job| (job, forge_compare::compare(&job.id, &job.base, &job.head)))
-            .collect::<Vec<_>>();
-        for (job, attempt) in batch {
-            if let Some(status) = surfaced.record(attempt) {
-                compares.insert((job.id.clone(), job.head.clone()), status);
-            }
+    let session = CompareSession::new();
+    let planner_jobs = jobs.iter().map(|work| work.job.clone()).collect::<Vec<_>>();
+    let results = session.compare_batch(planner_jobs, MAX_LIVE_COMPARE_JOBS);
+    for (index, work) in jobs.iter().enumerate() {
+        if let Some(status) = results
+            .get(index)
+            .and_then(|attempt| attempt.as_ref())
+            .and_then(|attempt| attempt.status)
+        {
+            compares.insert((work.id.clone(), work.head.clone()), status);
         }
     }
 
-    surfaced.print_tack_messages();
+    for cause in session.into_surfaced() {
+        eprintln!("tack: {cause}");
+    }
     let dropped = capped + attempted - compares.len();
     if dropped > 0 {
         eprintln!(
@@ -306,8 +306,8 @@ mod tests {
 
         assert_eq!(capped, 0);
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].base, "1111111111111111111111111111111111111111");
-        assert_eq!(jobs[0].head, "2222222222222222222222222222222222222222");
+        assert_eq!(jobs[0].job.base, "1111111111111111111111111111111111111111");
+        assert_eq!(jobs[0].job.head, "2222222222222222222222222222222222222222");
     }
 
     #[test]

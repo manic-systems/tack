@@ -3,6 +3,7 @@
 mod app;
 mod cli;
 mod commands;
+mod dispatcher;
 mod fetch;
 mod history;
 mod lock;
