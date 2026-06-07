@@ -21,6 +21,7 @@ use ureq::{
 };
 
 mod archive;
+pub mod compare_planner;
 pub mod forge;
 mod git;
 mod git_http;
@@ -55,35 +56,19 @@ use crate::{
     },
 };
 
-/// upstream rev plus branch topology vs old rev when possible
-pub fn current_rev_compared(source: &Source, old_rev: Option<&str>) -> Result<CurrentRev> {
+pub fn current_rev(source: &Source) -> Result<String> {
     match *source {
         Source::Github {
             ref owner,
             ref repo,
             ref reff,
             rev: ref pinned,
-        } => github::current_rev_compared(owner, repo, reff.as_deref(), pinned.as_deref(), old_rev),
-        Source::Git { .. } => {
+        } => github::current_rev(owner, repo, reff.as_deref(), pinned.as_deref()),
+        Source::Git { .. } | Source::Gitlab { .. } => {
             let target = source
                 .git_target()
                 .context("git-backed source missing git target")?;
-            git::current_rev_compared(target.url.as_ref(), target.reff, target.rev, old_rev)
-        },
-        Source::Gitlab {
-            ref host,
-            ref owner,
-            ref repo,
-            rev: ref pinned,
-            ..
-        } => {
-            let target = source
-                .git_target()
-                .context("git-backed source missing git target")?;
-            let rev = git::current_rev(target.url.as_ref(), target.reff, target.rev)?;
-            let comparison =
-                gitlab::compare_revs(host, owner, repo, pinned.as_deref(), old_rev, &rev);
-            Ok(CurrentRev { rev, comparison })
+            git::current_rev(target.url.as_ref(), target.reff, target.rev)
         },
         Source::Tarball { ref url } => {
             let http = HttpClient::global();
@@ -92,26 +77,11 @@ pub fn current_rev_compared(source: &Source, old_rev: Option<&str>) -> Result<Cu
                 .call()
                 .or_else(|_| http.get(url.as_str()).call().map_err(Box::new))
                 .wrap_err_with(|| format!("probe {url}"))?;
-            let rev = immutable_url_of(&resp, url);
-            let comparison = if old_rev == Some(rev.as_str()) {
-                BranchComparison::verified(CompareStatus::Identical)
-            } else {
-                BranchComparison::none()
-            };
-            Ok(CurrentRev { rev, comparison })
+            Ok(immutable_url_of(&resp, url))
         },
         // a path pin is read locally at eval time; nothing to compare upstream
-        Source::Path { ref path } => {
-            Ok(CurrentRev {
-                rev:        path.clone(),
-                comparison: BranchComparison::none(),
-            })
-        },
+        Source::Path { ref path } => Ok(path.clone()),
     }
-}
-
-pub fn git_compare_status(url: &str, base: &str, head: &str) -> FetchResult<Option<CompareStatus>> {
-    git::compare_status(url, base, head)
 }
 
 /// fetch a fixed pin: sha256 the raw bytes (not nar), return the node plus that
@@ -224,55 +194,21 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
 }
 
 pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, String)> {
-    fetch_pin_compared(source, submodules, None).map(|fetched| (fetched.node, fetched.rev))
-}
-
-pub struct FetchedPin {
-    pub node:       LockedNode,
-    pub rev:        String,
-    pub comparison: BranchComparison,
-}
-
-/// fetch the tree plus branch topology vs old rev when available
-pub fn fetch_pin_compared(
-    source: &Source,
-    submodules: bool,
-    old_rev: Option<&str>,
-) -> Result<FetchedPin> {
     match *source {
         Source::Github {
             ref owner,
             ref repo,
             ref reff,
             rev: ref pinned,
-        } => github::fetch_pin_compared(owner, repo, reff.as_deref(), pinned.clone(), old_rev),
-        Source::Git { .. } => {
+        } => github::fetch_pin(owner, repo, reff.as_deref(), pinned.clone()),
+        Source::Git { .. } | Source::Gitlab { .. } => {
             reject_gitlab_submodules(source, submodules)?;
             let target = source
                 .git_target()
                 .context("git-backed source missing git target")?;
             let checkout =
                 git::fetch_pin_checkout(target.url.as_ref(), target.reff, target.rev, submodules)?;
-            let comparison =
-                git::git_comparison(target.url.as_ref(), target.rev, old_rev, &checkout.rev);
-            git_pin_from_checkout(source, checkout, submodules, comparison)
-        },
-        Source::Gitlab {
-            ref host,
-            ref owner,
-            ref repo,
-            rev: ref pinned,
-            ..
-        } => {
-            reject_gitlab_submodules(source, submodules)?;
-            let target = source
-                .git_target()
-                .context("git-backed source missing git target")?;
-            let checkout =
-                git::fetch_pin_checkout(target.url.as_ref(), target.reff, target.rev, submodules)?;
-            let comparison =
-                gitlab::compare_revs(host, owner, repo, pinned.as_deref(), old_rev, &checkout.rev);
-            git_pin_from_checkout(source, checkout, submodules, comparison)
+            git_pin_from_checkout(source, checkout, submodules)
         },
         Source::Tarball { ref url } => {
             let mut resp = HttpClient::global()
@@ -294,21 +230,11 @@ pub fn fetch_pin_compared(
             let root = unpack_tar_stream(resp.body_mut().as_reader(), format, dir.path())?;
             let nar_hash = nar::hash_path(&root)?;
             let node = LockedNode::new_tarball(immutable_url.clone(), nar_hash, last_modified);
-            Ok(FetchedPin {
-                node,
-                rev: immutable_url,
-                comparison: BranchComparison::none(),
-            })
+            Ok((node, immutable_url))
         },
         // a path pin locks to its spec with no fetch; the resolver reads the
         // directory at nix eval time
-        Source::Path { ref path } => {
-            Ok(FetchedPin {
-                node:       LockedNode::new_path(path.clone()),
-                rev:        path.clone(),
-                comparison: BranchComparison::none(),
-            })
-        },
+        Source::Path { ref path } => Ok((LockedNode::new_path(path.clone()), path.clone())),
     }
 }
 
@@ -323,8 +249,7 @@ fn git_pin_from_checkout(
     source: &Source,
     checkout: git::PinCheckout,
     submodules: bool,
-    comparison: BranchComparison,
-) -> Result<FetchedPin> {
+) -> Result<(LockedNode, String)> {
     let rev = checkout.rev.clone();
     let node = match *source {
         Source::Git { ref url, .. } => {
@@ -357,11 +282,7 @@ fn git_pin_from_checkout(
         },
     };
 
-    Ok(FetchedPin {
-        node,
-        rev,
-        comparison,
-    })
+    Ok((node, rev))
 }
 
 fn immutable_url_of(resp: &ureq_http::Response<Body>, fallback: &str) -> String {
@@ -416,9 +337,6 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BranchComparison,
-        CompareStatus,
-        current_rev_compared,
         fetch_locked_tree_into,
         git,
         git_pin_from_checkout,
@@ -432,21 +350,6 @@ mod tests {
 
     fn node(value: serde_json::Value) -> LockedNode {
         LockedNode::from_value(value).unwrap()
-    }
-
-    #[test]
-    fn github_pinned_rev_skips_branch_comparison() {
-        let source = "github:o/r?rev=abc123".parse::<Source>().unwrap();
-        let mismatched = current_rev_compared(&source, Some("old")).unwrap();
-        assert_eq!(mismatched.rev, "abc123");
-        assert_eq!(mismatched.comparison, BranchComparison::none());
-
-        let identical = current_rev_compared(&source, Some("abc123")).unwrap();
-        assert_eq!(identical.rev, "abc123");
-        assert_eq!(
-            identical.comparison,
-            BranchComparison::verified(CompareStatus::Identical)
-        );
     }
 
     #[test]
@@ -498,7 +401,7 @@ mod tests {
         let source = "gitlab:Group/Repo/main?host=gitlab.example.com&rev=abc123"
             .parse::<Source>()
             .unwrap();
-        let fetched = git_pin_from_checkout(
+        let (fetched, rev) = git_pin_from_checkout(
             &source,
             git::PinCheckout {
                 rev:           "abc123".to_owned(),
@@ -507,14 +410,12 @@ mod tests {
                 refname:       "refs/heads/main".to_owned(),
             },
             true,
-            BranchComparison::none(),
         )
         .unwrap();
 
-        assert_eq!(fetched.rev, "abc123");
-        assert_eq!(fetched.comparison, BranchComparison::none());
+        assert_eq!(rev, "abc123");
         assert_eq!(
-            fetched.node,
+            fetched,
             node(json!({
                 "type": "gitlab",
                 "host": "gitlab.example.com",
@@ -532,7 +433,7 @@ mod tests {
         let source = "git+https://gitlab.com/Group/Repo.git?ref=main&rev=abc123"
             .parse::<Source>()
             .unwrap();
-        let fetched = git_pin_from_checkout(
+        let (fetched, _) = git_pin_from_checkout(
             &source,
             git::PinCheckout {
                 rev:           "abc123".to_owned(),
@@ -541,12 +442,11 @@ mod tests {
                 refname:       "refs/heads/main".to_owned(),
             },
             true,
-            BranchComparison::none(),
         )
         .unwrap();
 
         assert_eq!(
-            fetched.node,
+            fetched,
             node(json!({
                 "type": "git",
                 "url": "https://gitlab.com/Group/Repo.git",

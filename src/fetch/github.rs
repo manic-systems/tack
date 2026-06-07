@@ -18,7 +18,6 @@ use serde::{
 };
 
 use super::{
-    FetchedPin,
     archive::{
         TarFormat,
         unpack_tar_stream,
@@ -29,11 +28,7 @@ use super::{
         HttpClient,
     },
     time::epoch_from_iso,
-    topology::{
-        BranchComparison,
-        CompareStatus,
-        CurrentRev,
-    },
+    topology::CompareStatus,
 };
 use crate::{
     lock::LockedNode,
@@ -53,13 +48,33 @@ impl GithubClient {
         }
     }
 
+    fn commit(self, owner: &str, repo: &str, reff: &str) -> FetchResult<(String, i64)> {
+        let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{reff}");
+        let parsed = self.http.github_json::<GithubCommitResponse>(&url, None)?;
+        parsed.rev_and_epoch(&format!("{owner}/{repo}@{reff}"))
+    }
+
+    fn compare_status(
+        self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> FetchResult<Option<CompareStatus>> {
+        let url = Self::compare_url(owner, repo, base, head);
+        let parsed = self
+            .http
+            .github_json::<GithubCompareResponse>(&url, Some(Duration::from_secs(5)))?;
+        Ok(parsed.status())
+    }
+
     fn ref_compare(
         self,
         owner: &str,
         repo: &str,
         reff: Option<&str>,
         old_rev: &str,
-    ) -> FetchResult<ResolvedGithubRef> {
+    ) -> FetchResult<GithubRefCompare> {
         let query = if reff.is_some() {
             GITHUB_REF_COMPARE_QUERY
         } else {
@@ -75,79 +90,8 @@ impl GithubClient {
         GithubRefCompareData::resolve(&data)
     }
 
-    /// if graphql resolved the ref but left the comparison unavailable, the
-    /// rest compare endpoint or, last, a generic DAG probe may still classify
-    /// the two revs; verified or not-attempted comparisons are left alone
-    fn backfill_comparison(
-        self,
-        owner: &str,
-        repo: &str,
-        old_rev: &str,
-        resolved: ResolvedGithubRef,
-    ) -> ResolvedGithubRef {
-        let unavailable = resolved.comparison.status.is_none() && resolved.comparison.expected;
-        if !unavailable || old_rev == resolved.rev {
-            return resolved;
-        }
-        let comparison = self
-            .compare_status(owner, repo, old_rev, &resolved.rev)
-            .ok()
-            .flatten()
-            .map_or(resolved.comparison, BranchComparison::verified);
-        ResolvedGithubRef {
-            comparison,
-            ..resolved
-        }
-    }
-
-    fn commit(self, owner: &str, repo: &str, reff: &str) -> FetchResult<(String, i64)> {
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{reff}");
-        let parsed = self.http.github_json::<GithubCommitResponse>(&url, None)?;
-        parsed.rev_and_epoch(&format!("{owner}/{repo}@{reff}"))
-    }
-
-    fn compare_status(
-        self,
-        owner: &str,
-        repo: &str,
-        base: &str,
-        head: &str,
-    ) -> FetchResult<Option<CompareStatus>> {
-        self.rest_compare_status(owner, repo, base, head)
-            .or_else(|_| self.dag_compare_status(owner, repo, base, head))
-    }
-
-    fn rest_compare_status(
-        self,
-        owner: &str,
-        repo: &str,
-        base: &str,
-        head: &str,
-    ) -> FetchResult<Option<CompareStatus>> {
-        let url = Self::compare_url(owner, repo, base, head);
-        let parsed = self
-            .http
-            .github_json::<GithubCompareResponse>(&url, Some(Duration::from_secs(5)))?;
-        Ok(parsed.status())
-    }
-
-    fn dag_compare_status(
-        self,
-        owner: &str,
-        repo: &str,
-        base: &str,
-        head: &str,
-    ) -> FetchResult<Option<CompareStatus>> {
-        let _ = self;
-        super::git::compare_status(&Self::clone_url(owner, repo), base, head)
-    }
-
     fn compare_url(owner: &str, repo: &str, base: &str, head: &str) -> String {
         format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}?per_page=1")
-    }
-
-    fn clone_url(owner: &str, repo: &str) -> String {
-        format!("https://github.com/{owner}/{repo}.git")
     }
 
     fn commits_between(
@@ -176,40 +120,15 @@ impl GithubClient {
         repo: &str,
         reff: Option<&str>,
         pinned: Option<String>,
-        old_rev: Option<&str>,
     ) -> Result<ResolvedGithubRef> {
         if let Some(rev) = pinned {
             let (_, last_modified) = self.commit(owner, repo, &rev)?;
-            return Ok(ResolvedGithubRef {
-                rev,
-                last_modified,
-                comparison: BranchComparison::none(),
-            });
+            return Ok(ResolvedGithubRef { rev, last_modified });
         }
 
         let ref_str = reff.unwrap_or("HEAD");
-        if let Some(previous_rev) = old_rev
-            && let Ok(resolved) = self.ref_compare(owner, repo, reff, previous_rev)
-        {
-            return Ok(self.backfill_comparison(owner, repo, previous_rev, resolved));
-        }
-
         let (rev, last_modified) = self.commit(owner, repo, ref_str)?;
-        let comparison = old_rev.map_or_else(BranchComparison::none, |previous_rev| {
-            if previous_rev == rev.as_str() {
-                BranchComparison::verified(CompareStatus::Identical)
-            } else {
-                self.compare_status(owner, repo, previous_rev, &rev)
-                    .ok()
-                    .flatten()
-                    .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
-            }
-        });
-        Ok(ResolvedGithubRef {
-            rev,
-            last_modified,
-            comparison,
-        })
+        Ok(ResolvedGithubRef { rev, last_modified })
     }
 
     fn download_tarball(self, owner: &str, repo: &str, rev: &str, into: &Path) -> Result<PathBuf> {
@@ -221,15 +140,6 @@ impl GithubClient {
             .wrap_err_with(|| format!("download {url}"))?;
         unpack_tar_stream(resp.body_mut().as_reader(), TarFormat::Gz, into)
     }
-}
-
-#[derive(Serialize)]
-struct GithubCompareVariables<'a> {
-    owner:    &'a str,
-    repo:     &'a str,
-    old:      &'a str,
-    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
-    ref_name: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -325,52 +235,17 @@ impl GithubCompareCommit {
     }
 }
 
-pub(super) fn current_rev_compared(
+pub(super) fn current_rev(
     owner: &str,
     repo: &str,
     reff: Option<&str>,
     pinned: Option<&str>,
-    old_rev: Option<&str>,
-) -> Result<CurrentRev> {
+) -> Result<String> {
     let github = GithubClient::global();
-
-    if let Some(pinned_rev) = pinned {
-        let comparison = if old_rev == Some(pinned_rev) {
-            BranchComparison::verified(CompareStatus::Identical)
-        } else {
-            BranchComparison::none()
-        };
-        return Ok(CurrentRev {
-            rev: pinned_rev.to_owned(),
-            comparison,
-        });
-    }
-
-    let ref_str = reff.unwrap_or("HEAD");
-    if let Some(previous_rev) = old_rev
-        && let Ok(resolved) = github.ref_compare(owner, repo, reff, previous_rev)
-    {
-        let filled = github.backfill_comparison(owner, repo, previous_rev, resolved);
-        return Ok(CurrentRev {
-            rev:        filled.rev,
-            comparison: filled.comparison,
-        });
-    }
-
-    let (rev, _) = github.commit(owner, repo, ref_str)?;
-    let comparison = old_rev.map_or_else(BranchComparison::none, |previous_rev| {
-        if previous_rev == rev.as_str() {
-            BranchComparison::verified(CompareStatus::Identical)
-        } else {
-            github
-                .compare_status(owner, repo, previous_rev, &rev)
-                .ok()
-                .flatten()
-                .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
-        }
-    });
-
-    Ok(CurrentRev { rev, comparison })
+    pinned.map_or_else(
+        || Ok(github.commit(owner, repo, reff.unwrap_or("HEAD"))?.0),
+        |rev| Ok(rev.to_owned()),
+    )
 }
 
 pub(super) fn fetch_locked_tree_into(
@@ -399,31 +274,39 @@ pub(super) fn fetch_tree_into(
     github.download_tarball(owner, repo, &tree_rev, dir)
 }
 
-pub(super) fn fetch_pin_compared(
+pub(super) fn fetch_pin(
     owner: &str,
     repo: &str,
     reff: Option<&str>,
     pinned: Option<String>,
-    old_rev: Option<&str>,
-) -> Result<FetchedPin> {
+) -> Result<(LockedNode, String)> {
     let github = GithubClient::global();
-    let resolved = github.resolve_for_pin(owner, repo, reff, pinned, old_rev)?;
+    let resolved = github.resolve_for_pin(owner, repo, reff, pinned)?;
     let dir = tempfile::tempdir()?;
     let root = github.download_tarball(owner, repo, &resolved.rev, dir.path())?;
     let nar_hash = nar::hash_path(&root)?;
     let rev = resolved.rev;
     let node = LockedNode::new_github(owner, repo, rev.clone(), nar_hash, resolved.last_modified);
-    Ok(FetchedPin {
-        node,
-        rev,
-        comparison: resolved.comparison,
-    })
+    Ok((node, rev))
 }
 
 struct ResolvedGithubRef {
     rev:           String,
     last_modified: i64,
-    comparison:    BranchComparison,
+}
+
+#[derive(Serialize)]
+struct GithubCompareVariables<'a> {
+    owner:    &'a str,
+    repo:     &'a str,
+    old:      &'a str,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    ref_name: Option<&'a str>,
+}
+
+struct GithubRefCompare {
+    rev:    String,
+    status: Option<CompareStatus>,
 }
 
 #[derive(Deserialize)]
@@ -432,7 +315,7 @@ struct GithubRefCompareData {
 }
 
 impl GithubRefCompareData {
-    fn resolve(&self) -> FetchResult<ResolvedGithubRef> {
+    fn resolve(&self) -> FetchResult<GithubRefCompare> {
         let ref_node = self
             .repository
             .as_ref()
@@ -442,18 +325,13 @@ impl GithubRefCompareData {
             .target
             .as_ref()
             .ok_or_else(|| FetchError::Github("graphql response missing ref target".to_owned()))?;
-        let (rev, last_modified) = target.commit_identity()?;
-        let comparison = ref_node
+        let rev = target.commit_oid()?;
+        let status = ref_node
             .compare
             .as_ref()
             .and_then(|compare| compare.status.as_deref())
-            .and_then(graphql_ref_compare_status)
-            .map_or_else(BranchComparison::unavailable, BranchComparison::verified);
-        Ok(ResolvedGithubRef {
-            rev,
-            last_modified,
-            comparison,
-        })
+            .and_then(graphql_ref_compare_status);
+        Ok(GithubRefCompare { rev, status })
     }
 }
 
@@ -483,24 +361,17 @@ struct GithubRefTarget {
 }
 
 impl GithubRefTarget {
-    fn commit_identity(&self) -> FetchResult<(String, i64)> {
+    fn commit_oid(&self) -> FetchResult<String> {
         let commit = self
             .target
             .as_deref()
             .filter(|inner| inner.committed_date.is_some())
             .unwrap_or(self);
-        let rev = commit
+        commit
             .oid
             .as_deref()
-            .ok_or_else(|| FetchError::Github("graphql response missing commit oid".to_owned()))?
-            .to_owned();
-        let date = commit
-            .committed_date
-            .as_deref()
-            .ok_or_else(|| FetchError::Github("graphql response missing commit date".to_owned()))?;
-        let epoch = epoch_from_iso(date)
-            .map_err(|err| FetchError::Github(format!("bad commit date: {err}")))?;
-        Ok((rev, epoch))
+            .ok_or_else(|| FetchError::Github("graphql response missing commit oid".to_owned()))
+            .map(str::to_owned)
     }
 }
 
@@ -555,13 +426,40 @@ query($owner: String!, $repo: String!, $old: String!) {
 fn graphql_ref_compare_status(status: &str) -> Option<CompareStatus> {
     Some(match status {
         // ref.compare uses targetRef as base and old locked rev as head, but tack
-        // shows current ref relative to old rev, so ahead/behind invert
+        // shows current ref relative to old rev, so ahead/behind invert.
         "AHEAD" => CompareStatus::Behind,
         "BEHIND" => CompareStatus::Ahead,
         "DIVERGED" => CompareStatus::Diverged,
         "IDENTICAL" => CompareStatus::Identical,
         _ => return None,
     })
+}
+
+pub fn resolve_ref_compare(
+    owner: &str,
+    repo: &str,
+    reff: Option<&str>,
+    base: &str,
+) -> FetchResult<(String, Option<CompareStatus>)> {
+    let compare = GithubClient::global().ref_compare(owner, repo, reff, base)?;
+    Ok((compare.rev, compare.status))
+}
+
+/// compare the resolved GitHub ref against base, returning none when the ref no
+/// longer resolves to the expected head or the GraphQL status is unrecognized.
+pub fn compare_ref_status(
+    owner: &str,
+    repo: &str,
+    reff: Option<&str>,
+    base: &str,
+    head: &str,
+) -> FetchResult<Option<CompareStatus>> {
+    let compare = GithubClient::global().ref_compare(owner, repo, reff, base)?;
+    if compare.rev == head {
+        Ok(compare.status)
+    } else {
+        Ok(None)
+    }
 }
 
 /// compare head against base; none when the status is unrecognized
@@ -598,7 +496,6 @@ pub fn commits_between(
 #[cfg(test)]
 mod tests {
     use super::{
-        BranchComparison,
         CompareStatus,
         GithubClient,
         GithubRefCompareData,
@@ -651,11 +548,7 @@ mod tests {
         let resolved = parsed.resolve().unwrap();
 
         assert_eq!(resolved.rev, "new");
-        assert_eq!(resolved.last_modified, 1_780_164_493);
-        assert_eq!(
-            resolved.comparison,
-            BranchComparison::verified(CompareStatus::Ahead)
-        );
+        assert_eq!(resolved.status, Some(CompareStatus::Ahead));
     }
 
     #[test]
@@ -683,10 +576,7 @@ mod tests {
         let resolved = parsed.resolve().unwrap();
 
         assert_eq!(resolved.rev, "commit");
-        assert_eq!(
-            resolved.comparison,
-            BranchComparison::verified(CompareStatus::Identical)
-        );
+        assert_eq!(resolved.status, Some(CompareStatus::Identical));
     }
 
     fn commit(

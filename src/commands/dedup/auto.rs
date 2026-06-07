@@ -6,21 +6,17 @@ use std::collections::{
     HashSet,
 };
 
-use rayon::prelude::{
-    IntoParallelRefIterator as _,
-    ParallelIterator as _,
-};
-
-use super::{
-    forge_compare::CachedComparator,
-    scan::{
-        strip_disambiguator,
-        try_raw_file,
-    },
+use super::scan::{
+    strip_disambiguator,
+    try_raw_file,
 };
 use crate::{
     commands::tolerate,
-    fetch::CompareStatus,
+    dispatcher,
+    fetch::{
+        CompareStatus,
+        compare_planner::CompareSession,
+    },
     lock::{
         self,
         LockedNode,
@@ -34,6 +30,8 @@ use crate::{
         ScanFile,
     },
 };
+
+const AUTO_DEDUP_SCAN_IN_FLIGHT: usize = 16;
 
 #[derive(Default)]
 pub struct AutoDedupReport {
@@ -158,7 +156,7 @@ fn auto_dedup_inner(
         .collect::<HashSet<String>>();
     valid.extend(aliases.targets().cloned());
     let mut changed = prune_stale_auto_entries(lock, &valid);
-    let mut comparator = CachedComparator::new();
+    let comparator = CompareSession::new();
 
     if aliases.is_empty() {
         return AutoDedupReport {
@@ -212,11 +210,17 @@ fn scan_batches(
     aliases: &AutoFollowAliases,
     lock: &lock::LockFile,
 ) -> Vec<ScanBatch> {
-    inputs
-        .par_iter()
+    let scan_jobs = inputs
+        .iter()
+        .copied()
         .filter(|inp| inp.pin_type == PinType::Flake)
-        .filter_map(|inp| scan_input(inp, aliases, lock))
-        .collect::<Vec<ScanBatch>>()
+        .collect::<Vec<_>>();
+    dispatcher::ordered(scan_jobs, AUTO_DEDUP_SCAN_IN_FLIGHT, |_, input| {
+        scan_input(input, aliases, lock)
+    })
+    .into_iter()
+    .flatten()
+    .collect::<Vec<ScanBatch>>()
 }
 
 fn scan_input(
