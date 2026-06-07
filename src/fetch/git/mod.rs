@@ -450,9 +450,9 @@ fn copy_reachable_object(
 }
 
 fn commit_present(repo: &gix::Repository, rev: &str) -> bool {
-    repo.rev_parse_single(rev)
+    gix::ObjectId::from_hex(rev.as_bytes())
         .ok()
-        .and_then(|id| id.object().ok())
+        .and_then(|id| repo.find_object(id).ok())
         .and_then(|object| object.peel_to_commit().ok())
         .is_some()
 }
@@ -491,16 +491,15 @@ fn fetched_commit<'repo>(
     repo: &'repo gix::Repository,
     fetched_ref: &str,
 ) -> Result<gix::Commit<'repo>> {
-    Ok(repo
-        .rev_parse_single(fetched_ref)?
-        .object()?
-        .peel_to_commit()?)
+    let id = repo.find_reference(fetched_ref)?.peel_to_id()?.detach();
+    Ok(repo.find_object(id)?.peel_to_commit()?)
 }
 
 fn checkout_existing_commit(repo: &gix::Repository, rev: &str) -> Result<(String, i64)> {
+    let oid = gix::ObjectId::from_hex(rev.as_bytes())
+        .wrap_err_with(|| format!("parse '{rev}' as object id"))?;
     let commit = repo
-        .rev_parse_single(rev)?
-        .object()?
+        .find_object(oid)?
         .peel_to_commit()
         .wrap_err_with(|| format!("peel '{rev}' to commit"))?;
     let id = commit.id().detach().to_string();
