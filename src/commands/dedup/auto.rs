@@ -134,11 +134,22 @@ struct ScanBatch {
 }
 
 /// for each `[all_follow]` target that isn't a declared input, write the
-/// freshest transitive observation from top-level flake.locks
-pub fn auto_dedup(
+/// freshest transitive observation from top-level flake.locks, scanning only
+/// the inputs in `only`
+pub fn auto_dedup_scoped(
     inputs: &[pins::Input],
     all_follow: &BTreeMap<String, String>,
     lock: &mut lock::LockFile,
+    only: &[String],
+) -> AutoDedupReport {
+    auto_dedup_inner(inputs, all_follow, lock, Some(only))
+}
+
+fn auto_dedup_inner(
+    inputs: &[pins::Input],
+    all_follow: &BTreeMap<String, String>,
+    lock: &mut lock::LockFile,
+    only: Option<&[String]>,
 ) -> AutoDedupReport {
     let aliases = AutoFollowAliases::from_inputs(inputs, all_follow);
     let mut valid = inputs
@@ -157,7 +168,16 @@ pub fn auto_dedup(
         };
     }
 
-    let batches = scan_batches(inputs, &aliases, lock);
+    let scan_inputs = match only {
+        Some(names) if !names.is_empty() => {
+            inputs
+                .iter()
+                .filter(|inp| names.contains(&inp.name))
+                .collect::<Vec<_>>()
+        },
+        _ => inputs.iter().collect::<Vec<_>>(),
+    };
+    let batches = scan_batches(&scan_inputs, &aliases, lock);
     let mut observations = BTreeMap::<String, Vec<LockObservation>>::new();
     let mut scan_diagnostics = BTreeSet::<ScanDiagnostic>::new();
     for batch in batches {
@@ -188,7 +208,7 @@ pub fn auto_dedup(
 }
 
 fn scan_batches(
-    inputs: &[pins::Input],
+    inputs: &[&pins::Input],
     aliases: &AutoFollowAliases,
     lock: &lock::LockFile,
 ) -> Vec<ScanBatch> {

@@ -24,7 +24,7 @@ use rayon::prelude::{
 
 pub(super) use self::auto::{
     AutoDedupReport,
-    auto_dedup,
+    auto_dedup_scoped,
 };
 use self::{
     compare::ahead_behind,
