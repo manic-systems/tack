@@ -4,11 +4,13 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     io::Read as _,
+    panic,
     sync::{
         Mutex,
         OnceLock,
         PoisonError,
     },
+    thread,
     time::Duration,
 };
 
@@ -151,8 +153,13 @@ fn compare_forgejo_gitea(
         return Ok(CompareStatus::Identical);
     }
 
-    let ahead = compare_count(host, owner, repo, base, head)? > 0;
-    let behind = compare_count(host, owner, repo, head, base)? > 0;
+    let (ahead_count, behind_count) = thread::scope(|scope| {
+        let ahead = scope.spawn(|| compare_count(host, owner, repo, base, head));
+        let behind = compare_count(host, owner, repo, head, base);
+        (ahead.join(), behind)
+    });
+    let ahead = ahead_count.unwrap_or_else(|payload| panic::resume_unwind(payload))? > 0;
+    let behind = behind_count? > 0;
     Ok(match (ahead, behind) {
         (false, false) => CompareStatus::Identical,
         (true, false) => CompareStatus::Ahead,
