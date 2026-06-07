@@ -104,6 +104,16 @@ fn classify(
     warning: Option<String>,
 ) -> PinResolution {
     let old_rev = old.and_then(LockedNode::rev);
+
+    if input.pin_type != PinType::Fixed
+        && old_rev.is_some()
+        && let Ok(source) = expanded.parse::<Source>()
+        && let Ok(current) = fetch::current_rev_compared(&source, old_rev)
+        && old_rev == Some(current.rev.as_str())
+    {
+        return unchanged(warning);
+    }
+
     let UpdateFetch {
         node,
         rev,
@@ -242,6 +252,7 @@ pub(super) fn update(
     let mut drift = 0_usize;
     let mut pins = Vec::with_capacity(resolutions.len());
     let mut warnings = Vec::new();
+    let mut changed_names = Vec::new();
     for (input, resolution) in selected.iter().zip(resolutions) {
         if let Some(warning) = resolution.warning {
             warnings.push(warning);
@@ -249,6 +260,7 @@ pub(super) fn update(
         if let Some(node) = resolution.node {
             lock.insert(input.name.clone(), node);
             changed = true;
+            changed_names.push(input.name.clone());
         }
         if resolution.drift {
             drift += 1;
@@ -259,8 +271,8 @@ pub(super) fn update(
         });
     }
 
-    let auto_dedup = if drift == 0 {
-        dedup::auto_dedup(&all, &all_follow, &mut lock)
+    let auto_dedup = if drift == 0 && !changed_names.is_empty() {
+        dedup::auto_dedup_scoped(&all, &all_follow, &mut lock, &changed_names)
     } else {
         dedup::AutoDedupReport::default()
     };
