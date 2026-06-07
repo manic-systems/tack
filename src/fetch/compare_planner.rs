@@ -17,7 +17,6 @@ use super::{
     BranchComparison,
     CompareStatus,
     CurrentRev,
-    current_rev,
     forge::{
         self,
         ForgeKind,
@@ -29,6 +28,7 @@ use super::{
         FetchError,
         FetchResult,
     },
+    resolve,
 };
 use crate::{
     dispatcher,
@@ -209,7 +209,7 @@ impl CompareSession {
             });
         }
 
-        let rev = current_rev(source)?;
+        let rev = resolve::current_rev(source)?;
         let comparison = match base {
             None => BranchComparison::none(),
             Some(previous) if previous == rev => {
