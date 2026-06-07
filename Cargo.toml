@@ -40,6 +40,7 @@ gix-transport = { default-features = false, features = [
 ], version = "0.57.1" }
 gix-worktree-state = "0.31.0"
 hmac-sha256 = "1.1.14"
+percent-encoding = "2.3.2"
 pound = "0.1.4"
 rayon = "1.12.0"
 serde = { features = [ "derive" ], version = "1.0.228" }

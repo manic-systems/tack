@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 pub mod forge;
+pub mod git_url;
 pub mod id;
 
 pub mod gitlab;

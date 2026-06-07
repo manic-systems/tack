@@ -516,7 +516,8 @@ fn is_pack_limit(err: &FetchError) -> bool {
         | FetchError::Auth { .. }
         | FetchError::Decode { .. }
         | FetchError::Github(_)
-        | FetchError::Gitlab(_) => false,
+        | FetchError::Gitlab(_)
+        | FetchError::Forge(_) => false,
     }
 }
 
