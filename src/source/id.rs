@@ -30,6 +30,13 @@ pub enum SourceId {
         owner: String,
         repo:  String,
     },
+    /// forgejo and gitea collapse to one identity: same clone url, same tree,
+    /// and the api treats them alike, so the declared kind is not part of it
+    Forge {
+        host:  String,
+        owner: String,
+        repo:  String,
+    },
     /// git+url, query string stripped
     Git {
         url: String,
@@ -64,6 +71,12 @@ impl SourceId {
                 ref repo,
                 ..
             } => Self::gitlab(host, owner, repo),
+            Source::Forge {
+                ref host,
+                ref owner,
+                ref repo,
+                ..
+            } => Self::forge(host, owner, repo),
             Source::Git { ref url, .. } => {
                 if let Some(repo) = gitlab::parse_git_url(url) {
                     return Self::gitlab(&repo.host, &repo.owner, &repo.repo);
@@ -98,6 +111,12 @@ impl SourceId {
                 ref repo,
                 ..
             } => Some(Self::gitlab(host, owner, repo)),
+            LockedNode::Forge {
+                ref host,
+                ref owner,
+                ref repo,
+                ..
+            } => Some(Self::forge(host, owner, repo)),
             LockedNode::Git { ref url, .. } => {
                 let cut = strip_query_fragment(url);
                 if let Some(repo) = gitlab::parse_git_url(cut) {
@@ -141,9 +160,19 @@ impl SourceId {
         }
     }
 
+    fn forge(host: &str, owner: &str, repo: &str) -> Self {
+        Self::Forge {
+            host:  host::normalized(host),
+            owner: owner.to_lowercase(),
+            repo:  repo.to_lowercase(),
+        }
+    }
+
     pub fn repo_name(&self) -> Option<&str> {
         match *self {
-            Self::Github { ref repo, .. } | Self::Gitlab { ref repo, .. } => Some(repo),
+            Self::Github { ref repo, .. }
+            | Self::Gitlab { ref repo, .. }
+            | Self::Forge { ref repo, .. } => Some(repo),
             Self::Git { .. } | Self::Tarball { .. } | Self::Indirect { .. } | Self::Path { .. } => {
                 None
             },
@@ -163,6 +192,11 @@ impl Display for SourceId {
                 ref owner,
                 ref repo,
             } => write!(f, "gitlab:{host}/{owner}/{repo}"),
+            Self::Forge {
+                ref host,
+                ref owner,
+                ref repo,
+            } => write!(f, "forge:{host}/{owner}/{repo}"),
             Self::Git { ref url } => write!(f, "git+{url}"),
             Self::Tarball { ref url } => write!(f, "tarball:{url}"),
             Self::Indirect { ref id } => write!(f, "indirect:{id}"),
@@ -432,6 +466,48 @@ mod tests {
             "gitlab:git.example.com/nixos/nixpkgs"
         );
         assert_ne!(default_host, self_hosted);
+    }
+
+    #[test]
+    fn forge_url_and_node_agree() {
+        let from_url = SourceId::from_url("forgejo:NixOS/Nixpkgs?host=Git.Example.Com").unwrap();
+        let from_node = SourceId::from_locked(&node(json!({
+            "type": "forge",
+            "kind": "forgejo",
+            "host": "git.example.com",
+            "owner": "nixos",
+            "repo": "nixpkgs"
+        })))
+        .unwrap();
+
+        assert_eq!(from_url, from_node);
+        assert_eq!(from_url.to_string(), "forge:git.example.com/nixos/nixpkgs");
+    }
+
+    #[test]
+    fn gitea_alias_shares_forge_identity() {
+        let forgejo = SourceId::from_url("forgejo:o/r?host=git.example.com").unwrap();
+        let gitea = SourceId::from_url("gitea:o/r?host=git.example.com").unwrap();
+
+        // the declared kind is cosmetic: both resolve and compare identically
+        assert_eq!(gitea.to_string(), "forge:git.example.com/o/r");
+        assert_eq!(forgejo, gitea);
+    }
+
+    #[test]
+    fn forge_identity_preserves_non_default_port() {
+        let from_url = SourceId::from_url("gitea:o/r?host=Git.Example.Com:8443").unwrap();
+        let from_node = SourceId::from_locked(&node(json!({
+            "type": "forge",
+            "kind": "gitea",
+            "host": "Git.Example.Com:8443",
+            "owner": "o",
+            "repo": "r"
+        })))
+        .unwrap();
+
+        assert_eq!(from_url, from_node);
+        assert_eq!(from_url.to_string(), "forge:git.example.com:8443/o/r");
     }
 
     #[test]

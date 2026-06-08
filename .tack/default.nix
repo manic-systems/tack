@@ -56,14 +56,28 @@ let
           acc
       ) { } (attrNames all_follow_raw);
 
-      # a path node's stored path is absolute, or relative to this resolver dir
+      # a path node's stored path is absolute, or relative to this resolver dir.
+      # forgejo/gitea have no native fetchTree type, so they fetch over git
       fetchPin =
         name:
         let
           node = lock.${name};
+          nodeType = node.type or "";
         in
-        if (node.type or "") == "path" && substring 0 1 node.path != "/" then
+        if nodeType == "path" && substring 0 1 node.path != "/" then
           fetchTree (node // { path = ./. + ("/" + node.path); })
+        else if nodeType == "forge" then
+          fetchTree (
+            {
+              type = "git";
+              url = "https://${node.host}/${node.owner}/${node.repo}.git";
+            }
+            // intersectAttrs {
+              rev = null;
+              narHash = null;
+              lastModified = null;
+            } node
+          )
         else
           fetchTree node;
 

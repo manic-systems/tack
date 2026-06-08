@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 pub mod forge;
+pub mod forgejo;
 pub mod git_url;
 pub mod id;
 
@@ -44,6 +45,14 @@ pub enum Source {
         reff:  Option<String>,
         rev:   Option<String>,
     },
+    Forge {
+        kind:  forgejo::Kind,
+        host:  String,
+        owner: String,
+        repo:  String,
+        reff:  Option<String>,
+        rev:   Option<String>,
+    },
     Tarball {
         url: String,
     },
@@ -75,12 +84,22 @@ impl Source {
                     rev:  rev.as_deref(),
                 })
             },
+            // identical clone url for the tree fetch + dag fallback; rev
+            // resolution and ahead/behind still dispatch per-forge elsewhere
             Self::Gitlab {
                 ref host,
                 ref owner,
                 ref repo,
                 ref reff,
                 ref rev,
+            }
+            | Self::Forge {
+                ref host,
+                ref owner,
+                ref repo,
+                ref reff,
+                ref rev,
+                ..
             } => {
                 Some(GitTarget {
                     url:  Cow::Owned(clone_url(host, owner, repo)),
@@ -120,6 +139,21 @@ impl FromStr for Source {
                 bail!("malformed gitlab url: {expanded}");
             };
             return Ok(Self::Gitlab {
+                host:  parsed.host,
+                owner: parsed.owner,
+                repo:  parsed.repo,
+                reff:  parsed.reff,
+                rev:   parsed.rev,
+            });
+        }
+        if let Some((scheme, body)) = expanded.split_once(':')
+            && let Some(kind) = forgejo::Kind::from_scheme(scheme)
+        {
+            let Some(parsed) = forgejo::parse_flake_url(kind, body) else {
+                bail!("malformed {scheme} url (host= is required): {expanded}");
+            };
+            return Ok(Self::Forge {
+                kind:  parsed.kind,
                 host:  parsed.host,
                 owner: parsed.owner,
                 repo:  parsed.repo,
@@ -339,6 +373,7 @@ mod tests {
             Source::Github { .. }
             | Source::Git { .. }
             | Source::Gitlab { .. }
+            | Source::Forge { .. }
             | Source::Tarball { .. } => panic!("expected path source"),
         }
     }
@@ -380,6 +415,7 @@ mod tests {
             },
             Source::Github { .. }
             | Source::Gitlab { .. }
+            | Source::Forge { .. }
             | Source::Tarball { .. }
             | Source::Path { .. } => {
                 panic!("expected git target")
@@ -395,6 +431,7 @@ mod tests {
             },
             Source::Github { .. }
             | Source::Gitlab { .. }
+            | Source::Forge { .. }
             | Source::Tarball { .. }
             | Source::Path { .. } => {
                 panic!("expected git target")
@@ -415,6 +452,7 @@ mod tests {
             },
             Source::Github { .. }
             | Source::Gitlab { .. }
+            | Source::Forge { .. }
             | Source::Tarball { .. }
             | Source::Path { .. } => {
                 panic!("expected git target")
@@ -443,11 +481,76 @@ mod tests {
             },
             Source::Github { .. }
             | Source::Git { .. }
+            | Source::Forge { .. }
             | Source::Tarball { .. }
             | Source::Path { .. } => {
                 panic!("expected gitlab target")
             },
         }
+    }
+
+    #[test]
+    fn forgejo_url_is_first_class_source() {
+        match "forgejo:owner/repo/main?host=Git.Example.Com&rev=abc123"
+            .parse::<Source>()
+            .unwrap()
+        {
+            Source::Forge {
+                kind,
+                host,
+                owner,
+                repo,
+                reff,
+                rev,
+            } => {
+                assert_eq!(kind, super::forgejo::Kind::Forgejo);
+                assert_eq!(host, "git.example.com");
+                assert_eq!(owner, "owner");
+                assert_eq!(repo, "repo");
+                assert_eq!(reff.as_deref(), Some("main"));
+                assert_eq!(rev.as_deref(), Some("abc123"));
+            },
+            Source::Github { .. }
+            | Source::Git { .. }
+            | Source::Gitlab { .. }
+            | Source::Tarball { .. }
+            | Source::Path { .. } => panic!("expected forge target"),
+        }
+    }
+
+    #[test]
+    fn gitea_alias_parses_as_forge_source() {
+        match "gitea:o/r?host=git.example.com".parse::<Source>().unwrap() {
+            Source::Forge { kind, host, .. } => {
+                assert_eq!(kind, super::forgejo::Kind::Gitea);
+                assert_eq!(host, "git.example.com");
+            },
+            Source::Github { .. }
+            | Source::Git { .. }
+            | Source::Gitlab { .. }
+            | Source::Tarball { .. }
+            | Source::Path { .. } => panic!("expected forge target"),
+        }
+    }
+
+    #[test]
+    fn forge_url_requires_host() {
+        let err = "forgejo:o/r/main".parse::<Source>().unwrap_err();
+        assert!(err.to_string().contains("host= is required"));
+    }
+
+    #[test]
+    fn forge_git_target_uses_clone_url() {
+        let forge = "forgejo:owner/repo/main?host=git.example.com&rev=abc123"
+            .parse::<Source>()
+            .unwrap();
+        let target = forge.git_target().unwrap();
+        assert_eq!(
+            target.url.as_ref(),
+            "https://git.example.com/owner/repo.git"
+        );
+        assert_eq!(target.reff, Some("main"));
+        assert_eq!(target.rev, Some("abc123"));
     }
 
     #[test]
@@ -481,6 +584,7 @@ mod tests {
             },
             Source::Git { .. }
             | Source::Gitlab { .. }
+            | Source::Forge { .. }
             | Source::Tarball { .. }
             | Source::Path { .. } => {
                 panic!("expected github target")
@@ -503,6 +607,7 @@ mod tests {
             Source::Github { .. }
             | Source::Git { .. }
             | Source::Gitlab { .. }
+            | Source::Forge { .. }
             | Source::Path { .. } => {
                 panic!("expected tarball target")
             },
@@ -515,6 +620,7 @@ mod tests {
             Source::Github { .. }
             | Source::Git { .. }
             | Source::Gitlab { .. }
+            | Source::Forge { .. }
             | Source::Path { .. } => {
                 panic!("expected tarball target")
             },

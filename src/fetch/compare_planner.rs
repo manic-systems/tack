@@ -304,6 +304,18 @@ impl CompareSource {
                     repo:  repo.clone(),
                 })
             },
+            Source::Forge {
+                ref host,
+                ref owner,
+                ref repo,
+                ..
+            } => {
+                Some(Self::ForgejoLike {
+                    host:  host.clone(),
+                    owner: owner.clone(),
+                    repo:  repo.clone(),
+                })
+            },
             Source::Git { .. } => {
                 let target = source.git_target()?;
                 Some(Self::Git {
@@ -332,6 +344,17 @@ impl CompareSource {
                 ref repo,
             } => {
                 Some(Self::Gitlab {
+                    host:  host.clone(),
+                    owner: owner.clone(),
+                    repo:  repo.clone(),
+                })
+            },
+            SourceId::Forge {
+                ref host,
+                ref owner,
+                ref repo,
+            } => {
+                Some(Self::ForgejoLike {
                     host:  host.clone(),
                     owner: owner.clone(),
                     repo:  repo.clone(),
