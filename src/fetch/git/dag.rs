@@ -48,6 +48,8 @@ use gix_transport::client::blocking_io::{
 
 use crate::fetch::{
     CompareStatus,
+    FetchError,
+    FetchResult,
     git_http,
     http::{
         FetchError,
@@ -515,6 +517,7 @@ fn is_pack_limit(err: &FetchError) -> bool {
         FetchError::Transport(ref message) => message.contains(PACK_LIMIT_MARKER),
         FetchError::NotFound { .. }
         | FetchError::Auth { .. }
+        | FetchError::RateLimited { .. }
         | FetchError::Decode { .. }
         | FetchError::Github(_)
         | FetchError::Gitlab(_)

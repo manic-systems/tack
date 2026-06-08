@@ -22,12 +22,10 @@ use ureq::http::{
 
 use super::{
     CompareStatus,
+    FetchError,
+    FetchResult,
     gitlab,
-    http::{
-        FetchError,
-        FetchResult,
-        HttpClient,
-    },
+    http::HttpClient,
 };
 use crate::source::git_url;
 

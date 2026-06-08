@@ -1,29 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    collections::{
-        BTreeSet,
-        HashMap,
-    },
-    env,
-    error::Error,
-    fs,
-    io::Read as _,
-    mem,
-    path::{
-        Path,
-        PathBuf,
-    },
-    result::Result as StdResult,
-    sync::{
-        Mutex,
-        OnceLock,
-        PoisonError,
-    },
+    sync::OnceLock,
     time::Duration,
 };
 
-use etcetera::BaseStrategy as _;
 use serde::{
     Deserialize,
     Serialize,
@@ -31,17 +12,34 @@ use serde::{
 };
 use ureq::{
     Agent,
+    Body,
     RequestBuilder,
-    http::header::{
-        ACCEPT,
-        AUTHORIZATION,
-        CONTENT_TYPE,
-        USER_AGENT,
+    http::{
+        Response,
+        header::{
+            ACCEPT,
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            USER_AGENT,
+        },
     },
     tls::TlsConfig,
     typestate::{
         WithBody,
         WithoutBody,
+    },
+};
+
+use super::{
+    auth::{
+        Credential,
+        record_token_warning,
+        token_for_host,
+        with_credential_fallback,
+    },
+    error::{
+        FetchError,
+        FetchResult,
     },
 };
 
@@ -268,6 +266,9 @@ impl FetchError {
             other => Self::Transport(format!("{what}: {other}")),
         }
     }
+    resp.body_mut()
+        .read_to_string()
+        .map_err(|err| FetchError::Transport(format!("read {what}: {err}")))
 }
 
 #[derive(Clone, Copy)]
@@ -292,16 +293,6 @@ impl HttpClient {
         Self::with_tack_headers(self.agent.post(url))
     }
 
-    fn github_get(self, url: &str) -> RequestBuilder<WithoutBody> {
-        Self::with_optional_github_auth(Self::with_github_headers(self.get(url)))
-    }
-
-    fn github_post(self, url: &str, token: &str) -> RequestBuilder<WithBody> {
-        let github_request = Self::with_github_headers(self.post(url));
-        let json_request = Self::with_json_body(github_request);
-        Self::with_github_auth(json_request, token)
-    }
-
     fn with_tack_headers<B>(request: RequestBuilder<B>) -> RequestBuilder<B> {
         request.header(USER_AGENT, TACK_USER_AGENT)
     }
@@ -314,52 +305,41 @@ impl HttpClient {
         request.header(CONTENT_TYPE, APPLICATION_JSON)
     }
 
-    fn with_optional_github_auth<B>(request: RequestBuilder<B>) -> RequestBuilder<B> {
-        if let Some(token) = token_for_host("github.com") {
-            Self::with_github_auth(request, token)
-        } else {
-            request
+    fn with_github_credential<B>(
+        request: RequestBuilder<B>,
+        credential: Credential,
+    ) -> RequestBuilder<B> {
+        match credential {
+            Credential::Token(token) => request.header(AUTHORIZATION, format!("Bearer {token}")),
+            Credential::Anonymous => request,
         }
     }
 
-    fn with_optional_gitlab_auth<B>(request: RequestBuilder<B>, host: &str) -> RequestBuilder<B> {
-        if let Some(token) = token_for_host(host) {
-            request.header(GITLAB_TOKEN_HEADER, token)
-        } else {
-            request
+    fn with_gitlab_credential<B>(
+        request: RequestBuilder<B>,
+        credential: Credential,
+    ) -> RequestBuilder<B> {
+        match credential {
+            Credential::Token(token) => request.header(GITLAB_TOKEN_HEADER, token),
+            Credential::Anonymous => request,
         }
-    }
-
-    fn with_github_auth<B>(request: RequestBuilder<B>, token: &str) -> RequestBuilder<B> {
-        request.header(AUTHORIZATION, Self::bearer(token))
-    }
-
-    fn bearer(token: &str) -> String {
-        format!("Bearer {token}")
     }
 
     pub(super) fn github_json<T>(self, url: &str, timeout_limit: Option<Duration>) -> FetchResult<T>
     where
         T: DeserializeOwned,
     {
-        let mut req = self.github_get(url);
-        if let Some(timeout) = timeout_limit {
-            req = req.config().timeout_global(Some(timeout)).build();
-        }
-
-        let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
-        let status = resp.status();
-        if status != 200 {
-            return Err(FetchError::from_status(status.as_u16(), url));
-        }
-
-        let body = resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|err| FetchError::Transport(format!("read github api {url}: {err}")))?;
-
-        serde_json::from_str::<T>(&body)
-            .map_err(|err| FetchError::Github(format!("api {url}: invalid json: {err}")))
+        with_credential_fallback("github.com", true, |credential| {
+            let mut req =
+                Self::with_github_credential(Self::with_github_headers(self.get(url)), credential);
+            if let Some(timeout) = timeout_limit {
+                req = req.config().timeout_global(Some(timeout)).build();
+            }
+            let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
+            let body = read_ok_body(&mut resp, url)?;
+            serde_json::from_str::<T>(&body)
+                .map_err(|err| FetchError::Github(format!("api {url}: invalid json: {err}")))
+        })
     }
 
     pub(super) fn gitlab_json<T>(
@@ -378,25 +358,19 @@ impl HttpClient {
                  TACK_NIX_CONF_TOKENS=1)"
             ));
         }
-        let mut req =
-            Self::with_optional_gitlab_auth(self.get(url).header(ACCEPT, APPLICATION_JSON), host);
-        if let Some(timeout) = timeout_limit {
-            req = req.config().timeout_global(Some(timeout)).build();
-        }
-
-        let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
-        let status = resp.status();
-        if status != 200 {
-            return Err(FetchError::from_status(status.as_u16(), url));
-        }
-
-        let body = resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|err| FetchError::Transport(format!("read gitlab api {url}: {err}")))?;
-
-        serde_json::from_str::<T>(&body)
-            .map_err(|err| FetchError::Gitlab(format!("api {url}: invalid json: {err}")))
+        with_credential_fallback(host, true, |credential| {
+            let mut req = Self::with_gitlab_credential(
+                self.get(url).header(ACCEPT, APPLICATION_JSON),
+                credential,
+            );
+            if let Some(timeout) = timeout_limit {
+                req = req.config().timeout_global(Some(timeout)).build();
+            }
+            let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
+            let body = read_ok_body(&mut resp, url)?;
+            serde_json::from_str::<T>(&body)
+                .map_err(|err| FetchError::Gitlab(format!("api {url}: invalid json: {err}")))
+        })
     }
 
     pub(super) fn github_graphql<V, T>(self, query: &str, variables: &V) -> FetchResult<T>
@@ -404,55 +378,48 @@ impl HttpClient {
         V: Serialize,
         T: DeserializeOwned,
     {
-        let token = token_for_host("github.com").ok_or_else(|| {
+        if token_for_host("github.com").is_none() {
             record_token_warning(
                 "no GitHub token; rev comparison falls back to commit lookup plus git DAG compare \
                  (set GITHUB_TOKEN or GH_TOKEN, or opt into nix.conf access-tokens with \
                  TACK_NIX_CONF_TOKENS=1)"
                     .to_owned(),
             );
-            FetchError::Auth {
-                what: "GITHUB_TOKEN or GH_TOKEN not set".to_owned(),
-            }
-        })?;
+        }
 
         let payload = serde_json::to_string(&GraphqlRequest { query, variables })
             .map_err(|err| FetchError::Github(format!("serialize graphql request: {err}")))?;
 
-        let mut resp = self
-            .github_post(GITHUB_GRAPHQL_URL, token)
+        with_credential_fallback("github.com", false, |credential| {
+            let mut resp = Self::with_github_credential(
+                Self::with_json_body(Self::with_github_headers(self.post(GITHUB_GRAPHQL_URL))),
+                credential,
+            )
             .config()
             .timeout_global(Some(GITHUB_GRAPHQL_TIMEOUT))
             .build()
-            .send(payload)
+            .send(payload.as_str())
             .map_err(|err| FetchError::from_ureq(err, "github graphql"))?;
 
-        let status = resp.status();
-        if status != 200 {
-            return Err(FetchError::from_status(status.as_u16(), "github graphql"));
-        }
+            let body = read_ok_body(&mut resp, "github graphql")?;
 
-        let body = resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|err| FetchError::Transport(format!("read github graphql: {err}")))?;
+            let parsed = serde_json::from_str::<GraphqlResponse<T>>(&body)
+                .map_err(|err| FetchError::Github(format!("graphql invalid json: {err}")))?;
 
-        let parsed = serde_json::from_str::<GraphqlResponse<T>>(&body)
-            .map_err(|err| FetchError::Github(format!("graphql invalid json: {err}")))?;
-
-        if let Some(error) = parsed.errors.first() {
-            let message = error.message();
-            if error.is_auth() {
-                return Err(FetchError::Auth {
-                    what: message.to_owned(),
-                });
+            if let Some(error) = parsed.errors.first() {
+                let message = error.message();
+                if error.is_auth() {
+                    return Err(FetchError::Auth {
+                        what: message.to_owned(),
+                    });
+                }
+                return Err(FetchError::Github(format!("graphql: {message}")));
             }
-            return Err(FetchError::Github(format!("graphql: {message}")));
-        }
 
-        parsed
-            .data
-            .ok_or_else(|| FetchError::Github("graphql response missing data".to_owned()))
+            parsed
+                .data
+                .ok_or_else(|| FetchError::Github("graphql response missing data".to_owned()))
+        })
     }
 
     pub(super) fn raw_text(self, url: &str) -> FetchResult<String> {
@@ -460,21 +427,7 @@ impl HttpClient {
             .get(url)
             .call()
             .map_err(|err| FetchError::from_ureq(err, url))?;
-        let status = resp.status();
-        if status != 200 {
-            return Err(FetchError::from_status(status.as_u16(), url));
-        }
-        let mut body = String::new();
-        resp.body_mut()
-            .as_reader()
-            .read_to_string(&mut body)
-            .map_err(|err| {
-                FetchError::Decode {
-                    what:   url.to_owned(),
-                    source: Box::new(err),
-                }
-            })?;
-        Ok(body)
+        read_ok_body(&mut resp, url)
     }
 }
 
@@ -518,99 +471,5 @@ impl GraphqlError {
                     || lower.contains("forbidden")
                     || lower.contains("unauthorized")
             }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        collections::HashMap,
-        fs,
-    };
-
-    use super::{
-        FetchError,
-        env_flag_enabled,
-        scrape_access_tokens,
-    };
-
-    #[test]
-    fn env_flag_is_on_only_for_truthy_values() {
-        assert!(env_flag_enabled(Some("1")));
-        assert!(env_flag_enabled(Some("true")));
-        assert!(env_flag_enabled(Some("YES")));
-        assert!(!env_flag_enabled(None));
-        assert!(!env_flag_enabled(Some("")));
-        assert!(!env_flag_enabled(Some("0")));
-        assert!(!env_flag_enabled(Some("false")));
-        assert!(!env_flag_enabled(Some("off")));
-    }
-
-    #[test]
-    fn access_tokens_scrape_follows_include_and_lets_later_lines_win() {
-        let dir = tempfile::tempdir().unwrap();
-        let included = dir.path().join("extra.conf");
-        fs::write(&included, "access-tokens = gitlab.example.com=inc\n").unwrap();
-        let main = dir.path().join("nix.conf");
-        fs::write(
-            &main,
-            "# a comment\naccess-tokens = github.com=gh gitlab.com=gl\nextra-access-tokens = \
-             gitlab.com=override\n!include extra.conf\n",
-        )
-        .unwrap();
-
-        let mut tokens = HashMap::new();
-        scrape_access_tokens(&main, &mut tokens, 0);
-
-        assert_eq!(tokens.get("github.com").map(String::as_str), Some("gh"));
-        // a later line (extra-access-tokens) overrides the earlier value
-        assert_eq!(
-            tokens.get("gitlab.com").map(String::as_str),
-            Some("override")
-        );
-        // a `!include`d file is followed, relative to the includer
-        assert_eq!(
-            tokens.get("gitlab.example.com").map(String::as_str),
-            Some("inc")
-        );
-    }
-
-    #[test]
-    fn status_classification_separates_auth_absent_and_transport() {
-        assert!(matches!(
-            FetchError::from_status(403, "x"),
-            FetchError::Auth { .. }
-        ));
-        assert!(matches!(
-            FetchError::from_status(401, "x"),
-            FetchError::Auth { .. }
-        ));
-        assert!(matches!(
-            FetchError::from_status(404, "x"),
-            FetchError::NotFound { .. }
-        ));
-        assert!(matches!(
-            FetchError::from_status(503, "x"),
-            FetchError::Transport(_)
-        ));
-        assert_eq!(FetchError::from_status(403, "x").to_string(), "auth: x");
-    }
-
-    // ureq surfaces non-2xx as Error::StatusCode; classification must survive
-    // the error path too
-    #[test]
-    fn ureq_status_errors_classify_like_responses() {
-        assert!(matches!(
-            FetchError::from_ureq(ureq::Error::StatusCode(403), "x"),
-            FetchError::Auth { .. }
-        ));
-        assert!(matches!(
-            FetchError::from_ureq(ureq::Error::StatusCode(404), "x"),
-            FetchError::NotFound { .. }
-        ));
-        assert!(matches!(
-            FetchError::from_ureq(ureq::Error::StatusCode(503), "x"),
-            FetchError::Transport(_)
-        ));
     }
 }

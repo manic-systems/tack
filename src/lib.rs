@@ -101,7 +101,7 @@ fn exit_code(report: &eyre::Report) -> ExitCode {
         if cause.downcast_ref::<ConfigError>().is_some() {
             return ExitCode::from(3);
         }
-        if cause.downcast_ref::<fetch::http::FetchError>().is_some() {
+        if cause.downcast_ref::<fetch::FetchError>().is_some() {
             return ExitCode::from(4);
         }
     }
