@@ -29,7 +29,10 @@ use super::{
         HttpClient,
     },
 };
-use crate::source::git_url;
+use crate::source::{
+    forgejo,
+    git_url,
+};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const COMPARE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -42,6 +45,15 @@ pub enum ForgeKind {
     Gitea,
     Cgit,
     Unknown,
+}
+
+impl From<forgejo::Kind> for ForgeKind {
+    fn from(kind: forgejo::Kind) -> Self {
+        match kind {
+            forgejo::Kind::Forgejo => Self::Forgejo,
+            forgejo::Kind::Gitea => Self::Gitea,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

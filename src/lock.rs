@@ -15,6 +15,7 @@ use serde::{
 use serde_json::Value;
 
 use crate::source::{
+    forgejo,
     gitlab,
     normalize_host,
 };
@@ -183,6 +184,22 @@ pub enum LockedNode {
         #[serde(flatten)]
         extra:         ExtraFields,
     },
+    #[serde(rename = "forge")]
+    Forge {
+        kind:          forgejo::Kind,
+        #[serde(deserialize_with = "deserialize_host")]
+        host:          String,
+        owner:         String,
+        repo:          String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rev:           Option<String>,
+        #[serde(rename = "narHash", skip_serializing_if = "Option::is_none")]
+        nar_hash:      Option<String>,
+        #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
+        last_modified: Option<i64>,
+        #[serde(flatten)]
+        extra:         ExtraFields,
+    },
     #[serde(rename = "git")]
     Git {
         url:           String,
@@ -294,6 +311,36 @@ impl LockedNode {
         }
     }
 
+    pub fn new_forge<Host, Owner, Repo, Rev, NarHash>(
+        kind: forgejo::Kind,
+        host: Host,
+        owner: Owner,
+        repo: Repo,
+        rev: Rev,
+        nar_hash: NarHash,
+        last_modified: i64,
+    ) -> Self
+    where
+        Host: Into<String>,
+        Owner: Into<String>,
+        Repo: Into<String>,
+        Rev: Into<String>,
+        NarHash: Into<String>,
+    {
+        let raw_host = host.into();
+        let canonical_host = normalize_host(&raw_host);
+        Self::Forge {
+            kind,
+            host: canonical_host,
+            owner: owner.into(),
+            repo: repo.into(),
+            rev: Some(rev.into()),
+            nar_hash: Some(nar_hash.into()),
+            last_modified: Some(last_modified),
+            extra: BTreeMap::new(),
+        }
+    }
+
     pub fn new_git<Url, Ref, Rev, NarHash>(
         url: Url,
         reff: Ref,
@@ -360,6 +407,7 @@ impl LockedNode {
         match self {
             Self::Github { .. } => "github",
             Self::Gitlab { .. } => "gitlab",
+            Self::Forge { .. } => "forge",
             Self::Git { .. } => "git",
             Self::Tarball { .. } => "tarball",
             Self::Fixed { .. } => "fixed",
@@ -372,18 +420,20 @@ impl LockedNode {
         match self {
             Self::Tarball { url, .. } => Some(url),
             Self::Fixed { sha256, .. } => sha256.as_deref(),
-            Self::Github { rev, .. } | Self::Gitlab { rev, .. } | Self::Git { rev, .. } => {
-                rev.as_deref()
-            },
+            Self::Github { rev, .. }
+            | Self::Gitlab { rev, .. }
+            | Self::Forge { rev, .. }
+            | Self::Git { rev, .. } => rev.as_deref(),
             Self::Indirect { .. } | Self::Path { .. } => None,
         }
     }
 
     pub fn full_rev(&self) -> Option<&str> {
         match self {
-            Self::Github { rev, .. } | Self::Gitlab { rev, .. } | Self::Git { rev, .. } => {
-                rev.as_deref()
-            },
+            Self::Github { rev, .. }
+            | Self::Gitlab { rev, .. }
+            | Self::Forge { rev, .. }
+            | Self::Git { rev, .. } => rev.as_deref(),
             Self::Tarball { url, .. } => Some(url),
             Self::Fixed { url, sha256, .. } => url.as_deref().or(sha256.as_deref()),
             Self::Indirect { .. } | Self::Path { .. } => None,
@@ -395,6 +445,7 @@ impl LockedNode {
             Self::Fixed { sha256, .. } => sha256.as_deref(),
             Self::Github { nar_hash, .. }
             | Self::Gitlab { nar_hash, .. }
+            | Self::Forge { nar_hash, .. }
             | Self::Git { nar_hash, .. }
             | Self::Tarball { nar_hash, .. } => nar_hash.as_deref(),
             Self::Indirect { .. } | Self::Path { .. } => None,
@@ -405,6 +456,7 @@ impl LockedNode {
         let value = match self {
             Self::Github { last_modified, .. }
             | Self::Gitlab { last_modified, .. }
+            | Self::Forge { last_modified, .. }
             | Self::Git { last_modified, .. }
             | Self::Tarball { last_modified, .. } => *last_modified,
             Self::Fixed { .. } | Self::Indirect { .. } | Self::Path { .. } => None,
@@ -466,6 +518,7 @@ mod tests {
         LockFile,
         LockedNode,
     };
+    use crate::source::forgejo::Kind;
 
     fn node(value: Value) -> LockedNode {
         LockedNode::from_value(value).unwrap()
@@ -629,6 +682,51 @@ mod tests {
     }
 
     #[test]
+    fn forge_node_round_trips_kind_and_host() {
+        let parsed = node(json!({
+            "type": "forge",
+            "kind": "gitea",
+            "host": "Git.Example.Com:8443",
+            "owner": "o",
+            "repo": "r",
+            "rev": "abc",
+            "narHash": "sha256-n",
+            "lastModified": 1700_i64
+        }));
+        assert!(matches!(
+            parsed,
+            LockedNode::Forge {
+                kind: Kind::Gitea,
+                ref host,
+                ..
+            } if host == "git.example.com:8443"
+        ));
+
+        let serialized = serde_json::to_value(LockedNode::new_forge(
+            Kind::Forgejo,
+            "Git.Example.Com",
+            "o",
+            "r",
+            "rev",
+            "sha256-n",
+            10,
+        ))
+        .unwrap();
+        assert_eq!(
+            serialized.get("type").and_then(Value::as_str),
+            Some("forge")
+        );
+        assert_eq!(
+            serialized.get("kind").and_then(Value::as_str),
+            Some("forgejo")
+        );
+        assert_eq!(
+            serialized.get("host").and_then(Value::as_str),
+            Some("git.example.com")
+        );
+    }
+
+    #[test]
     fn gitlab_host_is_canonicalized_at_lock_boundary() {
         let parsed = node(json!({
             "type": "gitlab",
@@ -693,6 +791,7 @@ mod tests {
                 let repo = match *node {
                     LockedNode::Github { ref repo, .. } => Some(repo.to_owned()),
                     LockedNode::Gitlab { .. }
+                    | LockedNode::Forge { .. }
                     | LockedNode::Git { .. }
                     | LockedNode::Tarball { .. }
                     | LockedNode::Fixed { .. }

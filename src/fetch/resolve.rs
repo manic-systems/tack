@@ -52,6 +52,24 @@ pub fn current_rev(source: &Source) -> Result<String> {
             ref reff,
             rev: ref pinned,
         } => github::current_rev(owner, repo, reff.as_deref(), pinned.as_deref()),
+        Source::Forge {
+            kind,
+            ref host,
+            ref owner,
+            ref repo,
+            ref reff,
+            rev: ref pinned,
+        } => {
+            if let Some(target_rev) = pinned.as_deref() {
+                return Ok(target_rev.to_owned());
+            }
+            if let Some(rev) = forge::resolve_ref(kind.into(), host, owner, repo, reff.as_deref())?
+            {
+                return Ok(rev);
+            }
+            let url = clone_url(host, owner, repo);
+            git::current_rev(&url, reff.as_deref(), None)
+        },
         Source::Git { .. } | Source::Gitlab { .. } => {
             let target = source
                 .git_target()
@@ -154,6 +172,17 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
             let url = clone_url(host, owner, repo);
             git::fetch_tree_rev_into(&url, resolved_rev, false, dir)
         },
+        LockedNode::Forge {
+            ref host,
+            ref owner,
+            ref repo,
+            rev: ref locked_rev,
+            ..
+        } => {
+            let resolved_rev = locked_rev.as_deref().context("forge node missing rev")?;
+            let url = clone_url(host, owner, repo);
+            git::fetch_tree_rev_into(&url, resolved_rev, false, dir)
+        },
         LockedNode::Fixed { .. } | LockedNode::Indirect { .. } | LockedNode::Path { .. } => {
             bail!("cannot inspect tree for lock type '{}'", node.kind())
         },
@@ -168,8 +197,8 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
             ref reff,
             rev: ref pinned,
         } => github::fetch_tree_into(owner, repo, reff.as_deref(), pinned.as_deref(), dir),
-        Source::Git { .. } | Source::Gitlab { .. } => {
-            reject_gitlab_submodules(source, submodules)?;
+        Source::Git { .. } | Source::Gitlab { .. } | Source::Forge { .. } => {
+            reject_first_class_submodules(source, submodules)?;
             let target = source
                 .git_target()
                 .context("git-backed source missing git target")?;
@@ -201,8 +230,8 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, Strin
             ref reff,
             rev: ref pinned,
         } => github::fetch_pin(owner, repo, reff.as_deref(), pinned.clone()),
-        Source::Git { .. } | Source::Gitlab { .. } => {
-            reject_gitlab_submodules(source, submodules)?;
+        Source::Git { .. } | Source::Gitlab { .. } | Source::Forge { .. } => {
+            reject_first_class_submodules(source, submodules)?;
             let target = source
                 .git_target()
                 .context("git-backed source missing git target")?;
@@ -238,9 +267,12 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, Strin
     }
 }
 
-fn reject_gitlab_submodules(source: &Source, submodules: bool) -> Result<()> {
-    if submodules && matches!(source, Source::Gitlab { .. }) {
-        bail!("gitlab sources do not support submodules; use a git+ URL for submodule pins");
+fn reject_first_class_submodules(source: &Source, submodules: bool) -> Result<()> {
+    if submodules && matches!(source, Source::Gitlab { .. } | Source::Forge { .. }) {
+        bail!(
+            "gitlab/forgejo/gitea sources do not support submodules; use a git+ URL for submodule \
+             pins"
+        );
     }
     Ok(())
 }
@@ -269,6 +301,23 @@ fn git_pin_from_checkout(
             ..
         } => {
             LockedNode::new_gitlab(
+                host,
+                owner,
+                repo,
+                rev.clone(),
+                checkout.nar_hash,
+                checkout.last_modified,
+            )
+        },
+        Source::Forge {
+            kind,
+            ref host,
+            ref owner,
+            ref repo,
+            ..
+        } => {
+            LockedNode::new_forge(
+                kind,
                 host,
                 owner,
                 repo,
@@ -335,7 +384,7 @@ mod tests {
         git,
         git_pin_from_checkout,
         parse_link_immutable,
-        reject_gitlab_submodules,
+        reject_first_class_submodules,
     };
     use crate::{
         lock::LockedNode,
@@ -457,11 +506,50 @@ mod tests {
     fn first_class_gitlab_sources_reject_submodules() {
         let source = "gitlab:Group/Repo/main".parse::<Source>().unwrap();
 
-        let err = reject_gitlab_submodules(&source, true).unwrap_err();
+        let err = reject_first_class_submodules(&source, true).unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("gitlab sources do not support submodules")
+        assert!(err.to_string().contains("do not support submodules"));
+    }
+
+    #[test]
+    fn forge_source_checkout_locks_as_forge_node() {
+        let source = "forgejo:Group/Repo/main?host=git.example.com&rev=abc123"
+            .parse::<Source>()
+            .unwrap();
+        let (fetched, rev) = git_pin_from_checkout(
+            &source,
+            git::PinCheckout {
+                rev:           "abc123".to_owned(),
+                nar_hash:      "sha256-n".to_owned(),
+                last_modified: 1700,
+                refname:       "refs/heads/main".to_owned(),
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(rev, "abc123");
+        assert_eq!(
+            fetched,
+            node(json!({
+                "type": "forge",
+                "kind": "forgejo",
+                "host": "git.example.com",
+                "owner": "Group",
+                "repo": "Repo",
+                "rev": "abc123",
+                "narHash": "sha256-n",
+                "lastModified": 1_700_i64
+            }))
         );
+    }
+
+    #[test]
+    fn forge_sources_reject_submodules() {
+        let source = "gitea:Group/Repo/main?host=git.example.com"
+            .parse::<Source>()
+            .unwrap();
+        let err = reject_first_class_submodules(&source, true).unwrap_err();
+        assert!(err.to_string().contains("do not support submodules"));
     }
 }

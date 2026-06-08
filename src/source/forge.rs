@@ -37,6 +37,12 @@ static GITLAB_SCHEME: HostScheme = HostScheme {
     decoder: None,
 };
 
+static FORGEJO_SCHEME: HostScheme = HostScheme {
+    matches: |_| true,
+    build:   |base, rev, file| format!("{base}/raw/commit/{rev}/{file}"),
+    decoder: None,
+};
+
 static BITBUCKET_SCHEME: HostScheme = HostScheme {
     matches: |host| host == "bitbucket.org",
     build:   |base, rev, file| format!("{base}/raw/{rev}/{file}"),
@@ -99,6 +105,18 @@ impl Forge {
                     format!("https://{host}/{owner}/{repo}"),
                     true,
                     &GITLAB_SCHEME,
+                )
+            },
+            LockedNode::Forge {
+                ref host,
+                ref owner,
+                ref repo,
+                ..
+            } => {
+                (
+                    format!("https://{host}/{owner}/{repo}"),
+                    true,
+                    &FORGEJO_SCHEME,
                 )
             },
             LockedNode::Git { ref url, .. } => {
