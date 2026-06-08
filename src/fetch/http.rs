@@ -20,7 +20,11 @@ use std::{
         OnceLock,
         PoisonError,
     },
-    time::Duration,
+    time::{
+        Duration,
+        SystemTime,
+        UNIX_EPOCH,
+    },
 };
 
 use etcetera::BaseStrategy as _;
@@ -31,12 +35,17 @@ use serde::{
 };
 use ureq::{
     Agent,
+    Body,
     RequestBuilder,
-    http::header::{
-        ACCEPT,
-        AUTHORIZATION,
-        CONTENT_TYPE,
-        USER_AGENT,
+    http::{
+        HeaderMap,
+        Response,
+        header::{
+            ACCEPT,
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            USER_AGENT,
+        },
     },
     tls::TlsConfig,
     typestate::{
@@ -268,6 +277,84 @@ impl FetchError {
             other => Self::Transport(format!("{what}: {other}")),
         }
     }
+
+    pub(super) fn from_response(resp: &mut Response<Body>, what: &str) -> Self {
+        let status = resp.status().as_u16();
+        if let Some(reason) = rate_limit_hint(resp.headers()) {
+            return Self::Transport(format!("{what}: rate limited ({reason})"));
+        }
+        let labelled = read_api_error(resp)
+            .map_or_else(|| what.to_owned(), |message| format!("{what}: {message}"));
+        Self::from_status(status, &labelled)
+    }
+}
+
+#[derive(Deserialize)]
+struct ApiErrorBody {
+    message:           Option<String>,
+    error:             Option<String>,
+    error_description: Option<String>,
+}
+
+impl ApiErrorBody {
+    fn detail(self) -> Option<String> {
+        let raw = self.message.or(self.error_description).or(self.error)?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.chars().take(300).collect())
+    }
+}
+
+fn read_api_error(resp: &mut Response<Body>) -> Option<String> {
+    let mut body = String::new();
+    resp.body_mut()
+        .as_reader()
+        .take(8 * 1024)
+        .read_to_string(&mut body)
+        .ok()?;
+    serde_json::from_str::<ApiErrorBody>(&body)
+        .ok()
+        .and_then(ApiErrorBody::detail)
+}
+
+fn rate_limit_hint(headers: &HeaderMap) -> Option<String> {
+    if let Some(secs) = header_value(headers, "retry-after") {
+        return Some(format!("retry after {secs}s"));
+    }
+    if header_value(headers, "x-ratelimit-remaining").as_deref() == Some("0") {
+        return Some(reset_hint(headers));
+    }
+    None
+}
+
+fn reset_hint(headers: &HeaderMap) -> String {
+    let Some(reset) =
+        header_value(headers, "x-ratelimit-reset").and_then(|raw| raw.parse::<u64>().ok())
+    else {
+        return "limit exhausted".to_owned();
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    if reset > now {
+        format!("resets in ~{}m", (reset - now).div_ceil(60))
+    } else {
+        "limit exhausted".to_owned()
+    }
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers.get(name)?.to_str().ok().map(str::to_owned)
+}
+
+fn ensure_ok(resp: &mut Response<Body>, what: &str) -> FetchResult<()> {
+    if resp.status() == 200 {
+        Ok(())
+    } else {
+        Err(FetchError::from_response(resp, what))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -348,10 +435,7 @@ impl HttpClient {
         }
 
         let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
-        let status = resp.status();
-        if status != 200 {
-            return Err(FetchError::from_status(status.as_u16(), url));
-        }
+        ensure_ok(&mut resp, url)?;
 
         let body = resp
             .body_mut()
@@ -385,10 +469,7 @@ impl HttpClient {
         }
 
         let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
-        let status = resp.status();
-        if status != 200 {
-            return Err(FetchError::from_status(status.as_u16(), url));
-        }
+        ensure_ok(&mut resp, url)?;
 
         let body = resp
             .body_mut()
@@ -427,10 +508,7 @@ impl HttpClient {
             .send(payload)
             .map_err(|err| FetchError::from_ureq(err, "github graphql"))?;
 
-        let status = resp.status();
-        if status != 200 {
-            return Err(FetchError::from_status(status.as_u16(), "github graphql"));
-        }
+        ensure_ok(&mut resp, "github graphql")?;
 
         let body = resp
             .body_mut()
@@ -460,10 +538,7 @@ impl HttpClient {
             .get(url)
             .call()
             .map_err(|err| FetchError::from_ureq(err, url))?;
-        let status = resp.status();
-        if status != 200 {
-            return Err(FetchError::from_status(status.as_u16(), url));
-        }
+        ensure_ok(&mut resp, url)?;
         let mut body = String::new();
         resp.body_mut()
             .as_reader()
@@ -528,11 +603,65 @@ mod tests {
         fs,
     };
 
+    use ureq::http::{
+        HeaderMap,
+        HeaderName,
+    };
+
     use super::{
+        ApiErrorBody,
         FetchError,
         env_flag_enabled,
+        rate_limit_hint,
         scrape_access_tokens,
     };
+
+    fn body(json: &str) -> Option<String> {
+        serde_json::from_str::<ApiErrorBody>(json).unwrap().detail()
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for &(name, value) in pairs {
+            map.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn api_error_detail_prefers_message_then_description_then_error() {
+        assert_eq!(body(r#"{"message":"nope"}"#).as_deref(), Some("nope"));
+        assert_eq!(
+            body(r#"{"error":"e","error_description":"d"}"#).as_deref(),
+            Some("d")
+        );
+        assert_eq!(
+            body(r#"{"error":"bad token"}"#).as_deref(),
+            Some("bad token")
+        );
+        assert_eq!(body(r#"{"message":"   "}"#), None);
+        assert_eq!(body("{}"), None);
+    }
+
+    #[test]
+    fn rate_limit_hint_reads_retry_after_and_exhausted_remaining() {
+        assert_eq!(
+            rate_limit_hint(&headers(&[("retry-after", "30")])).as_deref(),
+            Some("retry after 30s")
+        );
+        assert!(
+            rate_limit_hint(&headers(&[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "99999999999"),
+            ]))
+            .is_some_and(|hint| hint.starts_with("resets in ~"))
+        );
+        assert!(rate_limit_hint(&headers(&[("x-ratelimit-remaining", "42")])).is_none());
+        assert!(rate_limit_hint(&headers(&[])).is_none());
+    }
 
     #[test]
     fn env_flag_is_on_only_for_truthy_values() {
