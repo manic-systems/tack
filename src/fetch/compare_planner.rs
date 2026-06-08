@@ -35,7 +35,7 @@ use crate::{
     lock::LockedNode,
     source::{
         Source,
-        gitlab as source_gitlab,
+        clone_url,
         id::SourceId,
     },
 };
@@ -52,8 +52,9 @@ pub enum CompareSource {
         owner: String,
         repo:  String,
     },
+    /// forgejo and gitea share the whole `/api/v1` surface, so the compare
+    /// path treats them identically and carries no kind
     ForgejoLike {
-        kind:  ForgejoLikeKind,
         host:  String,
         owner: String,
         repo:  String,
@@ -61,12 +62,6 @@ pub enum CompareSource {
     Git {
         url: String,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ForgejoLikeKind {
-    Forgejo,
-    Gitea,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -358,7 +353,6 @@ impl CompareSource {
             },
             ForgeKind::Forgejo | ForgeKind::Gitea => {
                 Some(Self::ForgejoLike {
-                    kind:  forgejo_like_kind(repo.kind)?,
                     host:  repo.host,
                     owner: repo.owner,
                     repo:  repo.repo,
@@ -379,13 +373,12 @@ impl CompareSource {
                 ref host,
                 ref owner,
                 ref repo,
-            } => source_gitlab::clone_url(host, owner, repo),
-            Self::ForgejoLike {
+            }
+            | Self::ForgejoLike {
                 ref host,
                 ref owner,
                 ref repo,
-                ..
-            } => format!("https://{host}/{owner}/{repo}.git"),
+            } => clone_url(host, owner, repo),
             Self::Git { ref url } => url.clone(),
         }
     }
@@ -412,11 +405,11 @@ fn compare_api(job: &CompareJob) -> FetchResult<Option<CompareStatus>> {
             ref repo,
         } => gitlab::compare_status(host, owner, repo, &job.base, &job.head),
         CompareSource::ForgejoLike {
-            kind,
             ref host,
             ref owner,
             ref repo,
-        } => forge::compare_status(kind.into(), host, owner, repo, &job.base, &job.head),
+            // forgejo and gitea answer the same api, so the kind is a formality
+        } => forge::compare_status(ForgeKind::Forgejo, host, owner, repo, &job.base, &job.head),
         CompareSource::Git { ref url } => compare_detected_git_url(url, &job.base, &job.head),
     }
 }
@@ -460,14 +453,6 @@ fn compare_detected_git_url(
     })
 }
 
-const fn forgejo_like_kind(kind: ForgeKind) -> Option<ForgejoLikeKind> {
-    match kind {
-        ForgeKind::Forgejo => Some(ForgejoLikeKind::Forgejo),
-        ForgeKind::Gitea => Some(ForgejoLikeKind::Gitea),
-        ForgeKind::Gitlab | ForgeKind::Cgit | ForgeKind::Unknown => None,
-    }
-}
-
 fn fallback_dag(job: &CompareJob, api_error: Option<FetchError>) -> CompareAttempt {
     match git::compare_status(&job.source.clone_url(), &job.base, &job.head) {
         Ok(Some(status)) => CompareAttempt::verified(status),
@@ -479,21 +464,11 @@ fn fallback_dag(job: &CompareJob, api_error: Option<FetchError>) -> CompareAttem
     }
 }
 
-impl From<ForgejoLikeKind> for ForgeKind {
-    fn from(kind: ForgejoLikeKind) -> Self {
-        match kind {
-            ForgejoLikeKind::Forgejo => Self::Forgejo,
-            ForgejoLikeKind::Gitea => Self::Gitea,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         CompareJob,
         CompareSource,
-        ForgejoLikeKind,
     };
     use crate::{
         fetch::CompareStatus,
@@ -521,7 +496,6 @@ mod tests {
         let session = super::CompareSession::new();
         let attempt = session.compare(&CompareJob {
             source: CompareSource::ForgejoLike {
-                kind:  ForgejoLikeKind::Forgejo,
                 host:  "git.example.com".to_owned(),
                 owner: "o".to_owned(),
                 repo:  "r".to_owned(),

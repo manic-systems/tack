@@ -83,7 +83,7 @@ impl Source {
                 ref rev,
             } => {
                 Some(GitTarget {
-                    url:  Cow::Owned(gitlab::clone_url(host, owner, repo)),
+                    url:  Cow::Owned(clone_url(host, owner, repo)),
                     reff: reff.as_deref(),
                     rev:  rev.as_deref(),
                 })
@@ -297,6 +297,22 @@ fn parse_query_fields(query: Option<&str>) -> QueryFields<'_> {
     fields
 }
 
+/// https clone url for a host/owner/repo on any git forge
+pub fn clone_url(host: &str, owner: &str, repo: &str) -> String {
+    format!("https://{host}/{owner}/{repo}.git")
+}
+
+/// canonicalize a forge host (lowercase, drop the default https port)
+pub fn normalize_host(host: &str) -> String {
+    host::normalized(host)
+}
+
+fn decode_path_segment(value: &str) -> String {
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .map_or_else(|_| value.to_owned(), Into::into)
+}
+
 #[cfg(test)]
 #[expect(clippy::panic, reason = "panic is the test-failure coping mechanism")]
 mod tests {
@@ -304,8 +320,17 @@ mod tests {
 
     use super::{
         Source,
+        clone_url,
         localize_path_url_with_warning,
     };
+
+    #[test]
+    fn builds_clone_url() {
+        assert_eq!(
+            clone_url("gitlab.com:8443", "NixOS", "nixpkgs"),
+            "https://gitlab.com:8443/NixOS/nixpkgs.git"
+        );
+    }
 
     #[test]
     fn path_url_is_a_path_source() {
