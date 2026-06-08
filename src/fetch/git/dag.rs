@@ -48,11 +48,9 @@ use gix_transport::client::blocking_io::{
 
 use crate::fetch::{
     CompareStatus,
+    FetchError,
+    FetchResult,
     git_http,
-    http::{
-        FetchError,
-        FetchResult,
-    },
 };
 
 const PACK_BYTE_LIMIT: u64 = 64 * 1024 * 1024;

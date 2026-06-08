@@ -21,7 +21,7 @@ use super::{
 use crate::{
     fetch::{
         self,
-        http::FetchError,
+        FetchError,
     },
     lock::{
         self,

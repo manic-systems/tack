@@ -18,15 +18,13 @@ use serde::{
 };
 
 use super::{
+    FetchError,
+    FetchResult,
     archive::{
         TarFormat,
         unpack_tar_stream,
     },
-    http::{
-        FetchError,
-        FetchResult,
-        HttpClient,
-    },
+    http::HttpClient,
     time::epoch_from_iso,
     topology::CompareStatus,
 };

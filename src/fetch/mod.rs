@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 mod archive;
+mod auth;
 pub mod compare_planner;
+mod error;
 pub mod forge;
 mod git;
 mod git_http;
 pub mod github;
 pub mod gitlab;
-pub mod http;
+mod http;
 mod resolve;
 mod time;
 mod topology;
 
+pub use auth::drain_token_warnings;
+pub use error::{
+    FetchError,
+    FetchResult,
+};
 pub use resolve::{
     fetch_fixed_pin,
     fetch_locked_tree_into,

@@ -17,6 +17,8 @@ use super::{
     BranchComparison,
     CompareStatus,
     CurrentRev,
+    FetchError,
+    FetchResult,
     forge::{
         self,
         ForgeKind,
@@ -24,10 +26,6 @@ use super::{
     git,
     github,
     gitlab,
-    http::{
-        FetchError,
-        FetchResult,
-    },
     resolve,
 };
 use crate::{

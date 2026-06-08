@@ -8,7 +8,7 @@ use std::{
 use eyre::Result;
 
 use crate::{
-    fetch::http::FetchError,
+    fetch::FetchError,
     pins::{
         self,
         PinType,
@@ -133,7 +133,7 @@ fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Inpu
 #[cfg(test)]
 mod tests {
     use super::tolerate;
-    use crate::fetch::http::FetchError;
+    use crate::fetch::FetchError;
 
     #[test]
     fn tolerate_swallows_absent_and_transport_silently() {
