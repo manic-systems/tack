@@ -40,7 +40,7 @@ use crate::{
     pins::Unpack,
     source::{
         Source,
-        gitlab as source_gitlab,
+        clone_url,
     },
 };
 
@@ -151,7 +151,7 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
             ..
         } => {
             let resolved_rev = locked_rev.as_deref().context("gitlab node missing rev")?;
-            let url = source_gitlab::clone_url(host, owner, repo);
+            let url = clone_url(host, owner, repo);
             git::fetch_tree_rev_into(&url, resolved_rev, false, dir)
         },
         LockedNode::Fixed { .. } | LockedNode::Indirect { .. } | LockedNode::Path { .. } => {

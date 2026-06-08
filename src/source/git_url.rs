@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use super::{
+    decode_path_segment,
     host,
     strip_query_fragment,
 };
@@ -95,12 +96,6 @@ fn strip_port(host: &str) -> &str {
         return host;
     }
     name
-}
-
-fn decode_path_segment(value: &str) -> String {
-    percent_encoding::percent_decode_str(value)
-        .decode_utf8()
-        .map_or_else(|_| value.to_owned(), Into::into)
 }
 
 #[cfg(test)]

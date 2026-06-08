@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use super::{
+    decode_path_segment,
     host,
     parse_query_fields,
     split_query_fragment,
@@ -69,12 +70,8 @@ pub fn parse_git_url(url: &str) -> Option<RepoRef> {
     parse_git_parts(host, raw_path, HostPortPolicy::Default(default_port))
 }
 
-pub fn normalize_host(host: &str) -> String {
-    host::normalized(host)
-}
-
 pub fn is_default_host(host: &str) -> bool {
-    normalize_host(host) == DEFAULT_HOST
+    host::normalized(host) == DEFAULT_HOST
 }
 
 #[derive(Clone, Copy)]
@@ -114,10 +111,6 @@ fn parse_git_parts(
     })
 }
 
-pub fn clone_url(host: &str, owner: &str, repo: &str) -> String {
-    format!("https://{host}/{owner}/{repo}.git")
-}
-
 fn parse_scp_like(url: &str) -> Option<(&str, &str)> {
     if url.contains("://") {
         return None;
@@ -151,17 +144,10 @@ fn strip_port(host: &str) -> &str {
     name
 }
 
-fn decode_path_segment(value: &str) -> String {
-    percent_encoding::percent_decode_str(value)
-        .decode_utf8()
-        .map_or_else(|_| value.to_owned(), Into::into)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         DEFAULT_HOST,
-        clone_url,
         parse_flake_url,
         parse_git_url,
     };
@@ -240,13 +226,5 @@ mod tests {
         assert_eq!(parsed.host, "gitlab.example.com");
         assert_eq!(parsed.owner, "group/sub");
         assert_eq!(parsed.repo, "repo");
-    }
-
-    #[test]
-    fn builds_clone_url() {
-        assert_eq!(
-            clone_url("gitlab.com:8443", "NixOS", "nixpkgs"),
-            "https://gitlab.com:8443/NixOS/nixpkgs.git"
-        );
     }
 }
