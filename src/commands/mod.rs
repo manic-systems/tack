@@ -109,7 +109,9 @@ pub fn redo(project: &Project) -> Result<()> {
 fn tolerate<T>(result: StdResult<T, FetchError>) -> (Option<T>, Option<String>) {
     match result {
         Ok(value) => (Some(value), None),
-        Err(FetchError::NotFound { .. } | FetchError::Transport(_)) => (None, None),
+        Err(
+            FetchError::NotFound { .. } | FetchError::Transport(_) | FetchError::RateLimited { .. },
+        ) => (None, None),
         Err(err) => (None, Some(err.to_string())),
     }
 }

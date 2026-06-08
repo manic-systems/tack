@@ -514,6 +514,7 @@ fn is_pack_limit(err: &FetchError) -> bool {
         FetchError::Transport(ref message) => message.contains(PACK_LIMIT_MARKER),
         FetchError::NotFound { .. }
         | FetchError::Auth { .. }
+        | FetchError::RateLimited { .. }
         | FetchError::Decode { .. }
         | FetchError::Github(_)
         | FetchError::Gitlab(_)

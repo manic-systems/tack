@@ -69,21 +69,13 @@ pub(super) fn agent() -> &'static Agent {
     })
 }
 
-/// an access token for `host`, from the environment first (the well-known
-/// public forges) then nix.conf `access-tokens`; self-hosted forges resolve
-/// only through nix.conf
 fn token_for_host(host: &str) -> Option<&'static str> {
-    if host == "github.com"
-        && let Some(token) = github_env_token()
-    {
-        return Some(token);
-    }
-    if host == "gitlab.com"
-        && let Some(token) = gitlab_env_token()
-    {
-        return Some(token);
-    }
-    nix_conf_tokens().get(host).map(String::as_str)
+    let env_token = match host {
+        "github.com" => github_env_token(),
+        "gitlab.com" => gitlab_env_token(),
+        _ => None,
+    };
+    env_token.or_else(|| nix_conf_tokens().get(host).map(String::as_str))
 }
 
 fn github_env_token() -> Option<&'static str> {
@@ -226,6 +218,9 @@ pub enum FetchError {
     #[error("auth: {what}")]
     Auth { what: String },
 
+    #[error("rate limited: {what}")]
+    RateLimited { what: String },
+
     /// unreachable host or transient server error
     #[error("network: {0}")]
     Transport(String),
@@ -281,11 +276,17 @@ impl FetchError {
     pub(super) fn from_response(resp: &mut Response<Body>, what: &str) -> Self {
         let status = resp.status().as_u16();
         if let Some(reason) = rate_limit_hint(resp.headers()) {
-            return Self::Transport(format!("{what}: rate limited ({reason})"));
+            return Self::RateLimited {
+                what: format!("{what} ({reason})"),
+            };
         }
         let labelled = read_api_error(resp)
             .map_or_else(|| what.to_owned(), |message| format!("{what}: {message}"));
         Self::from_status(status, &labelled)
+    }
+
+    const fn is_credential_failure(&self) -> bool {
+        matches!(*self, Self::Auth { .. } | Self::RateLimited { .. })
     }
 }
 
@@ -349,11 +350,61 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers.get(name)?.to_str().ok().map(str::to_owned)
 }
 
-fn ensure_ok(resp: &mut Response<Body>, what: &str) -> FetchResult<()> {
-    if resp.status() == 200 {
-        Ok(())
-    } else {
-        Err(FetchError::from_response(resp, what))
+fn read_ok_body(resp: &mut Response<Body>, what: &str) -> FetchResult<String> {
+    if resp.status() != 200 {
+        return Err(FetchError::from_response(resp, what));
+    }
+    resp.body_mut()
+        .read_to_string()
+        .map_err(|err| FetchError::Transport(format!("read {what}: {err}")))
+}
+
+#[derive(Clone, Copy)]
+enum Credential {
+    Token(&'static str),
+    Anonymous,
+}
+
+fn with_credential_fallback<T>(
+    host: &str,
+    allow_anon: bool,
+    attempt: impl FnMut(Credential) -> FetchResult<T>,
+) -> FetchResult<T> {
+    run_credentials(token_for_host(host), host, allow_anon, attempt)
+}
+
+fn run_credentials<T>(
+    token: Option<&'static str>,
+    host: &str,
+    allow_anon: bool,
+    mut attempt: impl FnMut(Credential) -> FetchResult<T>,
+) -> FetchResult<T> {
+    let token_failure = match token {
+        Some(value) => {
+            match attempt(Credential::Token(value)) {
+                Err(err) if err.is_credential_failure() => Some(err),
+                result => return result,
+            }
+        },
+        None => None,
+    };
+    if !allow_anon {
+        return Err(token_failure.unwrap_or_else(|| {
+            FetchError::Auth {
+                what: format!("{host}: no usable credentials"),
+            }
+        }));
+    }
+    match attempt(Credential::Anonymous) {
+        Err(anon_failure) => Err(most_actionable(token_failure, anon_failure)),
+        result => result,
+    }
+}
+
+fn most_actionable(token_failure: Option<FetchError>, anon_failure: FetchError) -> FetchError {
+    match token_failure {
+        Some(failure @ FetchError::Auth { .. }) => failure,
+        _ => anon_failure,
     }
 }
 
@@ -379,16 +430,6 @@ impl HttpClient {
         Self::with_tack_headers(self.agent.post(url))
     }
 
-    fn github_get(self, url: &str) -> RequestBuilder<WithoutBody> {
-        Self::with_optional_github_auth(Self::with_github_headers(self.get(url)))
-    }
-
-    fn github_post(self, url: &str, token: &str) -> RequestBuilder<WithBody> {
-        let github_request = Self::with_github_headers(self.post(url));
-        let json_request = Self::with_json_body(github_request);
-        Self::with_github_auth(json_request, token)
-    }
-
     fn with_tack_headers<B>(request: RequestBuilder<B>) -> RequestBuilder<B> {
         request.header(USER_AGENT, TACK_USER_AGENT)
     }
@@ -401,49 +442,41 @@ impl HttpClient {
         request.header(CONTENT_TYPE, APPLICATION_JSON)
     }
 
-    fn with_optional_github_auth<B>(request: RequestBuilder<B>) -> RequestBuilder<B> {
-        if let Some(token) = token_for_host("github.com") {
-            Self::with_github_auth(request, token)
-        } else {
-            request
+    fn with_github_credential<B>(
+        request: RequestBuilder<B>,
+        credential: Credential,
+    ) -> RequestBuilder<B> {
+        match credential {
+            Credential::Token(token) => request.header(AUTHORIZATION, format!("Bearer {token}")),
+            Credential::Anonymous => request,
         }
     }
 
-    fn with_optional_gitlab_auth<B>(request: RequestBuilder<B>, host: &str) -> RequestBuilder<B> {
-        if let Some(token) = token_for_host(host) {
-            request.header(GITLAB_TOKEN_HEADER, token)
-        } else {
-            request
+    fn with_gitlab_credential<B>(
+        request: RequestBuilder<B>,
+        credential: Credential,
+    ) -> RequestBuilder<B> {
+        match credential {
+            Credential::Token(token) => request.header(GITLAB_TOKEN_HEADER, token),
+            Credential::Anonymous => request,
         }
-    }
-
-    fn with_github_auth<B>(request: RequestBuilder<B>, token: &str) -> RequestBuilder<B> {
-        request.header(AUTHORIZATION, Self::bearer(token))
-    }
-
-    fn bearer(token: &str) -> String {
-        format!("Bearer {token}")
     }
 
     pub(super) fn github_json<T>(self, url: &str, timeout_limit: Option<Duration>) -> FetchResult<T>
     where
         T: DeserializeOwned,
     {
-        let mut req = self.github_get(url);
-        if let Some(timeout) = timeout_limit {
-            req = req.config().timeout_global(Some(timeout)).build();
-        }
-
-        let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
-        ensure_ok(&mut resp, url)?;
-
-        let body = resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|err| FetchError::Transport(format!("read github api {url}: {err}")))?;
-
-        serde_json::from_str::<T>(&body)
-            .map_err(|err| FetchError::Github(format!("api {url}: invalid json: {err}")))
+        with_credential_fallback("github.com", true, |credential| {
+            let mut req =
+                Self::with_github_credential(Self::with_github_headers(self.get(url)), credential);
+            if let Some(timeout) = timeout_limit {
+                req = req.config().timeout_global(Some(timeout)).build();
+            }
+            let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
+            let body = read_ok_body(&mut resp, url)?;
+            serde_json::from_str::<T>(&body)
+                .map_err(|err| FetchError::Github(format!("api {url}: invalid json: {err}")))
+        })
     }
 
     pub(super) fn gitlab_json<T>(
@@ -462,22 +495,19 @@ impl HttpClient {
                  TACK_NIX_CONF_TOKENS=1)"
             ));
         }
-        let mut req =
-            Self::with_optional_gitlab_auth(self.get(url).header(ACCEPT, APPLICATION_JSON), host);
-        if let Some(timeout) = timeout_limit {
-            req = req.config().timeout_global(Some(timeout)).build();
-        }
-
-        let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
-        ensure_ok(&mut resp, url)?;
-
-        let body = resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|err| FetchError::Transport(format!("read gitlab api {url}: {err}")))?;
-
-        serde_json::from_str::<T>(&body)
-            .map_err(|err| FetchError::Gitlab(format!("api {url}: invalid json: {err}")))
+        with_credential_fallback(host, true, |credential| {
+            let mut req = Self::with_gitlab_credential(
+                self.get(url).header(ACCEPT, APPLICATION_JSON),
+                credential,
+            );
+            if let Some(timeout) = timeout_limit {
+                req = req.config().timeout_global(Some(timeout)).build();
+            }
+            let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
+            let body = read_ok_body(&mut resp, url)?;
+            serde_json::from_str::<T>(&body)
+                .map_err(|err| FetchError::Gitlab(format!("api {url}: invalid json: {err}")))
+        })
     }
 
     pub(super) fn github_graphql<V, T>(self, query: &str, variables: &V) -> FetchResult<T>
@@ -485,52 +515,48 @@ impl HttpClient {
         V: Serialize,
         T: DeserializeOwned,
     {
-        let token = token_for_host("github.com").ok_or_else(|| {
+        if token_for_host("github.com").is_none() {
             record_token_warning(
                 "no GitHub token; rev comparison falls back to commit lookup plus git DAG compare \
                  (set GITHUB_TOKEN or GH_TOKEN, or opt into nix.conf access-tokens with \
                  TACK_NIX_CONF_TOKENS=1)"
                     .to_owned(),
             );
-            FetchError::Auth {
-                what: "GITHUB_TOKEN or GH_TOKEN not set".to_owned(),
-            }
-        })?;
+        }
 
         let payload = serde_json::to_string(&GraphqlRequest { query, variables })
             .map_err(|err| FetchError::Github(format!("serialize graphql request: {err}")))?;
 
-        let mut resp = self
-            .github_post(GITHUB_GRAPHQL_URL, token)
+        with_credential_fallback("github.com", false, |credential| {
+            let mut resp = Self::with_github_credential(
+                Self::with_json_body(Self::with_github_headers(self.post(GITHUB_GRAPHQL_URL))),
+                credential,
+            )
             .config()
             .timeout_global(Some(GITHUB_GRAPHQL_TIMEOUT))
             .build()
-            .send(payload)
+            .send(payload.as_str())
             .map_err(|err| FetchError::from_ureq(err, "github graphql"))?;
 
-        ensure_ok(&mut resp, "github graphql")?;
+            let body = read_ok_body(&mut resp, "github graphql")?;
 
-        let body = resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|err| FetchError::Transport(format!("read github graphql: {err}")))?;
+            let parsed = serde_json::from_str::<GraphqlResponse<T>>(&body)
+                .map_err(|err| FetchError::Github(format!("graphql invalid json: {err}")))?;
 
-        let parsed = serde_json::from_str::<GraphqlResponse<T>>(&body)
-            .map_err(|err| FetchError::Github(format!("graphql invalid json: {err}")))?;
-
-        if let Some(error) = parsed.errors.first() {
-            let message = error.message();
-            if error.is_auth() {
-                return Err(FetchError::Auth {
-                    what: message.to_owned(),
-                });
+            if let Some(error) = parsed.errors.first() {
+                let message = error.message();
+                if error.is_auth() {
+                    return Err(FetchError::Auth {
+                        what: message.to_owned(),
+                    });
+                }
+                return Err(FetchError::Github(format!("graphql: {message}")));
             }
-            return Err(FetchError::Github(format!("graphql: {message}")));
-        }
 
-        parsed
-            .data
-            .ok_or_else(|| FetchError::Github("graphql response missing data".to_owned()))
+            parsed
+                .data
+                .ok_or_else(|| FetchError::Github("graphql response missing data".to_owned()))
+        })
     }
 
     pub(super) fn raw_text(self, url: &str) -> FetchResult<String> {
@@ -538,18 +564,7 @@ impl HttpClient {
             .get(url)
             .call()
             .map_err(|err| FetchError::from_ureq(err, url))?;
-        ensure_ok(&mut resp, url)?;
-        let mut body = String::new();
-        resp.body_mut()
-            .as_reader()
-            .read_to_string(&mut body)
-            .map_err(|err| {
-                FetchError::Decode {
-                    what:   url.to_owned(),
-                    source: Box::new(err),
-                }
-            })?;
-        Ok(body)
+        read_ok_body(&mut resp, url)
     }
 }
 
@@ -610,11 +625,21 @@ mod tests {
 
     use super::{
         ApiErrorBody,
+        Credential,
         FetchError,
+        FetchResult,
         env_flag_enabled,
         rate_limit_hint,
+        run_credentials,
         scrape_access_tokens,
     };
+
+    fn label(credential: Credential) -> &'static str {
+        match credential {
+            Credential::Token(_) => "token",
+            Credential::Anonymous => "anon",
+        }
+    }
 
     fn body(json: &str) -> Option<String> {
         serde_json::from_str::<ApiErrorBody>(json).unwrap().detail()
@@ -629,6 +654,90 @@ mod tests {
             );
         }
         map
+    }
+
+    #[test]
+    fn token_failure_falls_through_to_anon() {
+        let mut tried = Vec::new();
+        let auth = run_credentials(Some("t"), "h", true, |credential| {
+            tried.push(label(credential));
+            match credential {
+                Credential::Token(_) => {
+                    Err(FetchError::Auth {
+                        what: "rejected".to_owned(),
+                    })
+                },
+                Credential::Anonymous => Ok(1_i32),
+            }
+        });
+        assert_eq!(auth.unwrap(), 1_i32);
+        assert_eq!(tried, vec!["token", "anon"]);
+
+        let limited: FetchResult<i32> = run_credentials(Some("t"), "h", true, |credential| {
+            match credential {
+                Credential::Token(_) => {
+                    Err(FetchError::RateLimited {
+                        what: "limited".to_owned(),
+                    })
+                },
+                Credential::Anonymous => Ok(2_i32),
+            }
+        });
+        assert_eq!(limited.unwrap(), 2_i32);
+    }
+
+    #[test]
+    fn anon_used_directly_when_no_token() {
+        let mut tried = Vec::new();
+        let result = run_credentials(None, "h", true, |credential| {
+            tried.push(label(credential));
+            Ok::<_, FetchError>(9_i32)
+        });
+        assert_eq!(result.unwrap(), 9_i32);
+        assert_eq!(tried, vec!["anon"]);
+    }
+
+    #[test]
+    fn non_credential_token_error_stops_before_anon() {
+        let mut count = 0_u8;
+        let result: FetchResult<i32> = run_credentials(Some("t"), "h", true, |_| {
+            count += 1;
+            Err(FetchError::Transport("boom".to_owned()))
+        });
+        assert!(matches!(result, Err(FetchError::Transport(_))));
+        assert_eq!(count, 1_u8);
+    }
+
+    #[test]
+    fn token_auth_outranks_a_transient_anon_rate_limit() {
+        let result: FetchResult<i32> = run_credentials(Some("t"), "h", true, |credential| {
+            match credential {
+                Credential::Token(_) => {
+                    Err(FetchError::Auth {
+                        what: "rejected".to_owned(),
+                    })
+                },
+                Credential::Anonymous => {
+                    Err(FetchError::RateLimited {
+                        what: "limited".to_owned(),
+                    })
+                },
+            }
+        });
+        assert!(matches!(result, Err(FetchError::Auth { .. })));
+    }
+
+    #[test]
+    fn no_anon_rung_surfaces_token_auth_or_no_credentials() {
+        let rejected: FetchResult<i32> = run_credentials(Some("t"), "h", false, |_| {
+            Err(FetchError::Auth {
+                what: "rejected".to_owned(),
+            })
+        });
+        assert!(matches!(rejected, Err(FetchError::Auth { .. })));
+
+        let none: FetchResult<i32> = run_credentials(None, "h", false, |_| Ok(1_i32));
+        assert!(matches!(none, Err(FetchError::Auth { .. })));
     }
 
     #[test]
