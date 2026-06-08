@@ -9,10 +9,8 @@ use serde::Deserialize;
 
 use super::{
     CompareStatus,
-    http::{
-        FetchResult,
-        HttpClient,
-    },
+    FetchResult,
+    http::HttpClient,
 };
 
 #[derive(Clone, Copy)]

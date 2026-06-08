@@ -21,6 +21,7 @@ use ureq::{
 };
 
 use super::{
+    FetchResult,
     archive::{
         detect_tar_format,
         unpack_tar_stream,
@@ -28,10 +29,7 @@ use super::{
     forge,
     git,
     github,
-    http::{
-        FetchResult,
-        HttpClient,
-    },
+    http::HttpClient,
     time::epoch_from_http_date,
 };
 use crate::{

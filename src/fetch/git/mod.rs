@@ -46,8 +46,8 @@ use gix_worktree_state::checkout::Options as CheckoutOptions;
 
 use super::{
     CompareStatus,
+    FetchResult,
     git_http,
-    http::FetchResult,
 };
 use crate::nar;
 
