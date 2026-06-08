@@ -14,7 +14,10 @@ use serde::{
 };
 use serde_json::Value;
 
-use crate::source::gitlab;
+use crate::source::{
+    gitlab,
+    normalize_host,
+};
 
 /// on-disk lock file keyed by input name
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -167,7 +170,7 @@ pub enum LockedNode {
         repo:          String,
         #[serde(
             default = "default_gitlab_host",
-            deserialize_with = "deserialize_gitlab_host",
+            deserialize_with = "deserialize_host",
             skip_serializing_if = "is_default_gitlab_host"
         )]
         host:          String,
@@ -281,7 +284,7 @@ impl LockedNode {
         NarHash: Into<String>,
     {
         let raw_host = host.into();
-        let canonical_host = gitlab::normalize_host(&raw_host);
+        let canonical_host = normalize_host(&raw_host);
         Self::Gitlab {
             host:          canonical_host,
             owner:         owner.into(),
@@ -430,11 +433,11 @@ where
     Ok(locked.and_then(|value| LockedNode::from_value(value).ok()))
 }
 
-fn deserialize_gitlab_host<'de, D>(deserializer: D) -> Result<String, D::Error>
+fn deserialize_host<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
 {
-    String::deserialize(deserializer).map(|host| gitlab::normalize_host(&host))
+    String::deserialize(deserializer).map(|host| normalize_host(&host))
 }
 
 fn is_default_gitlab_host(host: &str) -> bool {
