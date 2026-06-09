@@ -56,14 +56,15 @@ let
           acc
       ) { } (attrNames all_follow_raw);
 
-      # a path node's stored path is absolute, or relative to this resolver dir
+      # relative path nodes live inside the source copy, so return directly
+      # because fetchTree rejects unlocked paths in pure eval
       fetchPin =
         name:
         let
           node = lock.${name};
         in
         if (node.type or "") == "path" && substring 0 1 node.path != "/" then
-          fetchTree (node // { path = ./. + ("/" + node.path); })
+          { outPath = ./. + ("/" + node.path); }
         else
           fetchTree node;
 

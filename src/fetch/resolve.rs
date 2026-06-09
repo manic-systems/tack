@@ -233,8 +233,16 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, Strin
             Ok((node, immutable_url))
         },
         // a path pin locks to its spec with no fetch; the resolver reads the
-        // directory at nix eval time
-        Source::Path { ref path } => Ok((LockedNode::new_path(path.clone()), path.clone())),
+        // directory at nix eval time. an absolute target sits outside the
+        // flake source, so it needs a narHash to count as locked in pure eval
+        Source::Path { ref path } => {
+            let nar_hash = Path::new(path)
+                .is_absolute()
+                .then(|| nar::hash_path(Path::new(path)))
+                .transpose()
+                .wrap_err_with(|| format!("hash path pin {path}"))?;
+            Ok((LockedNode::new_path(path.clone(), nar_hash), path.clone()))
+        },
     }
 }
 
@@ -332,6 +340,7 @@ mod tests {
 
     use super::{
         fetch_locked_tree_into,
+        fetch_pin,
         git,
         git_pin_from_checkout,
         parse_link_immutable,
@@ -344,6 +353,29 @@ mod tests {
 
     fn node(value: serde_json::Value) -> LockedNode {
         LockedNode::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn path_pin_locks_absolute_targets_with_a_nar_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f"), "hello").unwrap();
+
+        let absolute = Source::Path {
+            path: tmp.path().to_string_lossy().into_owned(),
+        };
+        let (locked, _) = fetch_pin(&absolute, false).unwrap();
+        assert!(
+            locked
+                .hash()
+                .is_some_and(|hash| hash.starts_with("sha256-"))
+        );
+
+        // relative targets skip fetchTree, so no hash
+        let relative = Source::Path {
+            path: "../vendor/dep".to_owned(),
+        };
+        let (locked, _) = fetch_pin(&relative, false).unwrap();
+        assert_eq!(locked.hash(), None);
     }
 
     #[test]

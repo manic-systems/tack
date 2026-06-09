@@ -225,9 +225,11 @@ pub enum LockedNode {
     },
     #[serde(rename = "path")]
     Path {
-        path:  String,
+        path:     String,
+        #[serde(rename = "narHash", skip_serializing_if = "Option::is_none")]
+        nar_hash: Option<String>,
         #[serde(flatten)]
-        extra: ExtraFields,
+        extra:    ExtraFields,
     },
 }
 
@@ -329,12 +331,13 @@ impl LockedNode {
         }
     }
 
-    pub fn new_path<P>(path: P) -> Self
+    pub fn new_path<P>(path: P, nar_hash: Option<String>) -> Self
     where
         P: Into<String>,
     {
         Self::Path {
-            path:  path.into(),
+            path: path.into(),
+            nar_hash,
             extra: BTreeMap::new(),
         }
     }
@@ -393,8 +396,9 @@ impl LockedNode {
             Self::Github { nar_hash, .. }
             | Self::Gitlab { nar_hash, .. }
             | Self::Git { nar_hash, .. }
-            | Self::Tarball { nar_hash, .. } => nar_hash.as_deref(),
-            Self::Indirect { .. } | Self::Path { .. } => None,
+            | Self::Tarball { nar_hash, .. }
+            | Self::Path { nar_hash, .. } => nar_hash.as_deref(),
+            Self::Indirect { .. } => None,
         }
     }
 
