@@ -151,10 +151,10 @@ impl FromStr for Source {
 }
 
 /// resolve a `path:` url's spec for storage, choosing relative-to-resolver or
-/// absolute by where the target sits: relative when it lives within the
-/// project's neighbourhood (so it travels with a moved project), absolute when
-/// it points somewhere unrelated. non-`path:` urls pass through untouched.
-/// warns but does not fail when the target is missing
+/// absolute by where the target sits: relative when it lives inside the
+/// project root (so it rides along when the source moves or is copied to the
+/// store), absolute when it points outside. non-`path:` urls pass through
+/// untouched. warns but does not fail when the target is missing
 pub struct LocalizedUrl {
     pub url:     String,
     pub warning: Option<String>,
@@ -175,7 +175,7 @@ pub fn localize_path_url_with_warning(expanded: &str, tack_dir: &Path) -> Locali
 }
 
 fn localize_path_spec(spec: &str, tack_dir: &Path) -> (String, Option<String>) {
-    let root = project_root_of(tack_dir);
+    let root = lexical_normalize(&project_root_of(tack_dir));
     let raw = if Path::new(spec).is_absolute() {
         PathBuf::from(spec)
     } else {
@@ -184,10 +184,9 @@ fn localize_path_spec(spec: &str, tack_dir: &Path) -> (String, Option<String>) {
     let target = lexical_normalize(&raw);
     let warning =
         (!target.exists()).then(|| format!("path pin target not found: {}", target.display()));
-    // "near" the project = inside the directory that holds the project, so a
-    // sibling checkout resolves relative; anything further out stays absolute
-    let boundary = root.parent().unwrap_or(root.as_path());
-    let path = if target.starts_with(boundary) {
+    // relative `..` hops escape the store-copied source, so only
+    // in-project targets may stay relative
+    let path = if target.starts_with(&root) {
         relative_from(tack_dir, &target)
     } else {
         target.to_string_lossy().into_owned()
@@ -319,18 +318,20 @@ mod tests {
     }
 
     #[test]
-    fn localize_stores_near_paths_relative_and_far_paths_absolute() {
+    fn localize_stores_in_project_paths_relative_and_outside_paths_absolute() {
         let tack = Path::new("/home/u/proj/.tack");
-        // a sibling checkout lives near the project: relative to the resolver
-        assert_eq!(
-            localize_path_url_with_warning("path:../sibling", tack).url,
-            "path:../../sibling"
-        );
+        // inside the project root: relative, so it rides along when the
+        // source moves or is copied to the store
         assert_eq!(
             localize_path_url_with_warning("path:./vendor/dep", tack).url,
             "path:../vendor/dep"
         );
-        // somewhere unrelated stays absolute so it survives a moved project
+        // a sibling is not part of the source copy, so relative `..` hops
+        // would escape a store-copied source; it must stay absolute
+        assert_eq!(
+            localize_path_url_with_warning("path:../sibling", tack).url,
+            "path:/home/u/sibling"
+        );
         assert_eq!(
             localize_path_url_with_warning("path:/etc/nixos", tack).url,
             "path:/etc/nixos"
