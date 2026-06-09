@@ -14,6 +14,7 @@ pub enum Command {
         force:    bool,
         resolver: bool,
         flake:    bool,
+        convert:  bool,
     },
     Update {
         names:  Vec<String>,
@@ -62,6 +63,9 @@ enum Cli {
         /// also scaffold a recomposable flake.nix
         #[pound(long)]
         flake:    bool,
+        /// import inputs from an existing flake.nix into pins.toml
+        #[pound(long)]
+        convert:  bool,
     },
     /// fetch pins and rewrite the lock
     Update {
@@ -144,11 +148,13 @@ impl From<Cli> for Command {
                 force,
                 resolver,
                 flake,
+                convert,
             } => {
                 Self::Init {
                     force,
                     resolver,
                     flake,
+                    convert,
                 }
             },
             Cli::Update { accept, names } => Self::Update { names, accept },
@@ -223,6 +229,7 @@ mod tests {
             force:    false,
             resolver: true,
             flake:    false,
+            convert:  false,
         });
     }
 

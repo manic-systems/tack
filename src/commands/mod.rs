@@ -41,14 +41,27 @@ pub fn warn_stale_resolver(project: &Project) {
     }
 }
 
+mod convert;
 mod dedup;
 mod edit;
 mod init;
 mod undo;
 mod update;
 
-pub fn init(project: &Project, force: bool, resolver_only: bool, flake: bool) -> Result<()> {
-    init::init(project, force, resolver_only, flake)
+#[derive(Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four orthogonal init switches, mapped straight from argv"
+)]
+pub struct InitRequest {
+    pub force:    bool,
+    pub resolver: bool,
+    pub flake:    bool,
+    pub convert:  bool,
+}
+
+pub fn init(project: &Project, request: InitRequest) -> Result<()> {
+    init::init(project, request)
 }
 
 #[derive(Clone, Copy)]
