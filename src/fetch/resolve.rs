@@ -357,15 +357,17 @@ mod tests {
 
     #[test]
     fn path_pin_locks_absolute_targets_with_a_nar_hash() {
+        use std::fs;
+
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("f"), "hello").unwrap();
+        fs::write(tmp.path().join("f"), "hello").unwrap();
 
         let absolute = Source::Path {
             path: tmp.path().to_string_lossy().into_owned(),
         };
-        let (locked, _) = fetch_pin(&absolute, false).unwrap();
+        let (absolute_locked, _) = fetch_pin(&absolute, false).unwrap();
         assert!(
-            locked
+            absolute_locked
                 .hash()
                 .is_some_and(|hash| hash.starts_with("sha256-"))
         );
@@ -374,8 +376,8 @@ mod tests {
         let relative = Source::Path {
             path: "../vendor/dep".to_owned(),
         };
-        let (locked, _) = fetch_pin(&relative, false).unwrap();
-        assert_eq!(locked.hash(), None);
+        let (relative_locked, _) = fetch_pin(&relative, false).unwrap();
+        assert_eq!(relative_locked.hash(), None);
     }
 
     #[test]
