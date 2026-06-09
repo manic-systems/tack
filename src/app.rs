@@ -19,9 +19,12 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
             force,
             resolver,
             flake,
+            convert,
         } => {
             let label = if resolver {
                 "init --resolver"
+            } else if convert {
+                "init --convert"
             } else if flake {
                 "init --flake"
             } else if force {
@@ -30,7 +33,12 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
                 "init"
             };
             recorded(&project, label, || {
-                commands::init(&project, force, resolver, flake)
+                commands::init(&project, commands::InitRequest {
+                    force,
+                    resolver,
+                    flake,
+                    convert,
+                })
             })
         },
         Command::Look { names, verbose } => commands::look_cli(&project, &names, verbose),

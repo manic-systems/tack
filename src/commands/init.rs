@@ -9,6 +9,7 @@ use std::{
 use eyre::Result;
 
 use super::{
+    InitRequest,
     MARKER,
     RESOLVER_NIX,
     SCAFFOLD_FLAKE,
@@ -22,7 +23,13 @@ use crate::{
     },
 };
 
-pub fn init(project: &Project, force: bool, resolver_only: bool, flake: bool) -> Result<()> {
+pub fn init(project: &Project, request: InitRequest) -> Result<()> {
+    let InitRequest {
+        force,
+        resolver: resolver_only,
+        flake,
+        convert,
+    } = request;
     let (pt, lp, rp) = (
         project.pins_path(),
         project.lock_path(),
@@ -30,7 +37,16 @@ pub fn init(project: &Project, force: bool, resolver_only: bool, flake: bool) ->
     );
 
     if resolver_only {
+        if convert {
+            user_bail!("--convert cannot be combined with --resolver");
+        }
         return write_resolver(project.dir(), &rp, force);
+    }
+
+    let cwd = env::current_dir()?;
+    let flake_path = cwd.join("flake.nix");
+    if convert && !flake_path.exists() {
+        user_bail!("no flake.nix to convert in {}", cwd.display());
     }
 
     if !force {
@@ -53,6 +69,14 @@ pub fn init(project: &Project, force: bool, resolver_only: bool, flake: bool) ->
     println!("  pins.toml       edit shorturls and inputs here");
     println!("  pins.lock.json  written by `tack update`");
     println!("  default.nix     `import ./.tack` from your flake/config");
+
+    if convert {
+        match super::convert::convert(project, &flake_path)? {
+            0 => println!("  flake.nix       no inputs to import"),
+            1 => println!("  pins.toml       imported 1 input from flake.nix"),
+            n => println!("  pins.toml       imported {n} inputs from flake.nix"),
+        }
+    }
 
     flake_awareness(flake, project)?;
     Ok(())

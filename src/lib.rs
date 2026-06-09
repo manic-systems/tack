@@ -25,6 +25,7 @@ use color_eyre::config::HookBuilder;
 // directly, plus the data types they read and write
 pub use commands::{
     AddRequest,
+    InitRequest,
     add,
     alias,
     dedup,
