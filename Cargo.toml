@@ -8,6 +8,9 @@ description = "flake-like toml nix pins, lazily fetched and transformed"
 keywords    = [ "nix", "flake", "pinning", "lockfile" ]
 categories  = [ "command-line-utilities", "development-tools" ]
 
+[features]
+network-tests = [  ]
+
 [lib]
 name = "tack"
 path = "src/lib.rs"
