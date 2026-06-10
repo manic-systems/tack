@@ -119,7 +119,7 @@ fn checkout(
         let (id, time) = checkout_existing_commit(&repo, rev)
             .wrap_err_with(|| format!("checkout rev '{rev}' from {url}"))?;
         if submodules {
-            update_submodules(&repo, url)?;
+            update_submodules(&repo, url, 0)?;
         }
         let refname = reff.map_or_else(|| "HEAD".to_owned(), str::to_owned);
         Ok((id, time, refname))
@@ -130,7 +130,7 @@ fn checkout(
         let id = commit.id().detach().to_string();
         let time = commit.time()?.seconds;
         if submodules {
-            update_submodules(&repo, url)?;
+            update_submodules(&repo, url, 0)?;
         }
         Ok((id, time, refname))
     }
@@ -473,7 +473,12 @@ fn checkout_commit(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<(
     Ok(())
 }
 
-fn update_submodules(repo: &gix::Repository, parent_url: &str) -> Result<()> {
+fn update_submodules(repo: &gix::Repository, parent_url: &str, depth: u8) -> Result<()> {
+    const MAX_SUBMODULE_DEPTH: u8 = 16;
+
+    if depth > MAX_SUBMODULE_DEPTH {
+        eyre::bail!("submodule recursion exceeded {MAX_SUBMODULE_DEPTH} levels at {parent_url}");
+    }
     let Some(submodules) = repo.submodules()? else {
         return Ok(());
     };
@@ -494,7 +499,7 @@ fn update_submodules(repo: &gix::Repository, parent_url: &str) -> Result<()> {
             .wrap_err_with(|| format!("clone submodule {url}"))?;
         checkout_existing_commit(&sub_repo, &expected.to_string())
             .wrap_err_with(|| format!("checkout submodule {} at {expected}", submodule.name()))?;
-        update_submodules(&sub_repo, &url)?;
+        update_submodules(&sub_repo, &url, depth + 1)?;
         // nix's git+submodules narHash records no nested .git.
         remove_root_git_dir(&work_dir);
     }
