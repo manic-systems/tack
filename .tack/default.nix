@@ -105,7 +105,7 @@ let
           rules = removeAttrs all_follow (pin.exclude_follow or [ ]);
         in
         {
-          level = (pin.follows or { }) // rules;
+          level = rules // (pin.follows or { });
           deep = rules;
         };
 
