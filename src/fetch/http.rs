@@ -33,7 +33,7 @@ use ureq::{
 use super::{
     auth::{
         Credential,
-        record_token_warning,
+        record_fetch_warning,
         token_for_host,
         with_credential_fallback,
     },
@@ -315,7 +315,7 @@ impl HttpClient {
         }
     }
 
-    fn with_gitlab_credential<B>(
+    pub(super) fn with_gitlab_credential<B>(
         request: RequestBuilder<B>,
         credential: Credential,
     ) -> RequestBuilder<B> {
@@ -352,7 +352,7 @@ impl HttpClient {
         T: DeserializeOwned,
     {
         if token_for_host(host).is_none() {
-            record_token_warning(format!(
+            record_fetch_warning(format!(
                 "no access token for {host}; gitlab comparison may be rate-limited or unavailable \
                  for private projects (set GITLAB_TOKEN, or opt into nix.conf access-tokens with \
                  TACK_NIX_CONF_TOKENS=1)"
@@ -379,7 +379,7 @@ impl HttpClient {
         T: DeserializeOwned,
     {
         if token_for_host("github.com").is_none() {
-            record_token_warning(
+            record_fetch_warning(
                 "no GitHub token; rev comparison falls back to commit lookup plus git DAG compare \
                  (set GITHUB_TOKEN or GH_TOKEN, or opt into nix.conf access-tokens with \
                  TACK_NIX_CONF_TOKENS=1)"
