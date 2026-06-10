@@ -6,11 +6,16 @@ use std::{
         HashMap,
     },
     env,
+    fmt,
     fs,
     mem,
     path::{
         Path,
         PathBuf,
+    },
+    process::{
+        Command,
+        Stdio,
     },
     sync::{
         Mutex,
@@ -129,6 +134,188 @@ fn scrape_access_tokens(path: &Path, tokens: &mut HashMap<String, String>, depth
     }
 }
 
+pub(super) struct HttpCredential {
+    username: String,
+    secret:   String,
+}
+
+impl HttpCredential {
+    pub(super) fn authorization(&self) -> String {
+        let raw = format!("{}:{}", self.username, self.secret);
+        format!("Basic {}", data_encoding::BASE64.encode(raw.as_bytes()))
+    }
+}
+
+impl fmt::Debug for HttpCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpCredential")
+            .field("username", &self.username)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Clone for HttpCredential {
+    fn clone(&self) -> Self {
+        Self {
+            username: self.username.clone(),
+            secret:   self.secret.clone(),
+        }
+    }
+}
+
+fn http_credentials() -> &'static Mutex<HashMap<String, Option<HttpCredential>>> {
+    static CREDENTIALS: OnceLock<Mutex<HashMap<String, Option<HttpCredential>>>> = OnceLock::new();
+    CREDENTIALS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(super) fn resolve_http_credential(host: &str) -> Option<HttpCredential> {
+    let mut guard = http_credentials()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(cached) = guard.get(host) {
+        return cached.clone();
+    }
+    let resolved = ladder_credential(host);
+    guard.insert(host.to_owned(), resolved.clone());
+    resolved
+}
+
+fn ladder_credential(host: &str) -> Option<HttpCredential> {
+    #[cfg(test)]
+    if let Some(seeded) = test_credential_override(host) {
+        return Some(seeded);
+    }
+    token_for_host(host)
+        .map(|token| {
+            HttpCredential {
+                username: "oauth2".to_owned(),
+                secret:   token.to_owned(),
+            }
+        })
+        .or_else(|| netrc_credential(host))
+        .or_else(|| git_helper_credential(host))
+}
+
+#[cfg(test)]
+fn test_credential_override(host: &str) -> Option<HttpCredential> {
+    test_credentials()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(host)
+        .cloned()
+}
+
+#[cfg(test)]
+fn test_credentials() -> &'static Mutex<HashMap<String, HttpCredential>> {
+    static OVERRIDES: OnceLock<Mutex<HashMap<String, HttpCredential>>> = OnceLock::new();
+    OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(super) fn seed_resolvable_credential(host: &str, username: &str, secret: &str) {
+    test_credentials()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(host.to_owned(), HttpCredential {
+            username: username.to_owned(),
+            secret:   secret.to_owned(),
+        });
+}
+
+pub(super) fn cached_http_credential(host: &str) -> Option<HttpCredential> {
+    http_credentials()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(host)
+        .cloned()
+        .flatten()
+}
+
+fn netrc_credential(host: &str) -> Option<HttpCredential> {
+    let path = etcetera::home_dir().ok()?.join(".netrc");
+    let contents = fs::read_to_string(path).ok()?;
+    parse_netrc(&contents, host)
+}
+
+fn parse_netrc(contents: &str, host: &str) -> Option<HttpCredential> {
+    let mut tokens = netrc_tokens(contents).into_iter();
+    let mut in_machine = false;
+    let mut login: Option<String> = None;
+    let mut password: Option<String> = None;
+    while let Some(token) = tokens.next() {
+        match token.as_str() {
+            "machine" => {
+                in_machine = tokens.next().is_some_and(|name| name == host);
+            },
+            "default" => in_machine = false,
+            "login" if in_machine => login = tokens.next(),
+            "password" if in_machine => password = tokens.next(),
+            _ => {},
+        }
+        if in_machine && login.is_some() && password.is_some() {
+            break;
+        }
+    }
+    Some(HttpCredential {
+        username: login?,
+        secret:   password?,
+    })
+}
+
+fn netrc_tokens(contents: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut lines = contents.lines().peekable();
+    while let Some(line) = lines.next() {
+        for word in line.split_whitespace() {
+            if word == "macdef" {
+                while lines.peek().is_some_and(|next| !next.trim().is_empty()) {
+                    lines.next();
+                }
+                lines.next();
+                break;
+            }
+            tokens.push(word.to_owned());
+        }
+    }
+    tokens
+}
+
+fn git_helper_credential(host: &str) -> Option<HttpCredential> {
+    let mut child = Command::new("git")
+        .args(["credential", "fill"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    {
+        use std::io::Write as _;
+
+        let mut stdin = child.stdin.take()?;
+        write!(stdin, "protocol=https\nhost={host}\n\n").ok()?;
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let mut username = None;
+    let mut password = None;
+    for line in stdout.lines() {
+        if let Some(value) = line.strip_prefix("username=") {
+            username = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("password=") {
+            password = Some(value.to_owned());
+        }
+    }
+    Some(HttpCredential {
+        username: username?,
+        secret:   password?,
+    })
+}
+
 fn token_warnings() -> &'static Mutex<BTreeSet<String>> {
     static WARNINGS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
     WARNINGS.get_or_init(|| Mutex::new(BTreeSet::new()))
@@ -211,7 +398,9 @@ mod tests {
         Credential,
         FetchError,
         FetchResult,
+        HttpCredential,
         env_flag_enabled,
+        parse_netrc,
         run_credentials,
         scrape_access_tokens,
     };
@@ -317,6 +506,49 @@ mod tests {
         assert!(!env_flag_enabled(Some("0")));
         assert!(!env_flag_enabled(Some("false")));
         assert!(!env_flag_enabled(Some("off")));
+    }
+
+    #[test]
+    fn authorization_header_is_base64_of_user_colon_secret() {
+        let credential = HttpCredential {
+            username: "atagen".to_owned(),
+            secret:   "s3cr3t".to_owned(),
+        };
+        assert_eq!(credential.authorization(), "Basic YXRhZ2VuOnMzY3IzdA==");
+
+        let token = HttpCredential {
+            username: "tok".to_owned(),
+            secret:   String::new(),
+        };
+        assert_eq!(token.authorization(), "Basic dG9rOg==");
+    }
+
+    #[test]
+    fn netrc_parses_matching_machine_and_misses_unknown_hosts() {
+        let body = "machine git.example.com login alice password hunter2\nmachine \
+                    other.example.com login bob password swordfish\n";
+
+        let hit = parse_netrc(body, "git.example.com").unwrap();
+        assert_eq!(hit.username, "alice");
+        assert_eq!(hit.secret, "hunter2");
+
+        let second = parse_netrc(body, "other.example.com").unwrap();
+        assert_eq!(second.username, "bob");
+        assert_eq!(second.secret, "swordfish");
+
+        assert!(parse_netrc(body, "absent.example.com").is_none());
+    }
+
+    #[test]
+    fn netrc_skips_macdef_bodies() {
+        let body = "macdef init\n  machine fake login evil password leak\n\nmachine \
+                    git.example.com login alice password hunter2\n";
+
+        let hit = parse_netrc(body, "git.example.com").unwrap();
+        assert_eq!(hit.username, "alice");
+        assert_eq!(hit.secret, "hunter2");
+
+        assert!(parse_netrc(body, "fake").is_none());
     }
 
     #[test]
