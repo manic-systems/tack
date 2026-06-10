@@ -35,12 +35,19 @@ use gix_transport::{
 };
 use ureq::{
     Agent,
+    Body,
     Error as UreqError,
     RequestBuilder,
-    http::HeaderMap,
+    http::{
+        HeaderMap,
+        Response,
+    },
 };
 
-use super::http;
+use super::{
+    auth,
+    http,
+};
 
 type UreqTransport = HttpTransport<UreqHttp>;
 
@@ -81,7 +88,7 @@ impl Http for UreqHttp {
         _base_url: &str,
         headers: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<GetResponse<Self::Headers, Self::ResponseBody>, HttpError> {
-        let response = send_ureq(self.agent, Method::Get, url, headers, Vec::new())?;
+        let response = send_ureq(self.agent, Method::Get, url, headers, &[])?;
         Ok(GetResponse {
             headers: LazyHeaders::ready(response.headers),
             body:    LazyResponseBody::ready(response.body),
@@ -168,6 +175,18 @@ impl HttpFailure {
             message: format!(
                 "git HTTP {} {url}: {detail} (HTTP {status})",
                 method.as_str()
+            ),
+        }
+    }
+
+    /// `Other`, not `PermissionDenied`, so gix does not start its own
+    /// credential cascade (askpass).
+    fn no_usable_credential(host: &str) -> Self {
+        Self {
+            kind:    io::ErrorKind::Other,
+            message: format!(
+                "authentication required for {host}: no usable credential (tried nix.conf \
+                 access-tokens, ~/.netrc, git credential helper)"
             ),
         }
     }
@@ -382,7 +401,7 @@ fn ensure_pending_response(guard: &mut PendingPost) {
             Method::Post,
             &guard.url,
             guard.headers.iter(),
-            guard.request_body.clone(),
+            &guard.request_body,
         )
         .map(|response| {
             PendingResponse {
@@ -426,29 +445,30 @@ fn take_pending_body(state: &Arc<Mutex<PendingPost>>) -> io::Result<LazyBody> {
         .map_err(io::Error::other)
 }
 
-fn send_ureq(
+enum SendOutcome {
+    Response(Response<Body>),
+    Unauthorized,
+    Failed(HttpFailure),
+}
+
+fn send_once(
     agent: &'static Agent,
     method: Method,
     url: &str,
-    headers: impl IntoIterator<Item = impl AsRef<str>>,
-    body: Vec<u8>,
-) -> Result<UreqResponse, HttpError> {
-    let header_lines = headers
-        .into_iter()
-        .map(|header| header.as_ref().to_owned())
-        .collect::<Vec<String>>();
+    header_lines: &[String],
+    body: &[u8],
+) -> Result<SendOutcome, HttpError> {
     let sent = match method {
-        Method::Get => apply_headers(agent.get(url), &header_lines).call(),
-        Method::Post => apply_headers(agent.post(url), &header_lines).send(body),
+        Method::Get => apply_headers(agent.get(url), header_lines).call(),
+        Method::Post => apply_headers(agent.post(url), header_lines).send(body),
     };
     let response = match sent {
         Ok(response) => response,
+        Err(UreqError::StatusCode(401)) => return Ok(SendOutcome::Unauthorized),
         Err(UreqError::StatusCode(status)) => {
-            let failure = HttpFailure::from_status(method, url, status);
-            return Ok(UreqResponse {
-                headers: Err(failure.clone()),
-                body:    LazyBody::Error(Some(failure)),
-            });
+            return Ok(SendOutcome::Failed(HttpFailure::from_status(
+                method, url, status,
+            )));
         },
         Err(err) => {
             return Err(HttpError::InitHttpClient {
@@ -457,19 +477,109 @@ fn send_ureq(
         },
     };
     let status = response.status();
-    if !status.is_success() {
-        let failure = HttpFailure::from_status(method, url, status.as_u16());
-        return Ok(UreqResponse {
-            headers: Err(failure.clone()),
-            body:    LazyBody::Error(Some(failure)),
-        });
+    if status == 401 {
+        return Ok(SendOutcome::Unauthorized);
     }
+    if !status.is_success() {
+        return Ok(SendOutcome::Failed(HttpFailure::from_status(
+            method,
+            url,
+            status.as_u16(),
+        )));
+    }
+    Ok(SendOutcome::Response(response))
+}
+
+fn request_host(url: &str) -> Option<String> {
+    let parsed = gix::Url::try_from(url).ok()?;
+    parsed.host().map(str::to_owned)
+}
+
+fn has_authorization(header_lines: &[String]) -> bool {
+    header_lines.iter().any(|header| {
+        header
+            .split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+    })
+}
+
+fn ok_response(response: Response<Body>) -> UreqResponse {
     let formatted_headers = format_headers(response.headers());
     let (_parts, response_body) = response.into_parts();
-    Ok(UreqResponse {
+    UreqResponse {
         headers: Ok(formatted_headers),
         body:    LazyBody::Ready(Box::new(response_body.into_reader())),
-    })
+    }
+}
+
+fn failed_response(failure: HttpFailure) -> UreqResponse {
+    UreqResponse {
+        headers: Err(failure.clone()),
+        body:    LazyBody::Error(Some(failure)),
+    }
+}
+
+fn send_ureq(
+    agent: &'static Agent,
+    method: Method,
+    url: &str,
+    headers: impl IntoIterator<Item = impl AsRef<str>>,
+    body: &[u8],
+) -> Result<UreqResponse, HttpError> {
+    let mut header_lines = headers
+        .into_iter()
+        .map(|header| header.as_ref().to_owned())
+        .collect::<Vec<String>>();
+    let host = request_host(url);
+
+    let mut sent_auth = has_authorization(&header_lines);
+    if !sent_auth
+        && let Some(known_host) = host.as_deref()
+        && let Some(cred) = auth::cached_http_credential(known_host)
+    {
+        header_lines.push(format!("Authorization: {}", cred.authorization()));
+        sent_auth = true;
+    }
+
+    match send_once(agent, method, url, &header_lines, body)? {
+        SendOutcome::Response(response) => Ok(ok_response(response)),
+        SendOutcome::Failed(failure) => Ok(failed_response(failure)),
+        SendOutcome::Unauthorized => {
+            retry_with_auth(
+                agent,
+                method,
+                url,
+                header_lines,
+                body,
+                host.as_deref(),
+                sent_auth,
+            )
+        },
+    }
+}
+
+fn retry_with_auth(
+    agent: &'static Agent,
+    method: Method,
+    url: &str,
+    mut header_lines: Vec<String>,
+    body: &[u8],
+    host: Option<&str>,
+    sent_auth: bool,
+) -> Result<UreqResponse, HttpError> {
+    let label = host.unwrap_or("the remote");
+    let resolved = host
+        .filter(|_| !sent_auth)
+        .and_then(auth::resolve_http_credential);
+    let Some(cred) = resolved else {
+        return Ok(failed_response(HttpFailure::no_usable_credential(label)));
+    };
+    header_lines.push(format!("Authorization: {}", cred.authorization()));
+    match send_once(agent, method, url, &header_lines, body)? {
+        SendOutcome::Response(response) => Ok(ok_response(response)),
+        SendOutcome::Failed(failure) => Ok(failed_response(failure)),
+        SendOutcome::Unauthorized => Ok(failed_response(HttpFailure::no_usable_credential(label))),
+    }
 }
 
 fn apply_headers<B>(mut request: RequestBuilder<B>, headers: &[String]) -> RequestBuilder<B> {
@@ -500,7 +610,10 @@ mod tests {
             Read as _,
             Write as _,
         },
-        net::TcpListener,
+        net::{
+            TcpListener,
+            TcpStream,
+        },
         thread,
         time::Duration,
     };
@@ -513,9 +626,111 @@ mod tests {
     use super::{
         Method,
         UreqHttp,
+        auth,
         http,
         send_ureq,
     };
+
+    fn read_request(stream: &mut TcpStream) -> Option<String> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut buf).ok()?;
+            if read == 0 {
+                return (!request.is_empty())
+                    .then(|| String::from_utf8_lossy(&request).into_owned());
+            }
+            request.extend_from_slice(&buf[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let headers_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map_or(request.len(), |idx| idx + 4);
+        let headers = String::from_utf8_lossy(&request[..headers_end]).into_owned();
+        let content_length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|&(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while request.len().saturating_sub(headers_end) < content_length {
+            let read = stream.read(&mut buf).ok()?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..read]);
+        }
+        Some(String::from_utf8_lossy(&request).into_owned())
+    }
+
+    fn write_response(stream: &mut TcpStream, head: &str, body: &str) {
+        let response = format!(
+            "HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    fn serve_basic_auth_gate(bind_host: &str) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind((bind_host, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/repo.git/info/refs?service=git-upload-pack");
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..2_u8 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let Some(request) = read_request(&mut stream) else {
+                    break;
+                };
+                let authorized = request
+                    .lines()
+                    .any(|line| line.to_ascii_lowercase().starts_with("authorization:"));
+                if authorized {
+                    write_response(&mut stream, "200 OK", "refs");
+                    requests.push(request);
+                    break;
+                }
+                write_response(
+                    &mut stream,
+                    "401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"",
+                    "",
+                );
+                requests.push(request);
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn unauthorized_request_resolves_credential_and_retries_with_authorization() {
+        let host = "127.0.0.2";
+        auth::seed_resolvable_credential(host, "atagen", "s3cr3t");
+        let (url, server) = serve_basic_auth_gate(host);
+
+        let response =
+            send_ureq(http::agent(), Method::Get, &url, Vec::<String>::new(), &[]).unwrap();
+
+        assert!(response.headers.is_ok());
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            !requests[0]
+                .lines()
+                .any(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+        );
+        let retry = requests[1].to_ascii_lowercase();
+        assert!(retry.contains("authorization: basic yxrhz2vuonmzy3izda=="));
+    }
 
     fn serve_once(
         status: &str,
@@ -575,20 +790,16 @@ mod tests {
     }
 
     #[test]
-    fn status_401_headers_signal_permission_denied() {
+    fn status_401_without_credentials_avoids_gix_credential_cascade() {
         let (url, server) = serve_once("401 Unauthorized", "");
 
-        let response = send_ureq(
-            http::agent(),
-            Method::Get,
-            &url,
-            Vec::<String>::new(),
-            Vec::new(),
-        )
-        .unwrap();
+        let response =
+            send_ureq(http::agent(), Method::Get, &url, Vec::<String>::new(), &[]).unwrap();
         let failure = response.headers.err().unwrap();
+        let err = failure.into_error();
 
-        assert_eq!(failure.into_error().kind(), ErrorKind::PermissionDenied);
+        assert_eq!(err.kind(), ErrorKind::Other);
+        assert!(err.to_string().contains("no usable credential"));
         assert!(server.join().unwrap().starts_with("GET "));
     }
 
