@@ -636,7 +636,7 @@ mod tests {
 
     // our tarball nar hash must equal nix's narHash for this rev
     #[test]
-    #[ignore = "hits codeload.github.com"]
+    #[cfg_attr(not(feature = "network-tests"), ignore = "hits codeload.github.com")]
     fn github_narhash_matches_nix() {
         let dir = tempfile::tempdir().unwrap();
         let root = GithubClient::global()
