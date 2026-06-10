@@ -29,6 +29,7 @@ use crate::{
         ScanDiagnostic,
         ScanFile,
     },
+    source::id::SourceId,
 };
 
 const AUTO_DEDUP_SCAN_IN_FLIGHT: usize = 16;
@@ -189,6 +190,7 @@ fn auto_dedup_inner(
         if let Some(current) = lock.get(&target) {
             obs.insert(0, LockObservation::from_node(current.clone()));
         }
+        restrict_to_seed_identity(&mut obs);
         if let Some(winner) = LockObservation::choose(obs, |base, head| {
             comparator.compare_locked_nodes(base, head)
         }) && lock.get(&target) != Some(&winner)
@@ -261,6 +263,22 @@ fn scan_input(
     Some(batch)
 }
 
+/// keep only the observations whose source identity matches the seed
+/// (index 0 — the current lock node when present). auto-dedup may collapse
+/// inputs that follow the *same* upstream, never across repositories; an
+/// unrelated input locked under the same alias upstream (a fork or vendored
+/// copy) compares as `None` and would otherwise hijack the timestamp tiebreak
+/// in [`LockObservation::choose`] and rewrite the target to a different repo.
+fn restrict_to_seed_identity(observations: &mut Vec<LockObservation>) {
+    let Some(reference) = observations
+        .first()
+        .map(|seed| SourceId::from_locked(&seed.node))
+    else {
+        return;
+    };
+    observations.retain(|obs| SourceId::from_locked(&obs.node) == reference);
+}
+
 fn prune_stale_auto_entries(lock: &mut lock::LockFile, valid: &HashSet<String>) -> bool {
     let stale = lock
         .keys()
@@ -275,7 +293,10 @@ fn prune_stale_auto_entries(lock: &mut lock::LockFile, valid: &HashSet<String>) 
 
 #[cfg(test)]
 mod tests {
-    use super::LockObservation;
+    use super::{
+        LockObservation,
+        restrict_to_seed_identity,
+    };
     use crate::{
         fetch::CompareStatus,
         lock::LockedNode,
@@ -283,6 +304,10 @@ mod tests {
 
     fn github_node(rev: &str) -> LockedNode {
         LockedNode::new_github("o", "r", rev, "sha256-n", 0)
+    }
+
+    fn github_node_in(owner: &str, repo: &str, rev: &str) -> LockedNode {
+        LockedNode::new_github(owner, repo, rev, "sha256-n", 0)
     }
 
     fn node_rev(node: &LockedNode) -> &str {
@@ -344,5 +369,24 @@ mod tests {
         .unwrap();
 
         assert_eq!(node_rev(&winner), "amended");
+    }
+
+    #[test]
+    fn restrict_to_seed_identity_drops_foreign_repo_despite_newer_timestamp() {
+        // seed (index 0) is the target's current node; a same-named input
+        // locked to a different repo upstream must not survive to the
+        // tournament, even with a much newer timestamp.
+        let mut obs = vec![
+            LockObservation::new(100, github_node_in("o", "r", "current")),
+            LockObservation::new(900, github_node_in("fork", "r", "foreign")),
+            LockObservation::new(800, github_node_in("o", "r", "sibling")),
+        ];
+        restrict_to_seed_identity(&mut obs);
+
+        let revs = obs
+            .iter()
+            .map(|entry| node_rev(&entry.node))
+            .collect::<Vec<_>>();
+        assert_eq!(revs, vec!["current", "sibling"]);
     }
 }
