@@ -72,6 +72,9 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
             println!("  fix the url and run `tack update {name}`");
         },
     }
+    for warning in fetch::drain_fetch_warnings() {
+        eprintln!("tack: {warning}");
+    }
     Ok(())
 }
 

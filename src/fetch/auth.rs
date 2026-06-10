@@ -316,23 +316,20 @@ fn git_helper_credential(host: &str) -> Option<HttpCredential> {
     })
 }
 
-fn token_warnings() -> &'static Mutex<BTreeSet<String>> {
+fn fetch_warnings() -> &'static Mutex<BTreeSet<String>> {
     static WARNINGS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
     WARNINGS.get_or_init(|| Mutex::new(BTreeSet::new()))
 }
 
-/// record a "no token for this host" notice once; surfaced after the spinner
-/// finishes so it does not corrupt the live display
-pub(super) fn record_token_warning(message: String) {
-    token_warnings()
+pub(super) fn record_fetch_warning(message: String) {
+    fetch_warnings()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(message);
 }
 
-/// drain the deferred token warnings for a command to print after its display
-pub fn drain_token_warnings() -> Vec<String> {
-    let mut guard = token_warnings()
+pub fn drain_fetch_warnings() -> Vec<String> {
+    let mut guard = fetch_warnings()
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     mem::take(&mut *guard).into_iter().collect()
