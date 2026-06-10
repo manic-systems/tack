@@ -52,6 +52,7 @@ use crate::fetch::{
     http::{
         FetchError,
         FetchResult,
+        record_token_warning,
     },
 };
 
@@ -524,7 +525,10 @@ fn is_pack_limit(err: &FetchError) -> bool {
 fn install_sideband_handler<'a>(reader: &mut Box<dyn ExtendedBufRead<'a> + Unpin + 'a>) {
     reader.set_progress_handler(Some(Box::new(|is_err: bool, data: &[u8]| {
         if is_err && !data.is_empty() {
-            eprintln!("remote: {}", String::from_utf8_lossy(data));
+            record_token_warning(format!(
+                "remote: {}",
+                String::from_utf8_lossy(data).trim_end()
+            ));
         }
         ControlFlow::Continue(())
     }) as HandleProgress<'a>));

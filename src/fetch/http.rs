@@ -190,7 +190,7 @@ fn token_warnings() -> &'static Mutex<BTreeSet<String>> {
 
 /// record a "no token for this host" notice once; surfaced after the spinner
 /// finishes so it does not corrupt the live display
-fn record_token_warning(message: String) {
+pub(in crate::fetch) fn record_token_warning(message: String) {
     token_warnings()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
