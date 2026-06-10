@@ -197,31 +197,36 @@ impl CompareSession {
             && let Ok((rev, status)) =
                 github::resolve_ref_compare(owner, repo, reff.as_deref(), previous)
         {
-            return Ok(CurrentRev {
-                comparison: status
-                    .map_or_else(BranchComparison::unavailable, BranchComparison::verified),
-                rev,
-            });
+            // when graphql fuses the comparison we are done; when it can't
+            // (e.g. the old rev was force-pushed away and is unreachable to the
+            // graphql `compare` node) the resolved rev is still good, so fall
+            // through to the REST/DAG ladder rather than surrendering to
+            // `unavailable` — those paths do not depend on that node.
+            let comparison = status.map_or_else(
+                || self.compare_resolved(source, previous, &rev),
+                BranchComparison::verified,
+            );
+            return Ok(CurrentRev { rev, comparison });
         }
 
         let rev = resolve::current_rev(source)?;
-        let comparison = match base {
-            None => BranchComparison::none(),
-            Some(previous) if previous == rev => {
-                BranchComparison::verified(CompareStatus::Identical)
-            },
-            Some(previous) => {
-                CompareJob::from_source(source, previous, &rev).map_or_else(
-                    BranchComparison::none,
-                    |job| {
-                        self.compare(&job)
-                            .status
-                            .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
-                    },
-                )
-            },
-        };
+        let comparison = base.map_or_else(BranchComparison::none, |previous| {
+            self.compare_resolved(source, previous, &rev)
+        });
         Ok(CurrentRev { rev, comparison })
+    }
+
+    /// compare an already-resolved `rev` against `previous` over the REST/DAG
+    /// ladder, short-circuiting an exact match before any network.
+    fn compare_resolved(&self, source: &Source, previous: &str, rev: &str) -> BranchComparison {
+        if previous == rev {
+            return BranchComparison::verified(CompareStatus::Identical);
+        }
+        CompareJob::from_source(source, previous, rev).map_or_else(BranchComparison::none, |job| {
+            self.compare(&job)
+                .status
+                .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
+        })
     }
 
     pub fn into_surfaced(self) -> BTreeSet<String> {
