@@ -318,7 +318,7 @@ pub(super) fn update(
     }
     warnings.extend(session.into_surfaced());
     warnings.extend(auto_dedup.surfaced_fetch_causes);
-    warnings.extend(fetch::drain_token_warnings());
+    warnings.extend(fetch::drain_fetch_warnings());
 
     Ok(UpdateReport {
         pins,
@@ -421,7 +421,7 @@ pub(super) fn look(
         })
         .collect::<Vec<PinLook>>();
     warnings.extend(session.into_surfaced());
-    warnings.extend(fetch::drain_token_warnings());
+    warnings.extend(fetch::drain_fetch_warnings());
 
     Ok(LookReport { pins, warnings })
 }

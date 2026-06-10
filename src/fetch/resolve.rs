@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
+    borrow::Cow,
     io::Read as _,
     path::{
         Path,
@@ -29,6 +30,7 @@ use super::{
     forge,
     git,
     github,
+    gitlab,
     http::HttpClient,
     time::epoch_from_http_date,
 };
@@ -150,8 +152,7 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
             ..
         } => {
             let resolved_rev = locked_rev.as_deref().context("gitlab node missing rev")?;
-            let url = clone_url(host, owner, repo);
-            git::fetch_tree_rev_into(&url, resolved_rev, false, dir)
+            gitlab::download_archive(host, owner, repo, resolved_rev, dir)
         },
         LockedNode::Fixed { .. } | LockedNode::Indirect { .. } | LockedNode::Path { .. } => {
             bail!("cannot inspect tree for lock type '{}'", node.kind())
@@ -160,16 +161,26 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
 }
 
 pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<PathBuf> {
-    match *source {
+    let resolved = downgrade_forge_for_submodules(source, submodules);
+    match *resolved {
         Source::Github {
             ref owner,
             ref repo,
             ref reff,
             rev: ref pinned,
         } => github::fetch_tree_into(owner, repo, reff.as_deref(), pinned.as_deref(), dir),
-        Source::Git { .. } | Source::Gitlab { .. } => {
-            reject_gitlab_submodules(source, submodules)?;
-            let target = source
+        Source::Gitlab {
+            ref host,
+            ref owner,
+            ref repo,
+            ..
+        } => {
+            let rev = current_rev(resolved.as_ref())
+                .wrap_err_with(|| format!("resolve gitlab ref for {host}/{owner}/{repo}"))?;
+            gitlab::download_archive(host, owner, repo, &rev, dir)
+        },
+        Source::Git { .. } => {
+            let target = resolved
                 .git_target()
                 .context("git-backed source missing git target")?;
             git::fetch_tree_into(
@@ -193,21 +204,27 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
 }
 
 pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, String)> {
-    match *source {
+    let resolved = downgrade_forge_for_submodules(source, submodules);
+    match *resolved {
         Source::Github {
             ref owner,
             ref repo,
             ref reff,
             rev: ref pinned,
         } => github::fetch_pin(owner, repo, reff.as_deref(), pinned.clone()),
-        Source::Git { .. } | Source::Gitlab { .. } => {
-            reject_gitlab_submodules(source, submodules)?;
-            let target = source
+        Source::Gitlab {
+            ref host,
+            ref owner,
+            ref repo,
+            ..
+        } => fetch_gitlab_archive_pin(resolved.as_ref(), host, owner, repo),
+        Source::Git { .. } => {
+            let target = resolved
                 .git_target()
                 .context("git-backed source missing git target")?;
             let checkout =
                 git::fetch_pin_checkout(target.url.as_ref(), target.reff, target.rev, submodules)?;
-            git_pin_from_checkout(source, checkout, submodules)
+            git_pin_from_checkout(resolved.as_ref(), checkout, submodules)
         },
         Source::Tarball { ref url } => {
             let mut resp = HttpClient::global()
@@ -245,11 +262,57 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, Strin
     }
 }
 
-fn reject_gitlab_submodules(source: &Source, submodules: bool) -> Result<()> {
-    if submodules && matches!(source, Source::Gitlab { .. }) {
-        user_bail!("gitlab sources do not support submodules; use a git+ URL for submodule pins");
+/// forge archive fetchers carry no submodule contents and the forge lock nodes
+/// have no `submodules` field, so a submodules pin is lowered to its git
+/// clone-url to lock as `type=git; submodules=true` and match nix's narHash.
+fn downgrade_forge_for_submodules(source: &Source, submodules: bool) -> Cow<'_, Source> {
+    if !submodules {
+        return Cow::Borrowed(source);
     }
-    Ok(())
+    match *source {
+        Source::Github {
+            ref owner,
+            ref repo,
+            ref reff,
+            ref rev,
+        } => {
+            Cow::Owned(Source::Git {
+                url:  clone_url("github.com", owner, repo),
+                reff: reff.clone(),
+                rev:  rev.clone(),
+            })
+        },
+        Source::Gitlab {
+            ref host,
+            ref owner,
+            ref repo,
+            ref reff,
+            ref rev,
+        } => {
+            Cow::Owned(Source::Git {
+                url:  clone_url(host, owner, repo),
+                reff: reff.clone(),
+                rev:  rev.clone(),
+            })
+        },
+        Source::Git { .. } | Source::Tarball { .. } | Source::Path { .. } => Cow::Borrowed(source),
+    }
+}
+
+fn fetch_gitlab_archive_pin(
+    source: &Source,
+    host: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<(LockedNode, String)> {
+    let rev = current_rev(source)
+        .wrap_err_with(|| format!("resolve gitlab ref for {host}/{owner}/{repo}"))?;
+    let dir = tempfile::tempdir()?;
+    let root = gitlab::download_archive(host, owner, repo, &rev, dir.path())?;
+    let nar_hash = nar::hash_path(&root)?;
+    let last_modified = gitlab::commit_last_modified(host, owner, repo, &rev).unwrap_or(0);
+    let node = LockedNode::new_gitlab(host, owner, repo, rev.clone(), nar_hash, last_modified);
+    Ok((node, rev))
 }
 
 fn git_pin_from_checkout(
@@ -269,22 +332,10 @@ fn git_pin_from_checkout(
                 submodules,
             )
         },
-        Source::Gitlab {
-            ref host,
-            ref owner,
-            ref repo,
-            ..
-        } => {
-            LockedNode::new_gitlab(
-                host,
-                owner,
-                repo,
-                rev.clone(),
-                checkout.nar_hash,
-                checkout.last_modified,
-            )
-        },
-        Source::Github { .. } | Source::Tarball { .. } | Source::Path { .. } => {
+        Source::Github { .. }
+        | Source::Gitlab { .. }
+        | Source::Tarball { .. }
+        | Source::Path { .. } => {
             bail!("non-git source cannot be locked from git checkout")
         },
     };
@@ -338,12 +389,12 @@ mod tests {
     use serde_json::json;
 
     use super::{
+        downgrade_forge_for_submodules,
         fetch_locked_tree_into,
         fetch_pin,
         git,
         git_pin_from_checkout,
         parse_link_immutable,
-        reject_gitlab_submodules,
     };
     use crate::{
         lock::LockedNode,
@@ -424,11 +475,11 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_source_checkout_locks_as_gitlab_node() {
+    fn gitlab_source_is_rejected_by_git_checkout_lock() {
         let source = "gitlab:Group/Repo/main?host=gitlab.example.com&rev=abc123"
             .parse::<Source>()
             .unwrap();
-        let (fetched, rev) = git_pin_from_checkout(
+        let err = git_pin_from_checkout(
             &source,
             git::PinCheckout {
                 rev:           "abc123".to_owned(),
@@ -438,20 +489,11 @@ mod tests {
             },
             true,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(rev, "abc123");
         assert_eq!(
-            fetched,
-            node(json!({
-                "type": "gitlab",
-                "host": "gitlab.example.com",
-                "owner": "Group",
-                "repo": "Repo",
-                "rev": "abc123",
-                "narHash": "sha256-n",
-                "lastModified": 1_700_i64
-            }))
+            err.to_string(),
+            "non-git source cannot be locked from git checkout"
         );
     }
 
@@ -487,14 +529,69 @@ mod tests {
     }
 
     #[test]
-    fn first_class_gitlab_sources_reject_submodules() {
-        let source = "gitlab:Group/Repo/main".parse::<Source>().unwrap();
+    fn github_submodules_pin_lowers_to_git_clone_url() {
+        let source = "github:owner/repo/main?rev=abc123"
+            .parse::<Source>()
+            .unwrap();
 
-        let err = reject_gitlab_submodules(&source, true).unwrap_err();
+        let lowered = downgrade_forge_for_submodules(&source, true);
 
-        assert!(
-            err.to_string()
-                .contains("gitlab sources do not support submodules")
-        );
+        assert_eq!(*lowered, Source::Git {
+            url:  "https://github.com/owner/repo.git".to_owned(),
+            reff: Some("main".to_owned()),
+            rev:  Some("abc123".to_owned()),
+        });
+    }
+
+    #[test]
+    fn gitlab_submodules_pin_lowers_to_host_clone_url() {
+        let source = "gitlab:Group/Repo/main?host=gitlab.example.com&rev=abc123"
+            .parse::<Source>()
+            .unwrap();
+
+        let lowered = downgrade_forge_for_submodules(&source, true);
+
+        assert_eq!(*lowered, Source::Git {
+            url:  "https://gitlab.example.com/Group/Repo.git".to_owned(),
+            reff: Some("main".to_owned()),
+            rev:  Some("abc123".to_owned()),
+        });
+    }
+
+    #[test]
+    #[ignore = "clones github.com/githubtraining/example-dependency + its submodule"]
+    fn github_submodules_pin_fetches_as_git_with_submodule_contents() {
+        let source = "github:githubtraining/example-dependency?\
+                      rev=1fcbf0f1a49be44f3f4ca9bf16cd1cc0fe1e6d1a"
+            .parse::<Source>()
+            .unwrap();
+
+        let (locked, _rev) = fetch_pin(&source, true).unwrap();
+        assert_eq!(locked.kind(), "git");
+        assert!(matches!(locked, LockedNode::Git {
+            submodules: true,
+            ..
+        }));
+
+        let dir = tempfile::tempdir().unwrap();
+        super::fetch_tree_into(&source, true, dir.path()).unwrap();
+        assert!(dir.path().join("js/app.js").exists());
+    }
+
+    #[test]
+    fn forge_pin_without_submodules_is_unchanged() {
+        use std::borrow::Cow;
+
+        let github = "github:owner/repo/main".parse::<Source>().unwrap();
+        assert!(matches!(
+            downgrade_forge_for_submodules(&github, false),
+            Cow::Borrowed(Source::Github { .. })
+        ));
+
+        let gitlab = "gitlab:Group/Repo/main".parse::<Source>().unwrap();
+        assert!(matches!(
+            downgrade_forge_for_submodules(&gitlab, false),
+            Cow::Borrowed(Source::Gitlab { .. })
+        ));
     }
 }

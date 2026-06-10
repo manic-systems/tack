@@ -89,17 +89,6 @@ pub(super) fn fetch_tree_into(
     Ok(dir.to_owned())
 }
 
-pub(super) fn fetch_tree_rev_into(
-    url: &str,
-    rev: &str,
-    submodules: bool,
-    dir: &Path,
-) -> Result<PathBuf> {
-    checkout_rev(url, rev, submodules, dir)?;
-    remove_root_git_dir(dir);
-    Ok(dir.to_owned())
-}
-
 pub(super) fn fetch_pin_checkout(
     url: &str,
     reff: Option<&str>,
@@ -118,16 +107,6 @@ pub(super) fn fetch_pin_checkout(
     })
 }
 
-fn checkout_rev(url: &str, requested_rev: &str, submodules: bool, into: &Path) -> Result<()> {
-    let repo = fetch_pinned(url, None, requested_rev, into)?;
-    checkout_existing_commit(&repo, requested_rev)
-        .wrap_err_with(|| format!("checkout rev '{requested_rev}' from {url}"))?;
-    if submodules {
-        update_submodules(&repo)?;
-    }
-    Ok(())
-}
-
 fn checkout(
     url: &str,
     reff: Option<&str>,
@@ -140,7 +119,7 @@ fn checkout(
         let (id, time) = checkout_existing_commit(&repo, rev)
             .wrap_err_with(|| format!("checkout rev '{rev}' from {url}"))?;
         if submodules {
-            update_submodules(&repo)?;
+            update_submodules(&repo, url)?;
         }
         let refname = reff.map_or_else(|| "HEAD".to_owned(), str::to_owned);
         Ok((id, time, refname))
@@ -151,7 +130,7 @@ fn checkout(
         let id = commit.id().detach().to_string();
         let time = commit.time()?.seconds;
         if submodules {
-            update_submodules(&repo)?;
+            update_submodules(&repo, url)?;
         }
         Ok((id, time, refname))
     }
@@ -494,31 +473,57 @@ fn checkout_commit(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<(
     Ok(())
 }
 
-fn update_submodules(repo: &gix::Repository) -> Result<()> {
+fn update_submodules(repo: &gix::Repository, parent_url: &str) -> Result<()> {
     let Some(submodules) = repo.submodules()? else {
         return Ok(());
     };
 
     for submodule in submodules {
-        if !submodule.is_active()? {
-            continue;
-        }
         if matches!(submodule.update()?, Some(SubmoduleUpdate::None)) {
             continue;
         }
-        let Some(expected) = submodule.head_id()?.or(submodule.index_id()?) else {
+        // no `is_active` gate: it requires a configured `submodule.<name>.active`
+        // a fresh checkout lacks, so every recorded gitlink is materialized.
+        let Some(expected) = submodule.head_id().ok().flatten().or(submodule.index_id()?) else {
             continue;
         };
-        let url = submodule.url()?.to_bstring().to_string();
+        let url = resolve_submodule_url(parent_url, &submodule.url()?.to_bstring().to_string());
         let work_dir = submodule.work_dir()?;
         let _ = fs::create_dir_all(&work_dir);
         let sub_repo = fetch_pinned(&url, None, &expected.to_string(), &work_dir)
             .wrap_err_with(|| format!("clone submodule {url}"))?;
         checkout_existing_commit(&sub_repo, &expected.to_string())
             .wrap_err_with(|| format!("checkout submodule {} at {expected}", submodule.name()))?;
+        update_submodules(&sub_repo, &url)?;
+        // nix's git+submodules narHash records no nested .git.
+        remove_root_git_dir(&work_dir);
     }
 
     Ok(())
+}
+
+fn resolve_submodule_url(parent_url: &str, sub_url: &str) -> String {
+    if !(sub_url.starts_with("../") || sub_url.starts_with("./")) {
+        return sub_url.to_owned();
+    }
+    let mut base = parent_url
+        .strip_suffix('/')
+        .unwrap_or(parent_url)
+        .to_owned();
+    let mut rest = sub_url;
+    loop {
+        if let Some(tail) = rest.strip_prefix("../") {
+            base = base
+                .rsplit_once('/')
+                .map_or_else(String::new, |(head, _)| head.to_owned());
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("./") {
+            rest = tail;
+        } else {
+            break;
+        }
+    }
+    format!("{base}/{rest}")
 }
 
 fn ref_candidates(reff: Option<&str>) -> Vec<Option<String>> {
