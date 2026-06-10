@@ -460,11 +460,16 @@ fn fallback_dag(job: &CompareJob, api_error: Option<FetchError>) -> CompareAttem
     match git::compare_status(&job.source.clone_url(), &job.base, &job.head) {
         Ok(Some(status)) => CompareAttempt::verified(status),
         Ok(None) => CompareAttempt::unavailable(api_error.map(|err| err.to_string())),
-        Err(err) => {
-            let cause = api_error.unwrap_or(err).to_string();
-            CompareAttempt::unavailable(Some(cause))
-        },
+        Err(dag_err) => CompareAttempt::unavailable(Some(dag_fallback_cause(api_error, &dag_err))),
     }
+}
+
+/// Surface the forge-API failure and the DAG-probe failure when both fail
+fn dag_fallback_cause(api_error: Option<FetchError>, dag_err: &FetchError) -> String {
+    api_error.map_or_else(
+        || dag_err.to_string(),
+        |api| format!("{api}; dag fallback: {dag_err}"),
+    )
 }
 
 #[cfg(test)]
@@ -472,9 +477,13 @@ mod tests {
     use super::{
         CompareJob,
         CompareSource,
+        dag_fallback_cause,
     };
     use crate::{
-        fetch::CompareStatus,
+        fetch::{
+            CompareStatus,
+            FetchError,
+        },
         source::id::SourceId,
     };
 
@@ -508,5 +517,24 @@ mod tests {
         });
 
         assert_eq!(attempt.status, Some(CompareStatus::Identical));
+    }
+
+    #[test]
+    fn dag_fallback_cause_surfaces_both_failures() {
+        let api = FetchError::Github("rate limited".to_owned());
+        let dag = FetchError::Transport("askpass: no tty".to_owned());
+        let cause = dag_fallback_cause(Some(api), &dag);
+        assert!(cause.contains("rate limited"), "api cause missing: {cause}");
+        assert!(
+            cause.contains("askpass: no tty"),
+            "dag cause missing: {cause}"
+        );
+    }
+
+    #[test]
+    fn dag_fallback_cause_uses_dag_error_when_api_succeeded() {
+        let dag = FetchError::Transport("askpass: no tty".to_owned());
+        let cause = dag_fallback_cause(None, &dag);
+        assert_eq!(cause, dag.to_string());
     }
 }
