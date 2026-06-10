@@ -6,10 +6,7 @@ use std::{
     path::Path,
 };
 
-use eyre::{
-    Result,
-    bail,
-};
+use eyre::Result;
 
 use super::{
     MARKER,
@@ -17,9 +14,12 @@ use super::{
     SCAFFOLD_FLAKE,
     STARTER_TOML,
 };
-use crate::project::{
-    self,
-    Project,
+use crate::{
+    error::user_bail,
+    project::{
+        self,
+        Project,
+    },
 };
 
 pub fn init(project: &Project, force: bool, resolver_only: bool, flake: bool) -> Result<()> {
@@ -39,7 +39,7 @@ pub fn init(project: &Project, force: bool, resolver_only: bool, flake: bool) ->
             .filter_map(|path| path.exists().then_some(path.display().to_string()))
             .collect::<Vec<String>>();
         if !clash.is_empty() {
-            bail!("{} already exists (use --force)", clash.join(", "));
+            user_bail!("{} already exists (use --force)", clash.join(", "));
         }
     }
     fs::create_dir_all(project.dir())?;
@@ -67,7 +67,7 @@ fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
             return Ok(());
         }
         if !current.contains(MARKER) && !force {
-            bail!(
+            user_bail!(
                 "{} has no tack marker, refusing to overwrite (use --force)",
                 path.display()
             );

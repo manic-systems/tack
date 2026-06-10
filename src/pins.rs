@@ -19,7 +19,6 @@ use eyre::{
     ContextCompat as _,
     Result,
     WrapErr as _,
-    bail,
 };
 use pound::ValueEnum;
 use toml_edit::{
@@ -29,7 +28,10 @@ use toml_edit::{
     value,
 };
 
-use crate::shorturl::ShortUrls;
+use crate::{
+    error::user_bail,
+    shorturl::ShortUrls,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PinType {
@@ -62,7 +64,7 @@ impl FromStr for PinType {
             "flake" => Ok(Self::Flake),
             "fetch" => Ok(Self::Fetch),
             "fixed" => Ok(Self::Fixed),
-            other => bail!("unknown pin type '{other}' (expected flake|fetch|fixed)"),
+            other => user_bail!("unknown pin type '{other}' (expected flake|fetch|fixed)"),
         }
     }
 }
@@ -110,7 +112,7 @@ impl FromStr for Unpack {
         match s {
             "tarball" => Ok(Self::Tarball),
             "file" => Ok(Self::File),
-            other => bail!("unknown unpack '{other}' (expected tarball|file)"),
+            other => user_bail!("unknown unpack '{other}' (expected tarball|file)"),
         }
     }
 }
@@ -159,7 +161,7 @@ impl Input {
             })
             .transpose()?;
         if pin_type != PinType::Fixed && unpack.is_some() {
-            bail!("input '{name}': unpack is only valid for type = \"fixed\"");
+            user_bail!("input '{name}': unpack is only valid for type = \"fixed\"");
         }
         let follows = match entry.get("follows") {
             Some(follows_item) => {
@@ -335,7 +337,7 @@ impl<'a> AllFollowTable<'a> {
                     out.insert(alias.to_owned(), key.to_owned());
                 }
             } else {
-                bail!("all_follow.{key} must be a string or array of strings");
+                user_bail!("all_follow.{key} must be a string or array of strings");
             }
         }
         Ok(out)

@@ -18,10 +18,9 @@ use std::{
     str::FromStr,
 };
 
-use eyre::{
-    Result,
-    bail,
-};
+use eyre::Result;
+
+use crate::error::user_bail;
 
 /// fetchable pin source, from an expanded pins.toml url
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,7 +101,7 @@ impl FromStr for Source {
             let fields = parse_query_fields(raw_query);
             let segs = path.split('/').collect::<Vec<&str>>();
             if segs.len() < 2 {
-                bail!("malformed github url: {expanded}");
+                user_bail!("malformed github url: {expanded}");
             }
             let reff = fields
                 .reff
@@ -117,7 +116,7 @@ impl FromStr for Source {
         }
         if let Some(body) = expanded.strip_prefix("gitlab:") {
             let Some(parsed) = gitlab::parse_flake_url(body) else {
-                bail!("malformed gitlab url: {expanded}");
+                user_bail!("malformed gitlab url: {expanded}");
             };
             return Ok(Self::Gitlab {
                 host:  parsed.host,
@@ -146,7 +145,7 @@ impl FromStr for Source {
                 url: expanded.to_owned(),
             });
         }
-        bail!("unsupported url scheme: {expanded}")
+        user_bail!("unsupported url scheme: {expanded}")
     }
 }
 
