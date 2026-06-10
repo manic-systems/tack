@@ -6,6 +6,7 @@ let
     attrNames
     attrValues
     concatMap
+    elem
     elemAt
     filter
     foldl'
@@ -56,17 +57,34 @@ let
           acc
       ) { } (attrNames all_follow_raw);
 
+      knownTypes = [
+        "github"
+        "gitlab"
+        "git"
+        "tarball"
+        "path"
+        "indirect"
+      ];
+
       # relative path nodes live inside the source copy, so return directly
       # because fetchTree rejects unlocked paths in pure eval
       fetchPin =
         name:
-        let
-          node = lock.${name};
-        in
-        if (node.type or "") == "path" && substring 0 1 node.path != "/" then
-          { outPath = ./. + ("/" + node.path); }
+        if !(lock ? ${name}) then
+          throw "tack: pin '${name}' has no lock entry; run tack update"
         else
-          fetchTree node;
+          let
+            node = lock.${name};
+          in
+          if (node.type or "") == "path" && substring 0 1 node.path != "/" then
+            {
+              outPath = ./. + ("/" + node.path);
+              lastModified = 0;
+            }
+          else if !(elem (node.type or "") knownTypes) then
+            throw "tack: unknown lock type '${node.type or "?"}' for pin '${name}'"
+          else
+            fetchTree node;
 
       fetchFixed =
         name: entry:
@@ -96,8 +114,17 @@ let
         upLock: nodeName: path:
         if path == [ ] then
           nodeName
+        else if !(upLock.nodes ? ${nodeName}) then
+          throw "tack: follows path dead-end: no node '${nodeName}' in flake.lock"
         else
-          walkPath upLock (resolveSpec upLock upLock.nodes.${nodeName}.inputs.${head path}) (tail path);
+          let
+            key = head path;
+            inputs = upLock.nodes.${nodeName}.inputs or { };
+          in
+          if !(inputs ? ${key}) then
+            throw "tack: follows path dead-end: node '${nodeName}' has no input '${key}'"
+          else
+            walkPath upLock (resolveSpec upLock inputs.${key}) (tail path);
 
       followsFor =
         pin:
