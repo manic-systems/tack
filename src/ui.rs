@@ -13,6 +13,7 @@ use std::{
         Mutex,
         atomic::{
             AtomicBool,
+            AtomicUsize,
             Ordering,
         },
     },
@@ -22,6 +23,12 @@ use std::{
     },
     time::Duration,
 };
+
+use terminal_size::{
+    Width,
+    terminal_size,
+};
+use unicode_width::UnicodeWidthChar as _;
 
 use crate::fetch::{
     BranchComparison,
@@ -60,6 +67,7 @@ pub struct Display {
     states: Arc<Mutex<Vec<PinStatus>>>,
     names:  Arc<[String]>,
     stop:   Arc<AtomicBool>,
+    rows:   Arc<AtomicUsize>,
     handle: Option<JoinHandle<()>>,
     tty:    bool,
 }
@@ -70,39 +78,43 @@ impl Display {
         let states = Arc::new(Mutex::new(vec![PinStatus::Pending; initial_names.len()]));
         let names = initial_names.into();
         let stop = Arc::new(AtomicBool::new(false));
+        let rows = Arc::new(AtomicUsize::new(0));
 
         let handle = tty.then(|| {
             let states_for_draw = Arc::clone(&states);
             let names_for_draw = Arc::clone(&names);
             let stop_for_draw = Arc::clone(&stop);
+            let rows_for_draw = Arc::clone(&rows);
             thread::spawn(move || {
-                let mut drawn = false;
+                let mut drawn_rows = 0_usize;
                 let mut frame = 0;
                 while !stop_for_draw.load(Ordering::Relaxed) {
-                    FrameRenderer::new(
+                    drawn_rows = FrameRenderer::new(
                         &names_for_draw,
                         &states_for_draw.lock().unwrap(),
                         frame,
-                        drawn,
+                        drawn_rows,
                     )
                     .draw();
-                    drawn = true;
+                    rows_for_draw.store(drawn_rows, Ordering::Relaxed);
                     frame = frame.wrapping_add(1);
                     thread::sleep(Duration::from_millis(67));
                 }
-                FrameRenderer::new(
+                drawn_rows = FrameRenderer::new(
                     &names_for_draw,
                     &states_for_draw.lock().unwrap(),
                     frame,
-                    drawn,
+                    drawn_rows,
                 )
                 .draw();
+                rows_for_draw.store(drawn_rows, Ordering::Relaxed);
             })
         });
         Self {
             states,
             names,
             stop,
+            rows,
             handle,
             tty,
         }
@@ -137,7 +149,7 @@ impl Display {
         let mut out = io::stdout().lock();
         if self.tty {
             // rewind to the first pin row, clear the spinner output
-            let _ = write!(out, "\x1b[{}A\x1b[J", self.names.len());
+            let _ = write!(out, "\x1b[{}A\x1b[J", self.rows.load(Ordering::Relaxed));
             for ((name, status), entry) in self.names.iter().zip(states.iter()).zip(logs.iter()) {
                 let line = StatusLine::new(name, status);
                 let _ = writeln!(out, "{}", line.tty());
@@ -227,41 +239,86 @@ impl<'a> CommitLogLines<'a> {
 }
 
 struct FrameRenderer<'a> {
-    names:  &'a [String],
-    states: &'a [PinStatus],
-    frame:  usize,
-    drawn:  bool,
+    names:      &'a [String],
+    states:     &'a [PinStatus],
+    frame:      usize,
+    drawn_rows: usize,
 }
 
 impl<'a> FrameRenderer<'a> {
-    const fn new(names: &'a [String], states: &'a [PinStatus], frame: usize, drawn: bool) -> Self {
+    const fn new(
+        names: &'a [String],
+        states: &'a [PinStatus],
+        frame: usize,
+        drawn_rows: usize,
+    ) -> Self {
         Self {
             names,
             states,
             frame,
-            drawn,
+            drawn_rows,
         }
     }
 
-    fn draw(&self) {
+    fn draw(&self) -> usize {
         let mut out = String::new();
+        let terminal_width = terminal_width();
 
-        if self.drawn {
-            let _ = write!(out, "\x1b[{}A", self.names.len());
+        if self.drawn_rows > 0 {
+            let _ = write!(out, "\x1b[{}A", self.drawn_rows);
         }
 
+        let mut rows = 0_usize;
         for (name, status) in self.names.iter().zip(self.states) {
-            out.push_str("\x1b[2K");
-            let _ = writeln!(
-                out,
-                "{}",
-                StatusLine::new(name, status).tty_with_frame(self.frame)
-            );
+            let line = StatusLine::new(name, status).tty_with_frame(self.frame);
+            for segment in terminal_segments(&line) {
+                out.push_str("\x1b[2K");
+                let _ = writeln!(out, "{segment}");
+                rows += visual_rows(segment, terminal_width);
+            }
         }
 
         let mut stdout = io::stdout().lock();
         let _ = stdout.write_all(out.as_bytes());
         let _ = stdout.flush();
+        rows
+    }
+}
+
+fn terminal_width() -> usize {
+    terminal_size().map_or(80, |(Width(width), _)| usize::from(width).max(1))
+}
+
+fn terminal_segments(line: &str) -> impl Iterator<Item = &str> {
+    line.split('\n')
+        .map(|segment| segment.strip_suffix('\r').unwrap_or(segment))
+}
+
+fn visual_rows(line: &str, terminal_width: usize) -> usize {
+    visible_width(line).saturating_sub(1) / terminal_width + 1
+}
+
+fn visible_width(line: &str) -> usize {
+    let mut width = 0_usize;
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            skip_ansi_escape(&mut chars);
+        } else {
+            width += ch.width().unwrap_or(0);
+        }
+    }
+    width
+}
+
+fn skip_ansi_escape(chars: &mut impl Iterator<Item = char>) {
+    if chars.next() != Some('[') {
+        return;
+    }
+    for ch in chars {
+        if ('@'..='~').contains(&ch) {
+            break;
+        }
     }
 }
 
