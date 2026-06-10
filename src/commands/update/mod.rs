@@ -146,6 +146,14 @@ pub fn update_cli(project: &Project, names: &[String], accept: bool) -> Result<(
         display.finish();
     }
     print_warnings(&report.warnings);
+    let failed = report
+        .pins
+        .iter()
+        .filter(|pin| matches!(pin.outcome, UpdateOutcome::Failed(_)))
+        .count();
+    if failed > 0 {
+        user_bail!("{failed} pin(s) failed to update");
+    }
     if report.drift > 0 {
         user_bail!(
             "upstream content differs from lock (drifted pins kept; investigate, then re-run with \
