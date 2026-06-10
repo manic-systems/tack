@@ -2,14 +2,12 @@
 
 use std::sync::OnceLock;
 
-use eyre::{
-    Result,
-    bail,
-};
+use eyre::Result;
 
 mod core;
 
 use crate::{
+    error::user_bail,
     fetch::BranchComparison,
     project::Project,
     render,
@@ -149,7 +147,7 @@ pub fn update_cli(project: &Project, names: &[String], accept: bool) -> Result<(
     }
     print_warnings(&report.warnings);
     if report.drift > 0 {
-        bail!(
+        user_bail!(
             "upstream content differs from lock (drifted pins kept; investigate, then re-run with \
              --accept to relock)"
         );

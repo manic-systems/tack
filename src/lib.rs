@@ -4,6 +4,7 @@ mod app;
 mod cli;
 mod commands;
 mod dispatcher;
+mod error;
 mod fetch;
 mod history;
 mod lock;
@@ -80,7 +81,14 @@ pub fn run() -> ExitCode {
     match app::run(cmd) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            print_report(&err);
+            if err
+                .chain()
+                .any(|cause| cause.downcast_ref::<error::UserError>().is_some())
+            {
+                eprintln!("tack: {err:#}");
+            } else {
+                print_report(&err);
+            }
             exit_code(&err)
         },
     }

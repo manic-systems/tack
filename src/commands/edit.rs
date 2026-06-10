@@ -2,13 +2,11 @@
 
 use std::path::Path;
 
-use eyre::{
-    Result,
-    bail,
-};
+use eyre::Result;
 
 use super::AddRequest;
 use crate::{
+    error::user_bail,
     fetch,
     pins::{
         self,
@@ -33,11 +31,11 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
         follows,
     } = request;
     if unpack.is_some() && pin_type != PinType::Fixed {
-        bail!("--unpack is only valid with --fixed");
+        user_bail!("--unpack is only valid with --fixed");
     }
     let mut doc = project.load_pins()?;
     if doc.has_input(name) {
-        bail!("input '{name}' already exists");
+        user_bail!("input '{name}' already exists");
     }
     doc.add_input(name, url, &pins::AddInputOpts {
         pin_type,
@@ -96,7 +94,7 @@ pub(super) fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
     let removed_lock = lk.remove(name);
 
     if !removed_pin && !removed_lock {
-        bail!("no input '{name}'");
+        user_bail!("no input '{name}'");
     }
 
     if removed_pin {
@@ -112,14 +110,14 @@ pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool
     let mut doc = project.load_pins()?;
     if remove {
         if !doc.remove_alias(name) {
-            bail!("no alias '{name}'");
+            user_bail!("no alias '{name}'");
         }
         project.save_pins(&doc)?;
         println!("removed alias {name}");
     } else {
         let tpl = template.expect("template required");
         if !tpl.contains("{path}") {
-            bail!("alias template must contain '{{path}}'");
+            user_bail!("alias template must contain '{{path}}'");
         }
         doc.set_alias(name, tpl);
         project.save_pins(&doc)?;

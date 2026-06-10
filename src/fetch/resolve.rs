@@ -35,6 +35,7 @@ use super::{
     time::epoch_from_http_date,
 };
 use crate::{
+    error::user_bail,
     lock::LockedNode,
     nar,
     pins::Unpack,
@@ -89,7 +90,7 @@ fn forge_resolve_ref(url: &str, reff: Option<&str>) -> Option<String> {
 /// given
 pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<(LockedNode, String)> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
-        bail!("fixed pins require a plain http(s) URL, got: {url}");
+        user_bail!("fixed pins require a plain http(s) URL, got: {url}");
     }
     let mut resp = HttpClient::global()
         .get(url)
@@ -248,7 +249,7 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, Strin
 
 fn reject_gitlab_submodules(source: &Source, submodules: bool) -> Result<()> {
     if submodules && matches!(source, Source::Gitlab { .. }) {
-        bail!("gitlab sources do not support submodules; use a git+ URL for submodule pins");
+        user_bail!("gitlab sources do not support submodules; use a git+ URL for submodule pins");
     }
     Ok(())
 }
