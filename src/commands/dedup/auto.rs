@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::collections::{
-    BTreeMap,
-    BTreeSet,
-    HashSet,
+use std::{
+    collections::{
+        BTreeMap,
+        BTreeSet,
+        HashSet,
+    },
+    mem::discriminant,
 };
 
 use super::scan::{
@@ -263,20 +266,19 @@ fn scan_input(
     Some(batch)
 }
 
-/// keep only the observations whose source identity matches the seed
-/// (index 0 — the current lock node when present). auto-dedup may collapse
-/// inputs that follow the *same* upstream, never across repositories; an
-/// unrelated input locked under the same alias upstream (a fork or vendored
-/// copy) compares as `None` and would otherwise hijack the timestamp tiebreak
-/// in [`LockObservation::choose`] and rewrite the target to a different repo.
+/// keep only observations matching the seed in both source identity and fetch
+/// kind, so auto-dedup never realigns a target across repositories or flips its
+/// fetch mechanism (and thus its narHash).
 fn restrict_to_seed_identity(observations: &mut Vec<LockObservation>) {
-    let Some(reference) = observations
-        .first()
-        .map(|seed| SourceId::from_locked(&seed.node))
-    else {
+    let Some(seed) = observations.first() else {
         return;
     };
-    observations.retain(|obs| SourceId::from_locked(&obs.node) == reference);
+    let reference_id = SourceId::from_locked(&seed.node);
+    let reference_kind = discriminant(&seed.node);
+    observations.retain(|obs| {
+        discriminant(&obs.node) == reference_kind
+            && SourceId::from_locked(&obs.node) == reference_id
+    });
 }
 
 fn prune_stale_auto_entries(lock: &mut lock::LockFile, valid: &HashSet<String>) -> bool {
@@ -308,6 +310,10 @@ mod tests {
 
     fn github_node_in(owner: &str, repo: &str, rev: &str) -> LockedNode {
         LockedNode::new_github(owner, repo, rev, "sha256-n", 0)
+    }
+
+    fn git_node(url: &str, rev: &str) -> LockedNode {
+        LockedNode::new_git(url, "main", rev, "sha256-n", 0, false)
     }
 
     fn node_rev(node: &LockedNode) -> &str {
@@ -373,9 +379,6 @@ mod tests {
 
     #[test]
     fn restrict_to_seed_identity_drops_foreign_repo_despite_newer_timestamp() {
-        // seed (index 0) is the target's current node; a same-named input
-        // locked to a different repo upstream must not survive to the
-        // tournament, even with a much newer timestamp.
         let mut obs = vec![
             LockObservation::new(100, github_node_in("o", "r", "current")),
             LockObservation::new(900, github_node_in("fork", "r", "foreign")),
@@ -388,5 +391,20 @@ mod tests {
             .map(|entry| node_rev(&entry.node))
             .collect::<Vec<_>>();
         assert_eq!(revs, vec!["current", "sibling"]);
+    }
+
+    #[test]
+    fn restrict_to_seed_identity_drops_a_mismatched_fetch_kind() {
+        let mut obs = vec![
+            LockObservation::new(100, github_node_in("o", "r", "archive")),
+            LockObservation::new(900, git_node("https://github.com/o/r.git", "checkout")),
+        ];
+        restrict_to_seed_identity(&mut obs);
+
+        let revs = obs
+            .iter()
+            .map(|entry| node_rev(&entry.node))
+            .collect::<Vec<_>>();
+        assert_eq!(revs, vec!["archive"]);
     }
 }

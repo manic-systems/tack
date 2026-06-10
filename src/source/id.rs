@@ -12,6 +12,7 @@ use crate::{
     lock::LockedNode,
     source::{
         Source,
+        git_url,
         gitlab,
         host,
         strip_query_fragment,
@@ -45,6 +46,13 @@ pub enum SourceId {
     },
 }
 
+/// a github.com clone url folds to the same identity as a `github:` pin; github
+/// has no subgroups, so only a single owner segment qualifies.
+fn github_repo_from_git_url(url: &str) -> Option<(String, String)> {
+    let repo = git_url::parse(url)?;
+    (repo.host == "github.com" && !repo.owner.contains('/')).then_some((repo.owner, repo.repo))
+}
+
 impl SourceId {
     pub fn from_url(expanded: &str) -> Option<Self> {
         let source = expanded.parse::<Source>().ok()?;
@@ -67,6 +75,9 @@ impl SourceId {
             Source::Git { ref url, .. } => {
                 if let Some(repo) = gitlab::parse_git_url(url) {
                     return Self::gitlab(&repo.host, &repo.owner, &repo.repo);
+                }
+                if let Some((owner, repo)) = github_repo_from_git_url(url) {
+                    return Self::github(&owner, &repo);
                 }
                 Self::Git {
                     url: url.to_lowercase(),
@@ -102,6 +113,9 @@ impl SourceId {
                 let cut = strip_query_fragment(url);
                 if let Some(repo) = gitlab::parse_git_url(cut) {
                     return Some(Self::gitlab(&repo.host, &repo.owner, &repo.repo));
+                }
+                if let Some((owner, repo)) = github_repo_from_git_url(cut) {
+                    return Some(Self::github(&owner, &repo));
                 }
                 Some(Self::Git {
                     url: cut.to_lowercase(),
@@ -305,6 +319,37 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(from_url.to_string(), from_node.to_string());
+    }
+
+    #[test]
+    fn github_git_urls_fold_to_the_github_scheme_identity() {
+        let scheme = SourceId::from_url("github:o/r").unwrap();
+        let https = SourceId::from_url("git+https://github.com/o/r.git").unwrap();
+        let https_bare = SourceId::from_url("git+https://github.com/o/r").unwrap();
+        let ssh = SourceId::from_url("git+ssh://git@github.com/o/r.git").unwrap();
+        let scp = SourceId::from_url("git+git@github.com:o/r.git").unwrap();
+        let locked_git = SourceId::from_locked(&node(
+            json!({"type": "git", "url": "https://github.com/o/r.git?ref=main"}),
+        ))
+        .unwrap();
+
+        assert_eq!(scheme, https);
+        assert_eq!(scheme, https_bare);
+        assert_eq!(scheme, ssh);
+        assert_eq!(scheme, scp);
+        assert_eq!(scheme, locked_git);
+    }
+
+    #[test]
+    fn github_fold_leaves_non_github_and_deep_paths_as_git() {
+        assert!(matches!(
+            SourceId::from_url("git+https://example.com/o/r.git").unwrap(),
+            SourceId::Git { .. }
+        ));
+        assert!(matches!(
+            SourceId::from_url("git+https://github.com/o/sub/r.git").unwrap(),
+            SourceId::Git { .. }
+        ));
     }
 
     #[test]
