@@ -163,6 +163,13 @@ nix develop   # rust toolchain
 nix build     # the binary
 ```
 
+## run
+
+```
+nix run github:manic-systems/tack -- init
+nix run github:manic-systems/tack -- add nixpkgs github:NixOS/nixpkgs/nixpkgs-unstable
+```
+
 ## license
 
 EUPL-1.2. see [LICENSE](LICENSE)
