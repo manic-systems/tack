@@ -49,6 +49,20 @@
         }
       );
 
+      apps = forAllSystems (
+        system:
+        let
+          tack = self.packages.${system}.tack;
+        in
+        {
+          default = {
+            type = "app";
+            program = lib.getExe tack;
+            inherit (tack) meta;
+          };
+        }
+      );
+
       devShells = forAllSystems (
         system:
         let
