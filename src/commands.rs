@@ -16,6 +16,7 @@ use std::{
         Path,
         PathBuf,
     },
+    process::Command,
     sync::{
         Mutex,
         atomic::{
@@ -146,7 +147,8 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn init(force: bool, resolver_only: bool, flake: bool) -> Result<()> {
+#[expect(clippy::fn_params_excessive_bools, reason = "independent bool options")]
+pub fn init(force: bool, resolver_only: bool, flake: bool, import_flake: bool) -> Result<()> {
     let dir = dir();
     let (pt, lp, rp) = (pins_path(&dir), lock_path(&dir), resolver_path(&dir));
 
@@ -170,6 +172,10 @@ pub fn init(force: bool, resolver_only: bool, flake: bool) -> Result<()> {
         write_atomic(&lp, "{}\n")?;
     }
     write_atomic(&rp, RESOLVER_NIX)?;
+
+    if import_flake {
+        import_flake_inputs(&pt)?;
+    }
 
     println!("initialised tack in {}", dir.display());
     println!("  pins.toml       edit shorturls and inputs here");
@@ -277,6 +283,80 @@ override your pins, thread tackOverrides through outputs:
 
 then set `[tack] recomposable = true` in .tack/pins.toml."
     );
+}
+
+fn import_flake_inputs(pins_toml: &Path) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let path = cwd.join("flake.nix");
+
+    if path.exists() {
+        // Load flake inputs as JSON
+        let cmd = Command::new("nix-instantiate")
+            .args([
+                "--eval",
+                "--strict",
+                "--raw",
+                "-E",
+                "
+                    let
+                        flake = import ./flake.nix;
+                    in
+                    builtins.toJSON (flake.inputs or {})
+                ",
+            ])
+            .output()?;
+        let flake_inputs: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&cmd.stdout)?;
+
+        let mut doc = pins::load(pins_toml)?;
+
+        // Add each input to pins.toml
+        for (key, value) in flake_inputs {
+            let mut input = toml_edit::Table::new();
+            if let Some(url) = value.get("url")
+                && let Some(url_str) = url.as_str()
+            {
+                input["url"] = url_str.into();
+
+                // flake = false;
+                //   -> type = "fetch"
+                if let Some(input_is_flake) = value.get("flake")
+                    && input_is_flake.as_bool().is_some_and(|is_flake| !is_flake)
+                {
+                    input["type"] = "fetch".into();
+                }
+
+                // inputs.<x>.follows = "<y>";
+                //   -> follows = { <x> = "<y>" }
+                if let Some(input_follows) = value.get("inputs")
+                    && let Some(flake_follows) = input_follows.as_object()
+                {
+                    let follows: toml_edit::InlineTable = flake_follows
+                        .iter()
+                        .filter_map(|(input_key, nested_follows)| {
+                            nested_follows
+                                .as_object()
+                                .and_then(|obj| obj.get("follows"))
+                                .and_then(|follows_value| follows_value.as_str())
+                                .map(|follows_str| (input_key, follows_str))
+                        })
+                        .collect();
+                    if !follows.is_empty() {
+                        input["follows"] = follows.into();
+                    }
+                }
+
+                doc["inputs"][&key] = input.into();
+            } else {
+                eprintln!("tack: ignoring flake.nix input without url");
+            }
+        }
+
+        pins::save(pins_toml, &doc)
+    } else {
+        eprintln!("tack: flake.nix doesn't exist; not importing inputs");
+        Ok(())
+    }
 }
 
 pub fn add(
@@ -1736,7 +1816,7 @@ pub fn help() {
 
 usage:
   tack [-h|--help|help]
-  tack init [--force] [--resolver] [--flake]
+  tack init [--force] [--resolver] [--flake] [--import-flake]
   tack update [names...] [--accept]
   tack look [names...] [--verbose|-v]
   tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]

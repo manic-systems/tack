@@ -14,9 +14,10 @@ use crate::pins::{
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Init {
-        force:    bool,
-        resolver: bool,
-        flake:    bool,
+        force:        bool,
+        resolver:     bool,
+        flake:        bool,
+        import_flake: bool,
     },
     Update {
         names:  Vec<String>,
@@ -74,11 +75,13 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
             let mut force = false;
             let mut resolver = false;
             let mut flake = false;
+            let mut import_flake = false;
             while let Some(arg) = parser.next()? {
                 match arg {
                     Long("force") => force = true,
                     Long("resolver") => resolver = true,
                     Long("flake") => flake = true,
+                    Long("import-flake") => import_flake = true,
                     Short(_) | Long(_) | Value(_) => return Err(arg.unexpected().into()),
                 }
             }
@@ -86,6 +89,7 @@ fn parse_parser(mut parser: lexopt::Parser) -> Result<Command> {
                 force,
                 resolver,
                 flake,
+                import_flake,
             })
         },
         "update" | "look" => {

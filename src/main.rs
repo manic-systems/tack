@@ -33,17 +33,22 @@ fn run() -> anyhow::Result<()> {
             force,
             resolver,
             flake,
+            import_flake,
         } => {
             let label = if resolver {
                 "init --resolver"
             } else if flake {
                 "init --flake"
+            } else if import_flake {
+                "init --import-flake"
             } else if force {
                 "init --force"
             } else {
                 "init"
             };
-            recorded(label, move || commands::init(force, resolver, flake))
+            recorded(label, move || {
+                commands::init(force, resolver, flake, import_flake)
+            })
         },
         Command::Look { names, verbose } => commands::look(&names, verbose),
         Command::Dedup => commands::dedup(),
