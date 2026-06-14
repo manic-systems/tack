@@ -199,6 +199,8 @@ pub enum LockedNode {
     #[serde(rename = "tarball")]
     Tarball {
         url:           String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rev:           Option<String>,
         #[serde(rename = "narHash", skip_serializing_if = "Option::is_none")]
         nar_hash:      Option<String>,
         #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
@@ -325,8 +327,25 @@ impl LockedNode {
     {
         Self::Tarball {
             url:           url.into(),
+            rev:           None,
             nar_hash:      Some(nar_hash.into()),
             last_modified: Some(last_modified),
+            extra:         BTreeMap::new(),
+        }
+    }
+
+    // channel tarballs ship their rev, fetchTree derives lastModified itself
+    pub fn new_tarball_with_rev<Url, Rev, NarHash>(url: Url, rev: Rev, nar_hash: NarHash) -> Self
+    where
+        Url: Into<String>,
+        Rev: Into<String>,
+        NarHash: Into<String>,
+    {
+        Self::Tarball {
+            url:           url.into(),
+            rev:           Some(rev.into()),
+            nar_hash:      Some(nar_hash.into()),
+            last_modified: None,
             extra:         BTreeMap::new(),
         }
     }

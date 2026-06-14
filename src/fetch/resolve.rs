@@ -2,6 +2,7 @@
 
 use std::{
     borrow::Cow,
+    fs,
     io::Read as _,
     path::{
         Path,
@@ -241,7 +242,13 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, Strin
             let dir = tempfile::tempdir()?;
             let root = unpack_tar_stream(resp.body_mut().as_reader(), format, dir.path())?;
             let nar_hash = nar::hash_path(&root)?;
-            let node = LockedNode::new_tarball(immutable_url.clone(), nar_hash, last_modified);
+            // record a shipped rev so fetchTree exposes rev/shortRev
+            let node = git_revision_of(&root).map_or_else(
+                || LockedNode::new_tarball(immutable_url.clone(), nar_hash.clone(), last_modified),
+                |rev| {
+                    LockedNode::new_tarball_with_rev(immutable_url.clone(), rev, nar_hash.clone())
+                },
+            );
             Ok((node, immutable_url))
         },
         Source::Path { ref path } => {
@@ -368,6 +375,15 @@ fn parse_link_immutable(header: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// embedded `.git-revision`, if present and a plausible git object id
+fn git_revision_of(root: &Path) -> Option<String> {
+    let contents = fs::read_to_string(root.join(".git-revision")).ok()?;
+    let rev = contents.trim();
+    let looks_like_rev =
+        (7..=64).contains(&rev.len()) && rev.bytes().all(|byte| byte.is_ascii_hexdigit());
+    looks_like_rev.then(|| rev.to_owned())
 }
 
 pub fn raw(url: &str) -> FetchResult<String> {
