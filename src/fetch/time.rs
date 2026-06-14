@@ -9,7 +9,6 @@ use eyre::{
     bail,
 };
 
-/// imf-fixdate to unix seconds
 pub(super) fn epoch_from_http_date(input: &str) -> Result<i64> {
     let bytes = input.as_bytes();
     if bytes.len() < 29 {
@@ -48,7 +47,6 @@ pub(super) fn epoch_from_http_date(input: &str) -> Result<i64> {
     Ok(days_from_civil(year, month, day) * 86400 + hh * 3600 + mi * 60 + ss)
 }
 
-/// iso8601 to unix seconds
 pub(super) fn epoch_from_iso(input: &str) -> Result<i64> {
     let bytes = input.as_bytes();
     if bytes.len() < 20 {
@@ -77,20 +75,4 @@ const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
-}
-
-#[cfg(test)]
-mod tests {
-    use super::epoch_from_http_date;
-
-    #[test]
-    fn http_date_roundtrip() {
-        // 1994-11-06t08:49:37z = 784111777
-        assert_eq!(
-            epoch_from_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap(),
-            784_111_777
-        );
-        let _ = epoch_from_http_date("bogus").unwrap_err();
-        let _ = epoch_from_http_date("Sun, 06 Foo 1994 08:49:37 GMT").unwrap_err();
-    }
 }

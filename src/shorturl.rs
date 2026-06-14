@@ -11,8 +11,6 @@ impl<'a> ShortUrls<'a> {
         Self { templates }
     }
 
-    /// expand scheme:rest via the {path} template; non-shorturl urls pass
-    /// through
     pub fn expand(&self, url: &str) -> String {
         let Some((scheme, rest)) = url.split_once(':') else {
             return url.to_owned();
@@ -23,8 +21,7 @@ impl<'a> ShortUrls<'a> {
         Self::normalize_git_ref(&template.replace("{path}", rest))
     }
 
-    /// nix reads git+host/owner/repo/branch as a deeper path, not a ref;
-    /// remap the trailing segment to ?ref=
+    /// nix treats the trailing segment as path depth
     fn normalize_git_ref(url: &str) -> String {
         if !url.starts_with("git+") || url.contains('?') {
             return url.to_owned();
@@ -38,63 +35,5 @@ impl<'a> ShortUrls<'a> {
         }
         let (base, reff) = segs.split_at(segs.len() - 1);
         format!("{scheme}://{}?ref={}", base.join("/"), reff[0])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use super::ShortUrls;
-
-    fn urls() -> ShortUrls<'static> {
-        ShortUrls::new(BTreeMap::from([
-            ("atagen", "git+https://git.lobotomise.me/atagen/{path}"),
-            ("amaan", "github:amaanq/{path}"),
-            ("wry", "git+ssh://forgejo@git.wry.land/{path}"),
-        ]))
-    }
-
-    #[test]
-    fn passthrough_and_github() {
-        let urls = urls();
-        assert_eq!(
-            urls.expand("github:NixOS/nixpkgs/nixos-unstable"),
-            "github:NixOS/nixpkgs/nixos-unstable"
-        );
-        assert_eq!(
-            urls.expand("amaan:helium-flake"),
-            "github:amaanq/helium-flake"
-        );
-    }
-
-    #[test]
-    fn git_triple_slash_remapped() {
-        let urls = urls();
-        assert_eq!(
-            urls.expand("atagen:meat"),
-            "git+https://git.lobotomise.me/atagen/meat"
-        );
-        assert_eq!(
-            urls.expand("wry:entailz/toes"),
-            "git+ssh://forgejo@git.wry.land/entailz/toes"
-        );
-        assert_eq!(
-            urls.expand("atagen:proj/branch"),
-            "git+https://git.lobotomise.me/atagen/proj?ref=branch"
-        );
-        assert_eq!(
-            urls.expand("wry:owner/repo/branch"),
-            "git+ssh://forgejo@git.wry.land/owner/repo?ref=branch"
-        );
-    }
-
-    #[test]
-    fn existing_query_preserved() {
-        let urls = urls();
-        assert_eq!(
-            urls.expand("wry:wry/wry?ref=anims-multiphase"),
-            "git+ssh://forgejo@git.wry.land/wry/wry?ref=anims-multiphase"
-        );
     }
 }

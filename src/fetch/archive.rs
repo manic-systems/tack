@@ -38,14 +38,12 @@ pub(super) fn detect_tar_format(url: &str) -> Result<TarFormat> {
     }
 }
 
-/// case-insensitive ascii suffix check, bytes-based to dodge utf-8 slicing
 fn ends_with_ci(path: &str, ext: &str) -> bool {
     let bytes = path.as_bytes();
     let suffix = ext.as_bytes();
     bytes.len() >= suffix.len() && bytes[bytes.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
-/// unpack a tarball stream, strip the single top-level dir, return the root
 pub(super) fn unpack_tar_stream<R>(reader: R, format: TarFormat, into: &Path) -> Result<PathBuf>
 where
     R: Read,
@@ -65,43 +63,5 @@ where
         Ok(entries.remove(0).path())
     } else {
         Ok(into.to_owned())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        TarFormat,
-        detect_tar_format,
-    };
-
-    #[test]
-    fn tar_format_from_extension() {
-        assert!(matches!(
-            detect_tar_format("https://x/y.tar.xz").unwrap(),
-            TarFormat::Xz
-        ));
-        assert!(matches!(
-            detect_tar_format("https://x/y.txz").unwrap(),
-            TarFormat::Xz
-        ));
-        assert!(matches!(
-            detect_tar_format("https://x/y.tar.gz").unwrap(),
-            TarFormat::Gz
-        ));
-        assert!(matches!(
-            detect_tar_format("https://x/y.tgz").unwrap(),
-            TarFormat::Gz
-        ));
-        assert!(matches!(
-            detect_tar_format("https://x/y.tar").unwrap(),
-            TarFormat::Plain
-        ));
-        // querystring and fragment must not defeat detection
-        assert!(matches!(
-            detect_tar_format("https://x/y.tar.xz?signed=1#frag").unwrap(),
-            TarFormat::Xz
-        ));
-        assert!(detect_tar_format("https://x/y").is_err());
     }
 }

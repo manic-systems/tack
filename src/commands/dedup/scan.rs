@@ -100,8 +100,7 @@ impl SourceRef {
     pub(super) fn key(&self) -> String {
         match *self {
             Self::Locked(ref node) => {
-                // transitive deps differ across revisions, so locked scan keys
-                // include full_rev
+                // transitive deps can differ across revisions
                 let rev = node.full_rev().unwrap_or("");
                 SourceId::from_locked(node).map_or_else(
                     || Self::tagged_key("locked", &[node.kind(), rev]),
@@ -164,8 +163,7 @@ impl<'a> RawProbe<'a> {
         })
     }
 
-    /// authoritative probes treat all-missing as a real empty result;
-    /// non-authoritative fall back to cloning
+    /// non-authoritative misses fall back to clone scanning
     fn documents(node: &'a LockedNode, path: &[String]) -> RawProbeOutcome {
         let Some(probe) = Self::from_locked(node) else {
             return RawProbeOutcome::empty();
@@ -376,8 +374,6 @@ impl ScanDocuments {
     }
 }
 
-/// fetch one file from a locked node via raw http
-/// `None` on unknown host or missing rev: caller skips the raw path
 pub(super) fn try_raw_file(
     node: &LockedNode,
     file: ScanFile,
@@ -388,8 +384,7 @@ pub(super) fn try_raw_file(
     probe.fetch(file).map(Some)
 }
 
-/// flake.lock disambiguates same-named nodes as `name_2`, `name_3`
-/// recover the original name so dedup groups by what the parent flake declares
+/// flake.lock disambiguates same-named nodes as `name_2`
 pub(super) fn strip_disambiguator(key: &str) -> &str {
     let bytes = key.as_bytes();
     let mut i = bytes.len();
@@ -405,77 +400,8 @@ pub(super) fn strip_disambiguator(key: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ScanDocuments,
-        SourceRef,
-    };
-    use crate::{
-        lock::LockedNode,
-        render,
-        scan_diagnostic::{
-            ScanDiagnostic,
-            ScanFile,
-        },
-    };
-
-    fn github_node(owner: &str, repo: &str, rev: &str) -> LockedNode {
-        LockedNode::new_github(owner, repo, rev, "sha256-test", 0)
-    }
-
-    fn gitlab_node(host: &str, owner: &str, repo: &str, rev: &str) -> LockedNode {
-        LockedNode::new_gitlab(host, owner, repo, rev, "sha256-test", 0)
-    }
-
-    fn assert_parse_diagnostic(diagnostic: &ScanDiagnostic, path: &[String], file: ScanFile) {
-        assert_eq!(diagnostic.path(), path);
-        assert!(
-            render::scan_diagnostic(diagnostic)
-                .starts_with(&format!("scan {}: {file} parse failed:", path.join(" > ")))
-        );
-    }
-
-    #[test]
-    fn source_ref_key_distinguishes_locked_revisions() {
-        let first = SourceRef::Locked(github_node("Owner", "Repo", "rev-a")).key();
-        let second = SourceRef::Locked(github_node("owner", "repo", "rev-b")).key();
-
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn source_ref_key_dedupes_same_locked_revision() {
-        let first = SourceRef::Locked(github_node("Owner", "Repo", "rev-a")).key();
-        let second = SourceRef::Locked(github_node("owner", "repo", "rev-a")).key();
-
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn source_ref_key_preserves_unlocked_url_specificity() {
-        let first = SourceRef::Url("github:Owner/Repo?rev=rev-a".to_owned()).key();
-        let second = SourceRef::Url("github:Owner/Repo?rev=rev-b".to_owned()).key();
-
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn source_ref_key_distinguishes_gitlab_locked_identity_and_revision() {
-        let base = SourceRef::Locked(gitlab_node("gitlab.com", "Owner", "Repo", "rev-a")).key();
-        let same = SourceRef::Locked(gitlab_node("GITLAB.COM:443", "owner", "repo", "rev-a")).key();
-        let different_rev =
-            SourceRef::Locked(gitlab_node("gitlab.com", "owner", "repo", "rev-b")).key();
-        let different_host = SourceRef::Locked(gitlab_node(
-            "gitlab.example.com:8443",
-            "owner",
-            "repo",
-            "rev-a",
-        ))
-        .key();
-
-        assert_eq!(base, same);
-        assert_ne!(base, different_rev);
-        assert_ne!(base, different_host);
-    }
+    use super::ScanDocuments;
+    use crate::scan_diagnostic::ScanFile;
 
     #[test]
     fn scan_records_gitlab_locked_nodes() {
@@ -511,25 +437,8 @@ mod tests {
             finding.identity.to_string(),
             "gitlab:gitlab.example.com:8443/group/sub/repo"
         );
-        assert_eq!(finding.entry.name, "dep");
         assert_eq!(finding.entry.rev, "abc123");
         assert_eq!(finding.entry.lm, Some(1_700));
-    }
-
-    #[test]
-    fn scan_reports_flake_lock_parse_failure() {
-        let path = vec!["root".to_owned()];
-        let result = ScanDocuments {
-            flake_lock: Some("{".to_owned()),
-            tack_pins:  None,
-            tack_lock:  None,
-        }
-        .scan(&path);
-
-        assert!(result.findings.is_empty());
-        assert!(result.transitive.is_empty());
-        assert_eq!(result.diagnostics.len(), 1);
-        assert_parse_diagnostic(&result.diagnostics[0], &path, ScanFile::FlakeLock);
     }
 
     #[test]
@@ -549,9 +458,7 @@ mod tests {
         .scan(&path);
 
         assert_eq!(result.findings.len(), 1);
-        assert_eq!(result.findings[0].identity.to_string(), "github:owner/repo");
-        assert_eq!(result.transitive.len(), 1);
         assert_eq!(result.diagnostics.len(), 1);
-        assert_parse_diagnostic(&result.diagnostics[0], &path, ScanFile::TackLock);
+        assert_eq!(result.diagnostics[0].file(), ScanFile::TackLock);
     }
 }

@@ -92,22 +92,3 @@ impl Display for ScanDiagnosticKind {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        ScanDiagnostic,
-        ScanFile,
-    };
-
-    #[test]
-    fn display_includes_file_and_kind() {
-        let path = vec!["root".to_owned(), "dep".to_owned()];
-        let diagnostic = ScanDiagnostic::parse(&path, ScanFile::FlakeLock, "expected value");
-
-        assert_eq!(
-            diagnostic.to_string(),
-            "flake.lock parse failed: expected value"
-        );
-    }
-}

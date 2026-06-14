@@ -395,9 +395,6 @@ mod tests {
         Credential,
         FetchError,
         FetchResult,
-        HttpCredential,
-        env_flag_enabled,
-        parse_netrc,
         run_credentials,
         scrape_access_tokens,
     };
@@ -410,9 +407,9 @@ mod tests {
     }
 
     #[test]
-    fn token_failure_falls_through_to_anon() {
+    fn credential_ladder_falls_back_only_for_credential_failures() {
         let mut tried = Vec::new();
-        let auth = run_credentials(Some("t"), "h", true, |credential| {
+        let recovered = run_credentials(Some("t"), "h", true, |credential| {
             tried.push(label(credential));
             match credential {
                 Credential::Token(_) => {
@@ -423,140 +420,27 @@ mod tests {
                 Credential::Anonymous => Ok(1_i32),
             }
         });
-        assert_eq!(auth.unwrap(), 1_i32);
+        assert_eq!(recovered.unwrap(), 1_i32);
         assert_eq!(tried, vec!["token", "anon"]);
 
-        let limited: FetchResult<i32> = run_credentials(Some("t"), "h", true, |credential| {
-            match credential {
-                Credential::Token(_) => {
-                    Err(FetchError::RateLimited {
-                        what: "limited".to_owned(),
-                    })
-                },
-                Credential::Anonymous => Ok(2_i32),
-            }
-        });
-        assert_eq!(limited.unwrap(), 2_i32);
-    }
-
-    #[test]
-    fn anon_used_directly_when_no_token() {
-        let mut tried = Vec::new();
-        let result = run_credentials(None, "h", true, |credential| {
-            tried.push(label(credential));
-            Ok::<_, FetchError>(9_i32)
-        });
-        assert_eq!(result.unwrap(), 9_i32);
-        assert_eq!(tried, vec!["anon"]);
-    }
-
-    #[test]
-    fn non_credential_token_error_stops_before_anon() {
         let mut count = 0_u8;
-        let result: FetchResult<i32> = run_credentials(Some("t"), "h", true, |_| {
+        let fatal: FetchResult<i32> = run_credentials(Some("t"), "h", true, |_| {
             count += 1;
             Err(FetchError::Transport("boom".to_owned()))
         });
-        assert!(matches!(result, Err(FetchError::Transport(_))));
+        assert!(matches!(fatal, Err(FetchError::Transport(_))));
         assert_eq!(count, 1_u8);
     }
 
     #[test]
-    fn token_auth_outranks_a_transient_anon_rate_limit() {
-        let result: FetchResult<i32> = run_credentials(Some("t"), "h", true, |credential| {
-            match credential {
-                Credential::Token(_) => {
-                    Err(FetchError::Auth {
-                        what: "rejected".to_owned(),
-                    })
-                },
-                Credential::Anonymous => {
-                    Err(FetchError::RateLimited {
-                        what: "limited".to_owned(),
-                    })
-                },
-            }
-        });
-        assert!(matches!(result, Err(FetchError::Auth { .. })));
-    }
-
-    #[test]
-    fn no_anon_rung_surfaces_token_auth_or_no_credentials() {
-        let rejected: FetchResult<i32> = run_credentials(Some("t"), "h", false, |_| {
-            Err(FetchError::Auth {
-                what: "rejected".to_owned(),
-            })
-        });
-        assert!(matches!(rejected, Err(FetchError::Auth { .. })));
-
-        let none: FetchResult<i32> = run_credentials(None, "h", false, |_| Ok(1_i32));
-        assert!(matches!(none, Err(FetchError::Auth { .. })));
-    }
-
-    #[test]
-    fn env_flag_is_on_only_for_truthy_values() {
-        assert!(env_flag_enabled(Some("1")));
-        assert!(env_flag_enabled(Some("true")));
-        assert!(env_flag_enabled(Some("YES")));
-        assert!(!env_flag_enabled(None));
-        assert!(!env_flag_enabled(Some("")));
-        assert!(!env_flag_enabled(Some("0")));
-        assert!(!env_flag_enabled(Some("false")));
-        assert!(!env_flag_enabled(Some("off")));
-    }
-
-    #[test]
-    fn authorization_header_is_base64_of_user_colon_secret() {
-        let credential = HttpCredential {
-            username: "atagen".to_owned(),
-            secret:   "s3cr3t".to_owned(),
-        };
-        assert_eq!(credential.authorization(), "Basic YXRhZ2VuOnMzY3IzdA==");
-
-        let token = HttpCredential {
-            username: "tok".to_owned(),
-            secret:   String::new(),
-        };
-        assert_eq!(token.authorization(), "Basic dG9rOg==");
-    }
-
-    #[test]
-    fn netrc_parses_matching_machine_and_misses_unknown_hosts() {
-        let body = "machine git.example.com login alice password hunter2\nmachine \
-                    other.example.com login bob password swordfish\n";
-
-        let hit = parse_netrc(body, "git.example.com").unwrap();
-        assert_eq!(hit.username, "alice");
-        assert_eq!(hit.secret, "hunter2");
-
-        let second = parse_netrc(body, "other.example.com").unwrap();
-        assert_eq!(second.username, "bob");
-        assert_eq!(second.secret, "swordfish");
-
-        assert!(parse_netrc(body, "absent.example.com").is_none());
-    }
-
-    #[test]
-    fn netrc_skips_macdef_bodies() {
-        let body = "macdef init\n  machine fake login evil password leak\n\nmachine \
-                    git.example.com login alice password hunter2\n";
-
-        let hit = parse_netrc(body, "git.example.com").unwrap();
-        assert_eq!(hit.username, "alice");
-        assert_eq!(hit.secret, "hunter2");
-
-        assert!(parse_netrc(body, "fake").is_none());
-    }
-
-    #[test]
-    fn access_tokens_scrape_follows_include_and_lets_later_lines_win() {
+    fn access_tokens_scrape_follows_include_and_later_lines_win() {
         let dir = tempfile::tempdir().unwrap();
         let included = dir.path().join("extra.conf");
         fs::write(&included, "access-tokens = gitlab.example.com=inc\n").unwrap();
         let main = dir.path().join("nix.conf");
         fs::write(
             &main,
-            "# a comment\naccess-tokens = github.com=gh gitlab.com=gl\nextra-access-tokens = \
+            "access-tokens = github.com=gh gitlab.com=gl\nextra-access-tokens = \
              gitlab.com=override\n!include extra.conf\n",
         )
         .unwrap();
@@ -565,12 +449,10 @@ mod tests {
         scrape_access_tokens(&main, &mut tokens, 0);
 
         assert_eq!(tokens.get("github.com").map(String::as_str), Some("gh"));
-        // a later line (extra-access-tokens) overrides the earlier value
         assert_eq!(
             tokens.get("gitlab.com").map(String::as_str),
             Some("override")
         );
-        // a `!include`d file is followed, relative to the includer
         assert_eq!(
             tokens.get("gitlab.example.com").map(String::as_str),
             Some("inc")

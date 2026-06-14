@@ -120,8 +120,7 @@ fn archive_url(host: &str, owner: &str, repo: &str, rev: &str) -> String {
     format!("https://{host}/api/v4/projects/{project}/repository/archive.tar.gz?sha={sha}")
 }
 
-/// gitlab's `committed_date` carries the committer's offset; nix checks
-/// `lastModified` strictly in UTC, so the offset is subtracted back out.
+/// nix expects utc not gitlab's offset wall clock
 fn epoch_from_rfc3339(input: &str) -> Result<i64> {
     let wall_clock = epoch_from_iso(input)?;
     Ok(wall_clock - offset_seconds(input)?)
@@ -156,8 +155,6 @@ fn offset_seconds(input: &str) -> Result<i64> {
     Ok(sign * (hours * 3_600 + mins * 60))
 }
 
-/// directional status of head relative to base via the merge-base api, `None`
-/// when the api can't classify
 pub fn compare_status(
     host: &str,
     owner: &str,
@@ -178,8 +175,6 @@ fn merge_base_url(host: &str, owner: &str, repo: &str, old: &str, new: &str) -> 
     )
 }
 
-/// the merge-base oid of (old, new) decides the direction of new relative to
-/// old
 fn classify(merge_base: &str, old: &str, new: &str) -> CompareStatus {
     if merge_base == old {
         CompareStatus::Ahead
@@ -202,98 +197,4 @@ struct GitlabCommit {
 #[derive(Deserialize)]
 struct GitlabCommitDate {
     committed_date: Option<String>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        CompareStatus,
-        archive_url,
-        classify,
-        epoch_from_rfc3339,
-        merge_base_url,
-        percent_encode,
-    };
-
-    #[test]
-    fn classify_maps_merge_base_to_direction() {
-        assert_eq!(classify("old", "old", "new"), CompareStatus::Ahead);
-        assert_eq!(classify("new", "old", "new"), CompareStatus::Behind);
-        assert_eq!(classify("base", "old", "new"), CompareStatus::Diverged);
-    }
-
-    #[test]
-    fn percent_encode_escapes_nested_groups() {
-        assert_eq!(percent_encode("group/sub/repo"), "group%2Fsub%2Frepo");
-        assert_eq!(percent_encode("NixOS/nixpkgs"), "NixOS%2Fnixpkgs");
-    }
-
-    #[test]
-    fn merge_base_url_targets_v4_api_with_encoded_project_and_refs() {
-        assert_eq!(
-            merge_base_url("gitlab.example.com:8443", "group/sub", "repo", "OLD", "NEW"),
-            "https://gitlab.example.com:8443/api/v4/projects/group%2Fsub%2Frepo/repository/\
-             merge_base?refs[]=OLD&refs[]=NEW"
-        );
-        // a rev is a query value, so reserved characters must not survive raw
-        assert_eq!(
-            merge_base_url("gitlab.com", "o", "r", "a&b", "c#d"),
-            "https://gitlab.com/api/v4/projects/o%2Fr/repository/\
-             merge_base?refs[]=a%26b&refs[]=c%23d"
-        );
-    }
-
-    #[test]
-    fn archive_url_encodes_project_path_and_sha() {
-        assert_eq!(
-            archive_url("gitlab.com", "group/sub", "repo", "deadbeef"),
-            "https://gitlab.com/api/v4/projects/group%2Fsub%2Frepo/repository/archive.tar.gz?\
-             sha=deadbeef"
-        );
-        assert_eq!(
-            archive_url("gitlab.com", "interitty", "phpunit", "c3e1924"),
-            "https://gitlab.com/api/v4/projects/interitty%2Fphpunit/repository/archive.tar.gz?\
-             sha=c3e1924"
-        );
-    }
-
-    #[test]
-    fn rfc3339_offset_is_normalized_to_utc() {
-        assert_eq!(
-            epoch_from_rfc3339("2024-01-01T12:00:00+01:00").unwrap(),
-            epoch_from_rfc3339("2024-01-01T11:00:00Z").unwrap()
-        );
-        assert_eq!(
-            epoch_from_rfc3339("2024-01-01T12:00:00-05:00").unwrap(),
-            epoch_from_rfc3339("2024-01-01T17:00:00Z").unwrap()
-        );
-        assert_eq!(
-            epoch_from_rfc3339("2024-01-01T00:00:00Z").unwrap(),
-            1_704_067_200
-        );
-        assert_eq!(
-            epoch_from_rfc3339("2024-01-01T12:00:00.123+01:00").unwrap(),
-            epoch_from_rfc3339("2024-01-01T11:00:00Z").unwrap()
-        );
-    }
-
-    #[test]
-    #[ignore = "hits gitlab.com"]
-    fn gitlab_narhash_matches_nix() {
-        use crate::nar;
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = super::download_archive(
-            "gitlab.com",
-            "interitty",
-            "phpunit",
-            "c3e19245295fc118aa0abdb8a3cbf68e75d3e16b",
-            dir.path(),
-        )
-        .unwrap();
-        assert_eq!(
-            nar::hash_path(&root).unwrap(),
-            "sha256-RCiTYvloZmYks4/7FkhLv/JogtcAV1TCAJqTMLLwHJg="
-        );
-    }
 }

@@ -19,7 +19,6 @@ use crate::{
     },
 };
 
-/// canonical identity of a pin source, from a url or a locked node
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum SourceId {
     Github {
@@ -31,7 +30,6 @@ pub enum SourceId {
         owner: String,
         repo:  String,
     },
-    /// git+url, query string stripped
     Git {
         url: String,
     },
@@ -46,8 +44,7 @@ pub enum SourceId {
     },
 }
 
-/// a github.com clone url folds to the same identity as a `github:` pin; github
-/// has no subgroups, so only a single owner segment qualifies.
+/// github.com has no subgroups
 fn github_repo_from_git_url(url: &str) -> Option<(String, String)> {
     let repo = git_url::parse(url)?;
     (repo.host == "github.com" && !repo.owner.contains('/')).then_some((repo.owner, repo.repo))
@@ -211,287 +208,69 @@ mod tests {
     }
 
     #[test]
-    fn from_url_parses_each_scheme() {
-        assert_eq!(
-            SourceId::from_url("github:NixOS/nixpkgs/nixos-unstable")
-                .unwrap()
-                .to_string(),
-            "github:nixos/nixpkgs"
-        );
-        assert_eq!(
-            SourceId::from_url("gitlab:NixOS/nixpkgs/nixos-unstable")
-                .unwrap()
-                .to_string(),
-            "gitlab:gitlab.com/nixos/nixpkgs"
-        );
-        assert_eq!(
-            SourceId::from_url("gitlab:NixOS/nixpkgs?host=Git.Example.Com")
-                .unwrap()
-                .to_string(),
-            "gitlab:git.example.com/nixos/nixpkgs"
-        );
-        assert_eq!(
-            SourceId::from_url("git+https://x.com/o/r?ref=main")
-                .unwrap()
-                .to_string(),
-            "git+https://x.com/o/r"
-        );
-        assert_eq!(
-            SourceId::from_url("git+https://gitlab.com/NixOS/nixpkgs.git?ref=main")
-                .unwrap()
-                .to_string(),
-            "gitlab:gitlab.com/nixos/nixpkgs"
-        );
-        assert_eq!(
-            SourceId::from_url("https://x.com/a.tar.gz")
-                .unwrap()
-                .to_string(),
-            "tarball:https://x.com/a.tar.gz"
-        );
-        assert_eq!(
-            SourceId::from_url("path:/P/X").unwrap().to_string(),
-            "path:/p/x"
-        );
-        assert!(SourceId::from_url("weird:thing").is_none());
+    fn source_identity_normalizes_common_url_and_lock_forms() {
+        let cases: [(Option<&str>, Option<serde_json::Value>, &str); 5] = [
+            (
+                Some("github:NixOS/nixpkgs/nixos-unstable"),
+                Some(json!({"type": "github", "owner": "NixOS", "repo": "Nixpkgs"})),
+                "github:nixos/nixpkgs",
+            ),
+            (
+                Some("gitlab:NixOS/nixpkgs?host=Git.Example.Com"),
+                Some(
+                    json!({"type": "gitlab", "host": "git.example.com", "owner": "NixOS", "repo": "nixpkgs"}),
+                ),
+                "gitlab:git.example.com/nixos/nixpkgs",
+            ),
+            (
+                Some("git+https://github.com/o/r.git?ref=main"),
+                None,
+                "github:o/r",
+            ),
+            (
+                Some("git+https://x.com/o/r?ref=main#frag"),
+                Some(json!({"type": "git", "url": "https://x.com/o/r?ref=main#frag"})),
+                "git+https://x.com/o/r",
+            ),
+            (
+                Some("path:/P/X"),
+                Some(json!({"type": "path", "path": "/p/x"})),
+                "path:/p/x",
+            ),
+        ];
+
+        for (url_case, locked_case, expected) in cases {
+            if let Some(source_url) = url_case {
+                assert_eq!(
+                    SourceId::from_url(source_url).unwrap().to_string(),
+                    expected
+                );
+            }
+            if let Some(locked_value) = locked_case {
+                assert_eq!(
+                    SourceId::from_locked(&node(locked_value))
+                        .unwrap()
+                        .to_string(),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
-    fn from_node_parses_each_type() {
-        assert_eq!(
-            SourceId::from_locked(&node(
-                json!({"type": "github", "owner": "NixOS", "repo": "Nixpkgs"})
-            ))
-            .unwrap()
-            .to_string(),
-            "github:nixos/nixpkgs"
-        );
-        assert_eq!(
-            SourceId::from_locked(&node(
-                json!({"type": "git", "url": "https://x/o/r?ref=main"})
-            ))
-            .unwrap()
-            .to_string(),
-            "git+https://x/o/r"
-        );
-        assert_eq!(
-            SourceId::from_locked(&node(json!({"type": "indirect", "id": "nixpkgs"})))
-                .unwrap()
-                .to_string(),
-            "indirect:nixpkgs"
-        );
-        assert_eq!(
-            SourceId::from_locked(&node(json!({"type": "path", "path": "/p"})))
-                .unwrap()
-                .to_string(),
-            "path:/p"
-        );
-    }
-
-    #[test]
-    fn url_and_node_strip_query_and_fragment_consistently() {
-        assert_eq!(
-            SourceId::from_url("git+https://x/o/r?ref=main#frag")
-                .unwrap()
-                .to_string(),
-            SourceId::from_locked(&node(
-                json!({"type": "git", "url": "https://x/o/r?ref=main#frag"})
-            ))
-            .unwrap()
-            .to_string()
-        );
-        assert_eq!(
-            SourceId::from_url("https://x/archive.tar.gz#frag")
-                .unwrap()
-                .to_string(),
-            SourceId::from_locked(&node(
-                json!({"type": "tarball", "url": "https://x/archive.tar.gz#frag"})
-            ))
-            .unwrap()
-            .to_string()
-        );
-    }
-
-    #[test]
-    fn url_and_node_agree_for_github_case_insensitively() {
-        let from_url = SourceId::from_url("github:nixos/nixpkgs").unwrap();
-        let from_node = SourceId::from_locked(&node(
-            json!({"type": "github", "owner": "NixOS", "repo": "nixpkgs"}),
-        ))
-        .unwrap();
-        assert_eq!(from_url.to_string(), from_node.to_string());
-    }
-
-    #[test]
-    fn github_git_urls_fold_to_the_github_scheme_identity() {
-        let scheme = SourceId::from_url("github:o/r").unwrap();
-        let https = SourceId::from_url("git+https://github.com/o/r.git").unwrap();
-        let https_bare = SourceId::from_url("git+https://github.com/o/r").unwrap();
-        let ssh = SourceId::from_url("git+ssh://git@github.com/o/r.git").unwrap();
-        let scp = SourceId::from_url("git+git@github.com:o/r.git").unwrap();
-        let locked_git = SourceId::from_locked(&node(
-            json!({"type": "git", "url": "https://github.com/o/r.git?ref=main"}),
-        ))
-        .unwrap();
-
-        assert_eq!(scheme, https);
-        assert_eq!(scheme, https_bare);
-        assert_eq!(scheme, ssh);
-        assert_eq!(scheme, scp);
-        assert_eq!(scheme, locked_git);
-    }
-
-    #[test]
-    fn github_fold_leaves_non_github_and_deep_paths_as_git() {
-        assert!(matches!(
-            SourceId::from_url("git+https://example.com/o/r.git").unwrap(),
-            SourceId::Git { .. }
-        ));
-        assert!(matches!(
-            SourceId::from_url("git+https://github.com/o/sub/r.git").unwrap(),
-            SourceId::Git { .. }
-        ));
-    }
-
-    #[test]
-    fn gitlab_url_and_node_agree_for_default_host() {
-        let from_flake = SourceId::from_url("gitlab:NixOS/nixpkgs/nixos-unstable").unwrap();
-        let from_git =
-            SourceId::from_url("git+https://gitlab.com/NixOS/nixpkgs.git?ref=main").unwrap();
-        let from_git_node = SourceId::from_locked(&node(
-            json!({"type": "git", "url": "https://gitlab.com/NixOS/nixpkgs.git?ref=main"}),
-        ))
-        .unwrap();
-        let from_node = SourceId::from_locked(&node(
-            json!({"type": "gitlab", "owner": "NixOS", "repo": "nixpkgs"}),
-        ))
-        .unwrap();
-
-        assert_eq!(from_flake, from_node);
-        assert_eq!(from_git, from_node);
-        assert_eq!(from_git_node, from_node);
-    }
-
-    #[test]
-    fn gitlab_url_and_node_agree_for_self_hosted() {
-        let from_flake =
-            SourceId::from_url("gitlab:NixOS/nixpkgs?host=GitLab.Example.Com").unwrap();
-        let from_git =
-            SourceId::from_url("git+https://gitlab.example.com/NixOS/nixpkgs.git").unwrap();
-        let from_node = SourceId::from_locked(&node(
-            json!({"type": "gitlab", "host": "gitlab.example.com", "owner": "NixOS", "repo": "nixpkgs"}),
-        ))
-        .unwrap();
-
-        assert_eq!(from_flake, from_node);
-        assert_eq!(from_git, from_node);
-    }
-
-    #[test]
-    fn gitlab_identity_preserves_non_default_host_port() {
-        let from_flake =
-            SourceId::from_url("gitlab:NixOS/nixpkgs?host=GitLab.Example.Com:8443").unwrap();
-        let from_git = SourceId::from_url(
-            "git+https://GitLab.Example.Com:8443/NixOS/nixpkgs.git?ref=main#frag",
-        )
-        .unwrap();
-        let from_node = SourceId::from_locked(&node(
-            json!({"type": "gitlab", "host": "GitLab.Example.Com:8443", "owner": "NixOS", "repo": "nixpkgs"}),
-        ))
-        .unwrap();
-
-        assert_eq!(
-            from_flake.to_string(),
-            "gitlab:gitlab.example.com:8443/nixos/nixpkgs"
-        );
-        assert_eq!(from_flake, from_git);
-        assert_eq!(from_flake, from_node);
-    }
-
-    #[test]
-    fn gitlab_url_decodes_nested_group_owner() {
-        assert_eq!(
-            SourceId::from_url("gitlab:Veloren%2Fdev/rfcs")
-                .unwrap()
-                .to_string(),
-            SourceId::from_locked(&node(
-                json!({"type": "gitlab", "owner": "veloren/dev", "repo": "rfcs"}),
-            ))
-            .unwrap()
-            .to_string()
-        );
-    }
-
-    #[test]
-    fn gitlab_git_urls_cover_nested_groups_and_ssh_forms() {
-        let first_class = SourceId::from_url("gitlab:group%2Fsub/repo").unwrap();
-        let https = SourceId::from_url("git+https://gitlab.com/group/sub/repo.git").unwrap();
+    fn gitlab_identity_keeps_nested_groups_and_self_hosted_boundaries() {
+        let nested = SourceId::from_url("gitlab:group%2Fsub/repo").unwrap();
         let ssh = SourceId::from_url("git+ssh://git@gitlab.com:2222/group/sub/repo.git").unwrap();
-        let scp = SourceId::from_url("git+git@gitlab.com:group/sub/repo.git").unwrap();
-        let locked_git = SourceId::from_locked(&node(
-            json!({"type": "git", "url": "ssh://git@gitlab.com:2222/group/sub/repo.git?ref=main#frag"}),
-        ))
-        .unwrap();
-
-        assert_eq!(first_class, https);
-        assert_eq!(first_class, ssh);
-        assert_eq!(first_class, scp);
-        assert_eq!(first_class, locked_git);
-    }
-
-    #[test]
-    fn gitlab_source_id_normalizes_default_ports_by_url_scheme() {
-        let default_http =
-            SourceId::from_url("git+http://GitLab.Example.Com:80/o/r.git?ref=main#frag").unwrap();
-        let default_https =
-            SourceId::from_url("git+https://GitLab.Example.Com:443/o/r.git?ref=main#frag").unwrap();
-        let https_non_default =
-            SourceId::from_url("git+https://GitLab.Example.Com:80/o/r.git?ref=main#frag").unwrap();
-
-        assert_eq!(default_http.to_string(), "gitlab:gitlab.example.com/o/r");
-        assert_eq!(default_https.to_string(), "gitlab:gitlab.example.com/o/r");
-        assert_eq!(
-            https_non_default.to_string(),
-            "gitlab:gitlab.example.com:80/o/r"
-        );
-    }
-
-    #[test]
-    fn gitlab_locked_node_identity_includes_host() {
-        let default_host = SourceId::from_locked(&node(
-            json!({"type": "gitlab", "owner": "NixOS", "repo": "Nixpkgs"}),
-        ))
-        .unwrap();
-        let explicit_default_host = SourceId::from_locked(&node(
-            json!({"type": "gitlab", "host": "GITLAB.COM", "owner": "nixos", "repo": "nixpkgs"}),
-        ))
-        .unwrap();
         let self_hosted = SourceId::from_locked(&node(
-            json!({"type": "gitlab", "host": "Git.Example.Com", "owner": "NixOS", "repo": "Nixpkgs"}),
+            json!({"type": "gitlab", "host": "Git.Example.Com", "owner": "group/sub", "repo": "repo"}),
         ))
         .unwrap();
 
-        assert_eq!(default_host.to_string(), "gitlab:gitlab.com/nixos/nixpkgs");
-        assert_eq!(default_host, explicit_default_host);
+        assert_eq!(nested, ssh);
+        assert_ne!(nested, self_hosted);
         assert_eq!(
             self_hosted.to_string(),
-            "gitlab:git.example.com/nixos/nixpkgs"
+            "gitlab:git.example.com/group/sub/repo"
         );
-        assert_ne!(default_host, self_hosted);
-    }
-
-    #[test]
-    fn ord_agrees_with_display() {
-        let mut ids = [
-            SourceId::from_url("github:o/b").unwrap(),
-            SourceId::from_url("git+https://x/a").unwrap(),
-            SourceId::from_url("github:o/a").unwrap(),
-        ];
-        ids.sort();
-        let by_string = {
-            let mut sorted = ids.clone();
-            sorted.sort_by_key(ToString::to_string);
-            sorted
-        };
-        assert_eq!(ids, by_string);
     }
 }

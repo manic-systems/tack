@@ -1,19 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-//! cross-backend branch topology model shared by every git forge
-
 use std::str::FromStr;
 
-/// direction of head relative to base, per a forge's compare endpoint
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompareStatus {
-    /// head has commits base lacks
     Ahead,
-    /// head is missing commits base has
     Behind,
-    /// each side has unique commits
     Diverged,
-    /// same commit
     Identical,
 }
 

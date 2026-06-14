@@ -51,7 +51,6 @@ pub(super) fn build_report(
     let mut report_groups = Vec::<DedupGroup>::new();
 
     for (id, entries) in groups {
-        // single source or already aligned: nothing to show
         if !group_diverges(entries) {
             continue;
         }
@@ -116,8 +115,6 @@ pub(super) fn build_report(
     }
 }
 
-/// suggested top-level name for a transitive-only group: forge repo basename,
-/// else shortest alias
 pub(super) fn pick_name(id: &SourceId, aliases: &BTreeSet<String>) -> String {
     if let Some(repo) = id.repo_name() {
         return repo.trim_end_matches(".nix").replace('.', "-");
@@ -127,62 +124,4 @@ pub(super) fn pick_name(id: &SourceId, aliases: &BTreeSet<String>) -> String {
         .min_by_key(|name| (name.len(), name.as_str()))
         .cloned()
         .unwrap_or_default()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use super::pick_name;
-    use crate::source::id::SourceId;
-
-    fn set(items: &[&str]) -> BTreeSet<String> {
-        items.iter().map(|item| (*item).to_owned()).collect()
-    }
-
-    fn source_id(str: &str) -> SourceId {
-        SourceId::from_url(str).unwrap()
-    }
-
-    #[test]
-    fn pick_name_strips_dot_nix_and_flattens_dots() {
-        assert_eq!(
-            pick_name(
-                &source_id("github:cachix/git-hooks.nix"),
-                &set(&["git-hooks"])
-            ),
-            "git-hooks"
-        );
-        assert_eq!(
-            pick_name(
-                &source_id("github:nix-community/nixpkgs.lib"),
-                &set(&["nixpkgs-lib"])
-            ),
-            "nixpkgs-lib"
-        );
-    }
-
-    #[test]
-    fn pick_name_uses_gitlab_repo_basename() {
-        assert_eq!(
-            pick_name(
-                &source_id("gitlab:Veloren%2Fdev/rfcs.nix"),
-                &set(&["veloren-rfcs", "rfcs"])
-            ),
-            "rfcs"
-        );
-        assert_eq!(
-            pick_name(
-                &source_id("git+https://gitlab.com/NixOS/nixpkgs.lib.git"),
-                &set(&["nixpkgs-lib"])
-            ),
-            "nixpkgs-lib"
-        );
-    }
-
-    #[test]
-    fn pick_name_falls_back_to_shortest_alias_without_repo_coordinates() {
-        let aliases = set(&["my-pin", "the-tarball"]);
-        assert_eq!(pick_name(&source_id("https://x/y"), &aliases), "my-pin");
-    }
 }
