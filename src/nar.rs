@@ -23,7 +23,6 @@ use eyre::{
 };
 use hmac_sha256::Hash as Sha256;
 
-/// sri nar hash of `root`
 pub fn hash_path(root: &Path) -> Result<String> {
     let mut hash = Sha256::new();
     emit_bytes(&mut hash, b"nix-archive-1");
@@ -32,7 +31,6 @@ pub fn hash_path(root: &Path) -> Result<String> {
     Ok(format!("sha256-{}", BASE64.encode(&hash.finalize())))
 }
 
-/// sri sha256 of raw bytes
 pub fn hash_bytes(bytes: &[u8]) -> String {
     format!("sha256-{}", BASE64.encode(&Sha256::hash(bytes)))
 }

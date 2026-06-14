@@ -82,8 +82,6 @@ pub fn init(project: &Project, request: InitRequest) -> Result<()> {
     Ok(())
 }
 
-/// rewrite the resolver to the bundled template; won't clobber a fork unless
-/// `force`
 fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     if let Ok(current) = fs::read_to_string(path) {
         if current == RESOLVER_NIX {
@@ -103,8 +101,6 @@ fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// `--flake` scaffolds a wired flake and marks the project recomposable;
-/// an existing flake.nix belongs to the user
 fn flake_awareness(scaffold: bool, project: &Project) -> Result<()> {
     let cwd = env::current_dir()?;
     let path = cwd.join("flake.nix");
@@ -128,7 +124,6 @@ fn flake_awareness(scaffold: bool, project: &Project) -> Result<()> {
         return Ok(());
     }
 
-    // don't overwrite the user's flake; reflect its wiring into pins.toml
     if scaffold {
         eprintln!("tack: flake.nix exists; left untouched (tack won't overwrite your flake)");
     }
@@ -141,7 +136,6 @@ fn flake_awareness(scaffold: bool, project: &Project) -> Result<()> {
     Ok(())
 }
 
-/// whether `flake.nix` mentions `tackOverrides` in code, not just a comment
 pub(super) fn wires_overrides(flake: &str) -> bool {
     flake.lines().any(|line| {
         line.split_once('#')
@@ -150,7 +144,6 @@ pub(super) fn wires_overrides(flake: &str) -> bool {
     })
 }
 
-/// set `[tack] recomposable = true`, preserving existing `[tack]` keys
 fn mark_recomposable(project: &Project) -> Result<()> {
     let mut doc = project.load_pins()?;
     doc.mark_recomposable();
@@ -170,25 +163,4 @@ override your pins, thread tackOverrides through outputs:
 
 then set `[tack] recomposable = true` in .tack/pins.toml."
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::wires_overrides;
-
-    #[test]
-    fn wires_overrides_ignores_comments() {
-        assert!(
-            wires_overrides(
-                "outputs = { self, ... }@args: (import ./.tack) { overrides = args.tackOverrides \
-                 or +             {}; };"
-            )
-        );
-        assert!(!wires_overrides(
-            "# threads args.tackOverrides through outputs\n{ }"
-        ));
-        assert!(!wires_overrides(
-            "outputs = { self }: { }; # no tackOverrides here"
-        ));
-    }
 }

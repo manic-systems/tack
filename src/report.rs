@@ -10,26 +10,23 @@ use crate::fetch::{
     github::CommitLog,
 };
 
-/// what `update` did to one pin
 #[derive(Clone, Debug)]
 pub enum UpdateOutcome {
-    /// lock already matched upstream
     Unchanged,
-    /// relocked to a new rev; `old` is `None` for a freshly added pin
     Updated {
         old:        Option<String>,
         new:        String,
         comparison: BranchComparison,
     },
-    /// rev is stable but content moved under it
-    Drift { rev: String, accepted: bool },
-    /// a fixed pin's sha256 changed
+    Drift {
+        rev:      String,
+        accepted: bool,
+    },
     FixedDrift {
         old:      String,
         new:      String,
         accepted: bool,
     },
-    /// the fetch failed; the lock was left untouched
     Failed(String),
 }
 
@@ -39,17 +36,13 @@ pub struct PinUpdate {
     pub outcome: UpdateOutcome,
 }
 
-/// the result of an `update` run: per-pin outcomes plus run-wide totals
 #[derive(Clone, Debug, Default)]
 pub struct UpdateReport {
     pub pins:     Vec<PinUpdate>,
-    /// pins whose content drifted and were kept (not relocked)
     pub drift:    usize,
-    /// non-fatal notices a caller may surface (token hints, dedup diagnostics)
     pub warnings: Vec<String>,
 }
 
-/// what `look` saw for one pin, without touching the lock
 #[derive(Clone, Debug)]
 pub enum LookOutcome {
     Unchanged,
@@ -66,18 +59,15 @@ pub enum LookOutcome {
 pub struct PinLook {
     pub name:    String,
     pub outcome: LookOutcome,
-    /// freshest commits, only populated for a verbose look
     pub log:     Option<CommitLog>,
 }
 
-/// the result of a `look` run
 #[derive(Clone, Debug, Default)]
 pub struct LookReport {
     pub pins:     Vec<PinLook>,
     pub warnings: Vec<String>,
 }
 
-/// dedup scan result: only diverging groups, plus follow suggestions
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DedupReport {
     pub groups:  Vec<DedupGroup>,
@@ -86,9 +76,7 @@ pub struct DedupReport {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FollowSuggestions {
-    /// groups that have a top-level pin
     pub pin:  FollowMap,
-    /// transitive-only groups
     pub auto: FollowMap,
 }
 
@@ -176,7 +164,6 @@ pub struct NameSources {
     pub sources: Vec<Vec<String>>,
 }
 
-/// rev position relative to its group comparator
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
     Base,

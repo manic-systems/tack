@@ -77,12 +77,6 @@ impl LocalRemote {
         self.set_ref(&self.branch, id);
     }
 
-    pub(super) fn tag(&self, name: &str, rev: &str) {
-        self.repo
-            .tag_reference(name, parse_id(rev), PreviousValue::Any)
-            .unwrap();
-    }
-
     pub(super) fn url(&self) -> String {
         format!("file://{}", self.remote.display())
     }

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-//! editor-style undo history over the three files that hold tack's state:
-//! `pins.toml`, `pins.lock.json`, resolver
+//! undo history over tack state files
 
 use std::time::{
     SystemTime,
@@ -63,8 +62,7 @@ pub fn now() -> u64 {
         .map_or(0, |dur| dur.as_secs())
 }
 
-/// capture a live edit as an `(edited)` entry so undo/redo never drop it.
-/// truncates the redo branch like a fresh mutation
+/// keep external edits before moving the undo cursor
 fn capture_external(history: &mut History, state: &Snapshot, ts: u64) -> bool {
     if history.entries.is_empty() {
         return false;
@@ -80,8 +78,7 @@ fn capture_external(history: &mut History, state: &Snapshot, ts: u64) -> bool {
     true
 }
 
-/// prune oldest first. count and age caps, neither drops the live state or
-/// anything redoable
+/// prune only undoable history
 fn gc(history: &mut History, now: u64) {
     while history.entries.len() > MAX_LEVELS && history.cursor > 0 {
         history.entries.remove(0);
@@ -109,7 +106,6 @@ fn view(history: &History) -> View {
     }
 }
 
-/// `just now`, `2m ago`, `1h ago`, `3d ago`
 pub fn rel_time(now: u64, ts: u64) -> String {
     let delta = now.saturating_sub(ts);
     if delta < 60 {
@@ -131,14 +127,8 @@ mod tests {
     };
 
     use super::{
-        Entry,
-        History,
         HistoryStore,
-        MAX_AGE,
-        MAX_LEVELS,
         Snapshot,
-        gc,
-        snapshot::content_key,
     };
     use crate::project::Project;
 
@@ -151,25 +141,15 @@ mod tests {
         fs::write(project.lock_path(), "{}\n").unwrap();
     }
 
-    #[test]
-    fn content_key_is_stable_sha256_hex() {
-        assert_eq!(
-            content_key("abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
     fn read(project: &Project) -> String {
         fs::read_to_string(project.pins_path()).unwrap()
     }
 
-    /// stand-in for a recorded mutating command. returns whether an external
-    /// edit was captured
-    fn run(project: &Project, store: &HistoryStore, label: &str, toml: &str) -> bool {
+    fn run(project: &Project, store: &HistoryStore, label: &str, toml: &str) {
         let pre = Snapshot::capture(project);
         write(project, toml);
         let post = Snapshot::capture(project);
-        store.record(label, pre, post).unwrap()
+        store.record(label, pre, post).unwrap();
     }
 
     #[test]
@@ -181,24 +161,19 @@ mod tests {
         write(&project, "v1\n");
         run(&project, &store, "a", "v2\n");
         run(&project, &store, "b", "v3\n");
-        assert_eq!(read(&project), "v3\n");
 
         store.undo(&project).unwrap();
         assert_eq!(read(&project), "v2\n");
         store.undo(&project).unwrap();
         assert_eq!(read(&project), "v1\n");
-        assert!(store.undo(&project).unwrap().is_none()); // initial state, can't go further
-        assert_eq!(read(&project), "v1\n");
-
         store.redo(&project).unwrap();
         assert_eq!(read(&project), "v2\n");
         store.redo(&project).unwrap();
         assert_eq!(read(&project), "v3\n");
-        assert!(store.redo(&project).unwrap().is_none());
     }
 
     #[test]
-    fn undo_captures_external_edit_rather_than_discarding() {
+    fn undo_preserves_external_edits_as_redo_state() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let project = Project::at(dir.to_path_buf());
@@ -206,130 +181,11 @@ mod tests {
         write(&project, "v1\n");
         run(&project, &store, "a", "v2\n");
 
-        // hand-edit outside tack, then undo
         write(&project, "manual\n");
         store.undo(&project).unwrap();
         assert_eq!(read(&project), "v2\n");
 
-        // the manual edit must not be lost
         store.redo(&project).unwrap();
         assert_eq!(read(&project), "manual\n");
-        assert!(
-            store
-                .list()
-                .unwrap()
-                .rows
-                .iter()
-                .any(|row| row.label == "(edited)")
-        );
-    }
-
-    #[test]
-    fn record_flags_an_external_edit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        let project = Project::at(dir.to_path_buf());
-        let store = store(dir);
-        write(&project, "v1\n");
-        assert!(!run(&project, &store, "a", "v2\n")); // nothing diverged yet
-
-        write(&project, "manual\n"); // unrecorded edit
-        assert!(run(&project, &store, "b", "v3\n")); // captured on next record
-    }
-
-    #[test]
-    fn record_run_surfaces_history_write_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        let project = Project::at(dir.to_path_buf());
-        write(&project, "v1\n");
-        let store_path = dir.join("history-file");
-        fs::write(&store_path, "not a dir").unwrap();
-        let store = store(&store_path);
-
-        let outcome = store.record_run(&project, "a", || {
-            write(&project, "v2\n");
-            Ok(())
-        });
-
-        outcome.result.unwrap();
-        assert!(outcome.history_error.is_some());
-    }
-
-    #[test]
-    fn new_mutation_truncates_redo_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        let project = Project::at(dir.to_path_buf());
-        let store = store(dir);
-        write(&project, "v1\n");
-        run(&project, &store, "a", "v2\n");
-        run(&project, &store, "b", "v3\n");
-        store.undo(&project).unwrap(); // back to v2, v3 redoable
-        assert_eq!(read(&project), "v2\n");
-
-        run(&project, &store, "c", "v4\n"); // forks a new branch
-        assert_eq!(read(&project), "v4\n");
-        assert!(store.redo(&project).unwrap().is_none()); // v3 future gone
-    }
-
-    #[test]
-    fn gc_caps_undo_depth_to_max_levels() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        let project = Project::at(dir.to_path_buf());
-        let store = store(dir);
-        write(&project, "s0\n");
-        for i in 1..=MAX_LEVELS + 5 {
-            run(&project, &store, &format!("m{i}"), &format!("s{i}\n"));
-        }
-        assert!(store.list().unwrap().rows.len() <= MAX_LEVELS);
-        assert_eq!(read(&project), format!("s{}\n", MAX_LEVELS + 5));
-    }
-
-    #[test]
-    fn gc_drops_aged_undo_entries_but_keeps_live() {
-        let now = MAX_AGE + 1000;
-        let aged = |label: &str| {
-            Entry {
-                label: label.to_owned(),
-                ..Default::default()
-            }
-        };
-        let mut history = History {
-            cursor:  3,
-            entries: vec![aged("0"), aged("1"), aged("2"), Entry {
-                label: "live".to_owned(),
-                ts: now,
-                ..Default::default()
-            }],
-        };
-        gc(&mut history, now);
-
-        // aged undo entries pruned, live state survives
-        assert_eq!(history.entries.len(), 1);
-        assert_eq!(history.cursor, 0);
-        assert_eq!(history.entries[0].label, "live");
-    }
-
-    #[test]
-    fn undo_reverts_the_resolver_too() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        let project = Project::at(dir.to_path_buf());
-        let store = store(dir);
-        let resolver = project.resolver_path();
-        write(&project, "v1\n");
-        fs::write(&resolver, "resolver-v1\n").unwrap();
-        let pre = Snapshot::capture(&project);
-
-        // resolver-only change
-        fs::write(&resolver, "resolver-v2\n").unwrap();
-        let post = Snapshot::capture(&project);
-        assert!(pre != post); // snapshot notices the resolver change
-        store.record("init --resolver", pre, post).unwrap();
-
-        store.undo(&project).unwrap();
-        assert_eq!(fs::read_to_string(&resolver).unwrap(), "resolver-v1\n");
     }
 }

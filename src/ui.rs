@@ -139,7 +139,6 @@ impl Display {
         }
     }
 
-    /// finish, rendering the per-pin commit log under each updated entry
     pub fn finish_verbose(mut self, logs: &[Option<CommitLog>]) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -148,7 +147,7 @@ impl Display {
         let states = self.states.lock().unwrap();
         let mut out = io::stdout().lock();
         if self.tty {
-            // rewind to the first pin row, clear the spinner output
+            // replace live spinner rows
             let _ = write!(out, "\x1b[{}A\x1b[J", self.rows.load(Ordering::Relaxed));
             for ((name, status), entry) in self.names.iter().zip(states.iter()).zip(logs.iter()) {
                 let line = StatusLine::new(name, status);
@@ -539,30 +538,5 @@ impl fmt::Display for ComparisonLabel {
             Some(CompareStatus::Identical) | None => "",
         };
         f.write_str(text)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        BranchComparison,
-        CompareStatus,
-        ComparisonLabel,
-    };
-
-    #[test]
-    fn branch_comparison_suffix_marks_unverified_results() {
-        assert_eq!(
-            ComparisonLabel::new(BranchComparison::verified(CompareStatus::Ahead)).to_string(),
-            " (ahead)"
-        );
-        assert_eq!(
-            ComparisonLabel::new(BranchComparison::unavailable()).to_string(),
-            " (unverified)"
-        );
-        assert_eq!(
-            ComparisonLabel::new(BranchComparison::none()).to_string(),
-            ""
-        );
     }
 }

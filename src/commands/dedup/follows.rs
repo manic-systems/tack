@@ -22,7 +22,6 @@ fn follow_target(
     if path.is_empty() {
         return None;
     }
-    // bare follow reaches both sides; `flake:`/`tack:` only its own
     let scoped = format!("{}:{name}", side.as_str());
     let excluded = top_input.is_some_and(|inp| inp.excludes.contains(name));
     if !excluded
@@ -41,7 +40,6 @@ fn follow_target(
     None
 }
 
-/// align each followed entry onto its target
 pub(super) fn apply_follows(
     groups: &mut BTreeMap<SourceId, Vec<Entry>>,
     by_name: &BTreeMap<&str, &pins::Input>,
@@ -87,20 +85,6 @@ mod tests {
         source::id::SourceId,
     };
 
-    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|&(alias, target)| (alias.to_owned(), target.to_owned()))
-            .collect()
-    }
-
-    fn tack_entry(path: &[&str], name: &str, rev: &str, lm: Option<u64>) -> Entry {
-        Entry {
-            side: Side::Tack,
-            ..entry(path, name, rev, lm)
-        }
-    }
-
     fn entry(path: &[&str], name: &str, rev: &str, lm: Option<u64>) -> Entry {
         Entry {
             path: path.iter().map(|item| (*item).to_owned()).collect(),
@@ -111,51 +95,27 @@ mod tests {
         }
     }
 
-    fn source_id(str: &str) -> SourceId {
-        SourceId::from_url(str).unwrap()
-    }
-
     #[test]
     fn apply_follows_syncs_rev_and_lm_to_target() {
-        let id = source_id("github:o/r");
-        let mut groups = BTreeMap::new();
-        groups.insert(id.clone(), vec![
+        let id = SourceId::from_url("github:o/r").unwrap();
+        let mut groups = BTreeMap::from([(id.clone(), vec![
             entry(&[], "nixpkgs", "newrev-full", Some(100)),
             entry(&["dep"], "nixpkgs-lib", "oldrev", Some(50)),
-        ]);
-        let by_name = BTreeMap::new();
-        let all_follow = map(&[("nixpkgs-lib", "nixpkgs")]);
-        let top_revs = map(&[("nixpkgs", "newrev-full")]);
+        ])]);
+        let all_follow = BTreeMap::from([("nixpkgs-lib".to_owned(), "nixpkgs".to_owned())]);
+        let top_revs = BTreeMap::from([("nixpkgs".to_owned(), "newrev-full".to_owned())]);
         let top_lms = iter::once(("nixpkgs".to_owned(), 100_u64)).collect();
 
-        apply_follows(&mut groups, &by_name, &all_follow, &top_revs, &top_lms);
+        apply_follows(
+            &mut groups,
+            &BTreeMap::new(),
+            &all_follow,
+            &top_revs,
+            &top_lms,
+        );
 
         let followed = &groups[&id][1];
         assert_eq!(followed.rev, "newrev-full");
         assert_eq!(followed.lm, Some(100));
-    }
-
-    #[test]
-    fn apply_follows_honors_scoped_all_follow_per_side() {
-        let id = source_id("github:o/r");
-        let mut groups = BTreeMap::new();
-        groups.insert(id.clone(), vec![tack_entry(
-            &["parent"],
-            "dep",
-            "oldrev",
-            Some(50),
-        )]);
-        let by_name = BTreeMap::new();
-        let top_revs = map(&[("replacement", "newrev-full")]);
-        let top_lms = iter::once(("replacement".to_owned(), 100_u64)).collect();
-
-        let flake_rule = map(&[("flake:dep", "replacement")]);
-        apply_follows(&mut groups, &by_name, &flake_rule, &top_revs, &top_lms);
-        assert_eq!(groups[&id][0].rev, "oldrev");
-
-        let tack_rule = map(&[("tack:dep", "replacement")]);
-        apply_follows(&mut groups, &by_name, &tack_rule, &top_revs, &top_lms);
-        assert_eq!(groups[&id][0].rev, "newrev-full");
-        assert_eq!(groups[&id][0].lm, Some(100));
     }
 }

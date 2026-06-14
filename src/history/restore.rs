@@ -18,8 +18,7 @@ use eyre::Result;
 use super::Entry;
 use crate::project::Project;
 
-/// rewrite all three files as one transaction; any failure rolls every file
-/// back
+/// restore all state files as one transaction
 pub(super) fn restore(project: &Project, entry: &Entry) -> Result<()> {
     let specs = [
         (project.pins_path(), entry.toml.as_deref()),
@@ -50,7 +49,6 @@ pub(super) fn restore(project: &Project, entry: &Entry) -> Result<()> {
     }
 }
 
-/// one file in a restore transaction
 struct RestoreStep {
     path:      PathBuf,
     tmp:       Option<PathBuf>,
@@ -59,7 +57,6 @@ struct RestoreStep {
     installed: bool,
 }
 
-/// stage every file as a sibling temp, then commit via renames
 struct RestoreTx {
     steps: Vec<RestoreStep>,
 }
@@ -69,7 +66,6 @@ impl RestoreTx {
         Self { steps: Vec::new() }
     }
 
-    /// write content to a sibling temp, or stage a removal when content is none
     fn stage(&mut self, path: &Path, content: Option<&str>, tag: &str) -> Result<()> {
         let tmp = if let Some(text) = content {
             let tmp = temp_path(path, tag, "tmp");
@@ -91,7 +87,6 @@ impl RestoreTx {
         Ok(())
     }
 
-    /// back up each existing file, swap in its staged temp, then drop backups
     fn commit(&mut self) -> Result<()> {
         for step in &mut self.steps {
             if step.path.exists() {
@@ -118,7 +113,7 @@ impl RestoreTx {
         Ok(())
     }
 
-    /// undo a partial commit: drop installed files, restore backups
+    /// undo a partial commit
     fn rollback(&mut self) {
         for step in self.steps.iter_mut().rev() {
             if step.installed && step.path.exists() {
@@ -138,7 +133,6 @@ impl RestoreTx {
         }
     }
 
-    /// drop temps staged before a pre-commit failure
     fn cleanup_staged(&mut self) {
         for step in &mut self.steps {
             if let Some(tmp) = step.tmp.take()

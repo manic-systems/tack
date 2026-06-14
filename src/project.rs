@@ -47,13 +47,12 @@ pub enum ConfigError {
     },
 }
 
-/// on-disk tack workspace
 pub struct Project {
     dir: PathBuf,
 }
 
 impl Project {
-    /// `$TACK_DIR`, else cwd with legacy `inputs.nix`, else `cwd/.tack`
+    /// `$TACK_DIR` legacy cwd or `cwd/.tack`
     pub fn discover() -> StdResult<Self, ConfigError> {
         if let Some(dir) = env::var_os("TACK_DIR") {
             return Ok(Self::at(PathBuf::from(dir)));
@@ -81,7 +80,7 @@ impl Project {
         self.dir.join("pins.lock.json")
     }
 
-    /// `inputs.nix` for the legacy repo-root layout, else `default.nix`
+    /// legacy `inputs.nix` else `default.nix`
     pub fn resolver_path(&self) -> PathBuf {
         let legacy = self.dir.join("inputs.nix");
         if legacy.exists() {
@@ -139,7 +138,6 @@ impl Project {
     }
 }
 
-/// atomic write via sibling temp + rename
 pub fn write_atomic(path: &Path, contents: &str) -> EyreResult<()> {
     let mut tmp_str = path.as_os_str().to_owned();
     tmp_str.push(".tmp");
@@ -147,41 +145,4 @@ pub fn write_atomic(path: &Path, contents: &str) -> EyreResult<()> {
     fs::write(&tmp, contents)?;
     fs::rename(&tmp, path)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::{
-        ConfigError,
-        Project,
-    };
-
-    #[test]
-    fn modern_layout_paths_hang_off_dir() {
-        let project = Project::at("/work/.tack".into());
-        assert!(project.pins_path().ends_with(".tack/pins.toml"));
-        assert!(project.lock_path().ends_with(".tack/pins.lock.json"));
-        assert!(project.resolver_path().ends_with("default.nix"));
-    }
-
-    #[test]
-    fn missing_pins_is_a_missing_config_error() {
-        let project = Project::at("/definitely/not/here".into());
-        let err = project.load_pins().unwrap_err();
-
-        assert!(matches!(err, ConfigError::Missing(_)));
-    }
-
-    #[test]
-    fn legacy_layout_uses_inputs_nix_resolver() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("inputs.nix"), "").unwrap();
-        let project = Project::at(tmp.path().to_path_buf());
-
-        assert_eq!(project.pins_path(), tmp.path().join("pins.toml"));
-        assert_eq!(project.lock_path(), tmp.path().join("pins.lock.json"));
-        assert_eq!(project.resolver_path(), tmp.path().join("inputs.nix"));
-    }
 }

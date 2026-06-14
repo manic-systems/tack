@@ -10,8 +10,7 @@ use crate::{
 pub fn run(cmd: Command) -> eyre::Result<()> {
     let project = Project::discover()?;
 
-    // resolver-drift nag, after success so it trails output and never piles onto a
-    // failure
+    // resolver nag trails successful output
     let check_resolver = !matches!(cmd, Command::Init { .. });
 
     let res = match cmd {

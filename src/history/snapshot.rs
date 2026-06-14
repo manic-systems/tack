@@ -30,7 +30,6 @@ use crate::project::{
     Project,
 };
 
-/// verbatim bytes of the three state files
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     toml:     Option<String>,
@@ -177,7 +176,7 @@ impl<'de> Deserialize<'de> for SnapshotRef {
     }
 }
 
-/// stable sha256 hex; survives across runs unlike `legacy_content_key`
+/// stable across runs unlike the legacy hash
 pub(super) fn content_key(text: &str) -> String {
     HEXLOWER.encode(&Sha256::hash(text.as_bytes()))
 }
@@ -191,7 +190,6 @@ pub(super) fn legacy_content_key(text: &str) -> String {
     format!("{:016x}{:016x}", hi.finish(), lo.finish())
 }
 
-/// write content to a hash-named file, return the name
 pub(super) fn persist(
     snaps: &Path,
     content: Option<&str>,
@@ -209,7 +207,6 @@ pub(super) fn persist(
     Ok(SnapshotRef::Present(name))
 }
 
-/// drop snapshot files the manifest no longer references
 pub(super) fn sweep(snaps: &Path, referenced: &HashSet<String>) {
     let Ok(read) = fs::read_dir(snaps) else {
         return;

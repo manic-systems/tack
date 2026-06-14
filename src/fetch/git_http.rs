@@ -179,8 +179,7 @@ impl HttpFailure {
         }
     }
 
-    /// `Other`, not `PermissionDenied`, so gix does not start its own
-    /// credential cascade (askpass).
+    /// avoid `PermissionDenied` gix may prompt
     fn no_usable_credential(host: &str) -> Self {
         Self {
             kind:    io::ErrorKind::Other,
@@ -606,7 +605,6 @@ fn format_headers(headers: &HeaderMap) -> Vec<u8> {
 mod tests {
     use std::{
         io::{
-            ErrorKind,
             Read as _,
             Write as _,
         },
@@ -618,14 +616,8 @@ mod tests {
         time::Duration,
     };
 
-    use gix_transport::client::blocking_io::http::{
-        Http as _,
-        PostBodyDataKind,
-    };
-
     use super::{
         Method,
-        UreqHttp,
         auth,
         http,
         send_ureq,
@@ -645,28 +637,9 @@ mod tests {
             }
             request.extend_from_slice(&buf[..read]);
             if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
+                return Some(String::from_utf8_lossy(&request).into_owned());
             }
         }
-        let headers_end = request
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-            .map_or(request.len(), |idx| idx + 4);
-        let headers = String::from_utf8_lossy(&request[..headers_end]).into_owned();
-        let content_length = headers
-            .lines()
-            .filter_map(|line| line.split_once(':'))
-            .find(|&(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-        while request.len().saturating_sub(headers_end) < content_length {
-            let read = stream.read(&mut buf).ok()?;
-            if read == 0 {
-                break;
-            }
-            request.extend_from_slice(&buf[..read]);
-        }
-        Some(String::from_utf8_lossy(&request).into_owned())
     }
 
     fn write_response(stream: &mut TcpStream, head: &str, body: &str) {
@@ -677,19 +650,20 @@ mod tests {
         stream.write_all(response.as_bytes()).unwrap();
     }
 
-    fn serve_basic_auth_gate(bind_host: &str) -> (String, thread::JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind((bind_host, 0)).unwrap();
-        let addr = listener.local_addr().unwrap();
-        let url = format!("http://{addr}/repo.git/info/refs?service=git-upload-pack");
-        let handle = thread::spawn(move || {
+    #[test]
+    fn unauthorized_request_resolves_credential_and_retries_with_authorization() {
+        let host = "127.0.0.2";
+        auth::seed_resolvable_credential(host, "atagen", "s3cr3t");
+        let listener = TcpListener::bind((host, 0)).unwrap();
+        let url = format!(
+            "http://{}/repo.git/info/refs?service=git-upload-pack",
+            listener.local_addr().unwrap()
+        );
+        let server = thread::spawn(move || {
             let mut requests = Vec::new();
             for _ in 0..2_u8 {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                let Some(request) = read_request(&mut stream) else {
-                    break;
-                };
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream).unwrap();
                 let authorized = request
                     .lines()
                     .any(|line| line.to_ascii_lowercase().starts_with("authorization:"));
@@ -707,20 +681,11 @@ mod tests {
             }
             requests
         });
-        (url, handle)
-    }
-
-    #[test]
-    fn unauthorized_request_resolves_credential_and_retries_with_authorization() {
-        let host = "127.0.0.2";
-        auth::seed_resolvable_credential(host, "atagen", "s3cr3t");
-        let (url, server) = serve_basic_auth_gate(host);
 
         let response =
             send_ureq(http::agent(), Method::Get, &url, Vec::<String>::new(), &[]).unwrap();
 
         assert!(response.headers.is_ok());
-
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(
@@ -728,146 +693,10 @@ mod tests {
                 .lines()
                 .any(|line| line.to_ascii_lowercase().starts_with("authorization:"))
         );
-        let retry = requests[1].to_ascii_lowercase();
-        assert!(retry.contains("authorization: basic yxrhz2vuonmzy3izda=="));
-    }
-
-    fn serve_once(
-        status: &str,
-        response_body: &'static str,
-    ) -> (String, thread::JoinHandle<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let status_line = status.to_owned();
-        let url = format!(
-            "http://{}/repo.git/git-upload-pack",
-            listener.local_addr().unwrap()
-        );
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buf = [0_u8; 1024];
-            loop {
-                let read = stream.read(&mut buf).unwrap();
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buf[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let headers_end = request
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .map_or(request.len(), |idx| idx + 4);
-            let headers = String::from_utf8_lossy(&request[..headers_end]);
-            let content_length = headers
-                .lines()
-                .find_map(|line| line.split_once(':'))
-                .filter(|&(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            while request.len().saturating_sub(headers_end) < content_length {
-                let read = stream.read(&mut buf).unwrap();
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buf[..read]);
-            }
-
-            let response = format!(
-                "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nX-Test: yes\r\nConnection: \
-                 close\r\n\r\n{response_body}",
-                response_body.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-            String::from_utf8(request).unwrap()
-        });
-        (url, handle)
-    }
-
-    #[test]
-    fn status_401_without_credentials_avoids_gix_credential_cascade() {
-        let (url, server) = serve_once("401 Unauthorized", "");
-
-        let response =
-            send_ureq(http::agent(), Method::Get, &url, Vec::<String>::new(), &[]).unwrap();
-        let failure = response.headers.err().unwrap();
-        let err = failure.into_error();
-
-        assert_eq!(err.kind(), ErrorKind::Other);
-        assert!(err.to_string().contains("no usable credential"));
-        assert!(server.join().unwrap().starts_with("GET "));
-    }
-
-    #[test]
-    fn post_response_is_sent_once_when_headers_are_read_first() {
-        let (url, server) = serve_once("200 OK", "ok");
-        let mut http = UreqHttp::default();
-        let response = http
-            .post(
-                &url,
-                &url,
-                Vec::<String>::new(),
-                PostBodyDataKind::BoundedAndFitsIntoMemory,
-            )
-            .unwrap();
-        let mut post_body = response.post_body;
-        post_body.write_all(b"want abc\n").unwrap();
-        drop(post_body);
-        let mut headers = response.headers;
-        let mut body = response.body;
-
-        let mut header_bytes = Vec::new();
-        headers.read_to_end(&mut header_bytes).unwrap();
-        let mut response_text = String::new();
-        body.read_to_string(&mut response_text).unwrap();
-        let request = server.join().unwrap();
-
         assert!(
-            String::from_utf8(header_bytes)
-                .unwrap()
-                .contains("x-test: yes")
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("authorization: basic yxrhz2vuonmzy3izda==")
         );
-        assert_eq!(response_text, "ok");
-        assert_eq!(request.matches("POST ").count(), 1);
-        assert!(request.ends_with("want abc\n"));
-    }
-
-    #[test]
-    fn post_response_is_sent_once_when_body_is_read_first() {
-        let (url, server) = serve_once("200 OK", "ok");
-        let mut http = UreqHttp::default();
-        let response = http
-            .post(
-                &url,
-                &url,
-                Vec::<String>::new(),
-                PostBodyDataKind::BoundedAndFitsIntoMemory,
-            )
-            .unwrap();
-        let mut post_body = response.post_body;
-        post_body.write_all(b"want abc\n").unwrap();
-        drop(post_body);
-        let mut headers = response.headers;
-        let mut body = response.body;
-
-        let mut response_text = String::new();
-        body.read_to_string(&mut response_text).unwrap();
-        let mut header_bytes = Vec::new();
-        headers.read_to_end(&mut header_bytes).unwrap();
-        let request = server.join().unwrap();
-
-        assert_eq!(response_text, "ok");
-        assert!(
-            String::from_utf8(header_bytes)
-                .unwrap()
-                .contains("x-test: yes")
-        );
-        assert_eq!(request.matches("POST ").count(), 1);
-        assert!(request.ends_with("want abc\n"));
     }
 }

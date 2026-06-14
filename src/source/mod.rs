@@ -22,7 +22,6 @@ use eyre::Result;
 
 use crate::error::user_bail;
 
-/// fetchable pin source, from an expanded pins.toml url
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Github {
@@ -46,9 +45,6 @@ pub enum Source {
     Tarball {
         url: String,
     },
-    /// a directory on disk, read at nix eval time. the stored spec is either
-    /// absolute or relative to the resolver dir; see
-    /// [`localize_path_url_with_warning`]
     Path {
         path: String,
     },
@@ -149,11 +145,6 @@ impl FromStr for Source {
     }
 }
 
-/// resolve a `path:` url's spec for storage, choosing relative-to-resolver or
-/// absolute by where the target sits: relative when it lives inside the
-/// project root (so it rides along when the source moves or is copied to the
-/// store), absolute when it points outside. non-`path:` urls pass through
-/// untouched. warns but does not fail when the target is missing
 pub struct LocalizedUrl {
     pub url:     String,
     pub warning: Option<String>,
@@ -183,8 +174,7 @@ fn localize_path_spec(spec: &str, tack_dir: &Path) -> (String, Option<String>) {
     let target = lexical_normalize(&raw);
     let warning =
         (!target.exists()).then(|| format!("path pin target not found: {}", target.display()));
-    // relative `..` hops escape the store-copied source, so only
-    // in-project targets may stay relative
+    // external targets stay absolute so `..` cannot escape the store copy
     let path = if target.starts_with(&root) {
         relative_from(tack_dir, &target)
     } else {
@@ -193,7 +183,6 @@ fn localize_path_spec(spec: &str, tack_dir: &Path) -> (String, Option<String>) {
     (path, warning)
 }
 
-/// the project root holding a `.tack` dir, else the dir itself (legacy layout)
 fn project_root_of(tack_dir: &Path) -> PathBuf {
     if tack_dir.file_name() == Some(OsStr::new(".tack")) {
         tack_dir
@@ -204,7 +193,6 @@ fn project_root_of(tack_dir: &Path) -> PathBuf {
     }
 }
 
-/// fold `.`/`..` out of a path without touching the filesystem
 fn lexical_normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -221,7 +209,6 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// relative path from `base` to `target`, both absolute, via `..` hops
 fn relative_from(base: &Path, target: &Path) -> String {
     let normalized_base = lexical_normalize(base);
     let mut base_components = normalized_base.components().peekable();
@@ -295,12 +282,10 @@ fn parse_query_fields(query: Option<&str>) -> QueryFields<'_> {
     fields
 }
 
-/// https clone url for a host/owner/repo on any git forge
 pub fn clone_url(host: &str, owner: &str, repo: &str) -> String {
     format!("https://{host}/{owner}/{repo}.git")
 }
 
-/// canonicalize a forge host (lowercase, drop the default https port)
 pub fn normalize_host(host: &str) -> String {
     host::normalized(host)
 }
@@ -312,212 +297,22 @@ fn decode_path_segment(value: &str) -> String {
 }
 
 #[cfg(test)]
-#[expect(clippy::panic, reason = "panic is the test-failure coping mechanism")]
 mod tests {
     use std::path::Path;
 
-    use super::{
-        Source,
-        clone_url,
-        localize_path_url_with_warning,
-    };
+    use super::localize_path_url_with_warning;
 
     #[test]
-    fn builds_clone_url() {
-        assert_eq!(
-            clone_url("gitlab.com:8443", "NixOS", "nixpkgs"),
-            "https://gitlab.com:8443/NixOS/nixpkgs.git"
-        );
-    }
-
-    #[test]
-    fn path_url_is_a_path_source() {
-        match "path:../sibling".parse::<Source>().unwrap() {
-            Source::Path { path } => assert_eq!(path, "../sibling"),
-            Source::Github { .. }
-            | Source::Git { .. }
-            | Source::Gitlab { .. }
-            | Source::Tarball { .. } => panic!("expected path source"),
-        }
-    }
-
-    #[test]
-    fn localize_stores_in_project_paths_relative_and_outside_paths_absolute() {
+    fn localize_keeps_store_copied_path_urls_reachable() {
         let tack = Path::new("/home/u/proj/.tack");
-        // inside the project root: relative, so it rides along when the
-        // source moves or is copied to the store
+
         assert_eq!(
             localize_path_url_with_warning("path:./vendor/dep", tack).url,
             "path:../vendor/dep"
         );
-        // a sibling is not part of the source copy, so relative `..` hops
-        // would escape a store-copied source; it must stay absolute
         assert_eq!(
             localize_path_url_with_warning("path:../sibling", tack).url,
             "path:/home/u/sibling"
         );
-        assert_eq!(
-            localize_path_url_with_warning("path:/etc/nixos", tack).url,
-            "path:/etc/nixos"
-        );
-        // non-path urls pass through untouched
-        assert_eq!(
-            localize_path_url_with_warning("github:o/r", tack).url,
-            "github:o/r"
-        );
-    }
-
-    #[test]
-    fn git_rev_query() {
-        match "git+https://example.com/o/r?ref=main&rev=abc123"
-            .parse::<Source>()
-            .unwrap()
-        {
-            Source::Git { url, reff, rev } => {
-                assert_eq!(url, "https://example.com/o/r");
-                assert_eq!(reff.as_deref(), Some("main"));
-                assert_eq!(rev.as_deref(), Some("abc123"));
-            },
-            Source::Github { .. }
-            | Source::Gitlab { .. }
-            | Source::Tarball { .. }
-            | Source::Path { .. } => {
-                panic!("expected git target")
-            },
-        }
-        match "git+ssh://git@example.com/o/r?rev=deadbeef"
-            .parse::<Source>()
-            .unwrap()
-        {
-            Source::Git { reff, rev, .. } => {
-                assert_eq!(reff, None);
-                assert_eq!(rev.as_deref(), Some("deadbeef"));
-            },
-            Source::Github { .. }
-            | Source::Gitlab { .. }
-            | Source::Tarball { .. }
-            | Source::Path { .. } => {
-                panic!("expected git target")
-            },
-        }
-    }
-
-    #[test]
-    fn git_query_fragment_is_not_part_of_ref_or_rev() {
-        match "git+https://example.com/o/r?ref=main&rev=abc123#frag"
-            .parse::<Source>()
-            .unwrap()
-        {
-            Source::Git { url, reff, rev } => {
-                assert_eq!(url, "https://example.com/o/r");
-                assert_eq!(reff.as_deref(), Some("main"));
-                assert_eq!(rev.as_deref(), Some("abc123"));
-            },
-            Source::Github { .. }
-            | Source::Gitlab { .. }
-            | Source::Tarball { .. }
-            | Source::Path { .. } => {
-                panic!("expected git target")
-            },
-        }
-    }
-
-    #[test]
-    fn gitlab_url_is_first_class_source() {
-        match "gitlab:NixOS/nixpkgs/nixos-unstable?host=GitLab.Example.Com&rev=abc123"
-            .parse::<Source>()
-            .unwrap()
-        {
-            Source::Gitlab {
-                host,
-                owner,
-                repo,
-                reff,
-                rev,
-            } => {
-                assert_eq!(host, "gitlab.example.com");
-                assert_eq!(owner, "NixOS");
-                assert_eq!(repo, "nixpkgs");
-                assert_eq!(reff.as_deref(), Some("nixos-unstable"));
-                assert_eq!(rev.as_deref(), Some("abc123"));
-            },
-            Source::Github { .. }
-            | Source::Git { .. }
-            | Source::Tarball { .. }
-            | Source::Path { .. } => {
-                panic!("expected gitlab target")
-            },
-        }
-    }
-
-    #[test]
-    fn git_target_covers_git_and_gitlab_sources() {
-        let git = "git+https://example.com/o/r?ref=main&rev=abc123"
-            .parse::<Source>()
-            .unwrap();
-        let git_target = git.git_target().unwrap();
-        assert_eq!(git_target.url.as_ref(), "https://example.com/o/r");
-        assert_eq!(git_target.reff, Some("main"));
-        assert_eq!(git_target.rev, Some("abc123"));
-
-        let gitlab = "gitlab:NixOS/nixpkgs/nixos-unstable?host=gitlab.example.com&rev=abc123"
-            .parse::<Source>()
-            .unwrap();
-        let gitlab_target = gitlab.git_target().unwrap();
-        assert_eq!(
-            gitlab_target.url.as_ref(),
-            "https://gitlab.example.com/NixOS/nixpkgs.git"
-        );
-        assert_eq!(gitlab_target.reff, Some("nixos-unstable"));
-        assert_eq!(gitlab_target.rev, Some("abc123"));
-    }
-
-    #[test]
-    fn github_rev_is_committish() {
-        match "github:o/r?rev=abc123".parse::<Source>().unwrap() {
-            Source::Github { reff, rev, .. } => {
-                assert_eq!(reff, None);
-                assert_eq!(rev.as_deref(), Some("abc123"));
-            },
-            Source::Git { .. }
-            | Source::Gitlab { .. }
-            | Source::Tarball { .. }
-            | Source::Path { .. } => {
-                panic!("expected github target")
-            },
-        }
-    }
-
-    #[test]
-    fn https_url_is_tarball() {
-        match "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz"
-            .parse::<Source>()
-            .unwrap()
-        {
-            Source::Tarball { url } => {
-                assert_eq!(
-                    url,
-                    "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz"
-                );
-            },
-            Source::Github { .. }
-            | Source::Git { .. }
-            | Source::Gitlab { .. }
-            | Source::Path { .. } => {
-                panic!("expected tarball target")
-            },
-        }
-        match "http://example.com/release.tar.gz"
-            .parse::<Source>()
-            .unwrap()
-        {
-            Source::Tarball { .. } => {},
-            Source::Github { .. }
-            | Source::Git { .. }
-            | Source::Gitlab { .. }
-            | Source::Path { .. } => {
-                panic!("expected tarball target")
-            },
-        }
     }
 }

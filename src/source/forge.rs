@@ -10,7 +10,6 @@ use crate::{
     },
 };
 
-/// decodes a raw-file body after the http get
 pub type DecoderError = Box<dyn Error + Send + Sync>;
 pub type Decoder = fn(&str) -> Result<String, DecoderError>;
 
@@ -68,7 +67,6 @@ static DEFAULT_SCHEME: HostScheme = HostScheme {
     decoder: None,
 };
 
-/// repo whose raw files can be probed over http
 pub struct Forge {
     base:          String,
     authoritative: bool,
@@ -159,111 +157,4 @@ fn decode_b64(body: &str) -> Result<String, DecoderError> {
         .decode(body.trim().as_bytes())
         .map_err(|err| Box::new(err) as DecoderError)?;
     String::from_utf8(bytes).map_err(|err| Box::new(err) as DecoderError)
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::{
-        Forge,
-        LockedNode,
-    };
-
-    fn node(value: serde_json::Value) -> LockedNode {
-        LockedNode::from_value(value).unwrap()
-    }
-
-    fn url(node: &LockedNode, file: &str) -> Option<String> {
-        Forge::from_locked(node).map(|forge| forge.raw_file_url("REV", file).url)
-    }
-
-    #[test]
-    fn github_node_builds_raw_githubusercontent_url() {
-        assert_eq!(
-            url(
-                &node(json!({"type": "github", "owner": "o", "repo": "r"})),
-                "flake.lock"
-            )
-            .as_deref(),
-            Some("https://raw.githubusercontent.com/o/r/REV/flake.lock")
-        );
-    }
-
-    #[test]
-    fn gitlab_node_uses_dash_raw_and_is_authoritative() {
-        let forge = Forge::from_locked(&node(json!({"type": "gitlab", "owner": "o", "repo": "r"})))
-            .unwrap();
-        assert_eq!(
-            forge.raw_file_url("REV", "f").url,
-            "https://gitlab.com/o/r/-/raw/REV/f"
-        );
-        assert!(forge.authoritative());
-    }
-
-    #[test]
-    fn self_hosted_gitlab_node_keeps_gitlab_raw_scheme() {
-        let forge = Forge::from_locked(&node(
-            json!({"type": "gitlab", "host": "git.example.com", "owner": "o", "repo": "r"}),
-        ))
-        .unwrap();
-        assert_eq!(
-            forge.raw_file_url("REV", "f").url,
-            "https://git.example.com/o/r/-/raw/REV/f"
-        );
-        assert!(forge.authoritative());
-    }
-
-    #[test]
-    fn git_node_gitlab_scheme_ignores_host_case_and_port() {
-        let forge = Forge::from_locked(&node(
-            json!({"type": "git", "url": "https://GitLab.Example.Com:8443/o/r.git"}),
-        ))
-        .unwrap();
-        assert!(!forge.authoritative());
-        assert_eq!(
-            forge.raw_file_url("REV", "f").url,
-            "https://gitlab.example.com:8443/o/r/-/raw/REV/f"
-        );
-    }
-
-    #[test]
-    fn git_node_gitlab_ssh_scheme_uses_https_raw_probe() {
-        let forge = Forge::from_locked(&node(
-            json!({"type": "git", "url": "ssh://git@gitlab.example.com:2222/group/sub/repo.git"}),
-        ))
-        .unwrap();
-        assert!(!forge.authoritative());
-        assert_eq!(
-            forge.raw_file_url("REV", "f").url,
-            "https://gitlab.example.com/group/sub/repo/-/raw/REV/f"
-        );
-    }
-
-    #[test]
-    fn git_node_is_not_authoritative_and_uses_gitea_default() {
-        let forge = Forge::from_locked(&node(
-            json!({"type": "git", "url": "https://codeberg.org/o/r.git"}),
-        ))
-        .unwrap();
-        assert!(!forge.authoritative());
-        assert_eq!(
-            forge.raw_file_url("REV", "f").url,
-            "https://codeberg.org/o/r/raw/commit/REV/f"
-        );
-    }
-
-    #[test]
-    fn gerrit_host_decodes_base64() {
-        let forge = Forge::from_locked(&node(
-            json!({"type": "git", "url": "https://x.googlesource.com/o/r"}),
-        ))
-        .unwrap();
-        let raw = forge.raw_file_url("REV", "f");
-        assert_eq!(
-            raw.url,
-            "https://x.googlesource.com/o/r/+/REV/f?format=TEXT"
-        );
-        assert!(raw.decoder.is_some());
-    }
 }

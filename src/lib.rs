@@ -21,8 +21,7 @@ mod ui;
 use std::process::ExitCode;
 
 use color_eyre::config::HookBuilder;
-// the curated public surface: the same operations the CLI runs, callable
-// directly, plus the data types they read and write
+// this is our public surface
 pub use commands::{
     AddRequest,
     InitRequest,
@@ -68,8 +67,6 @@ pub use source::{
     id::SourceId,
 };
 
-/// run tack as its CLI: install the error hook, parse argv, dispatch, and map
-/// the outcome to a process exit code. this is the whole binary
 #[must_use]
 pub fn run() -> ExitCode {
     if let Err(err) = HookBuilder::default().display_env_section(false).install() {
@@ -95,7 +92,7 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// classify a failure into tack's exit codes: config (3), fetch (4), else 1
+/// exit code buckets config 3 fetch 4 else 1
 fn exit_code(report: &eyre::Report) -> ExitCode {
     for cause in report.chain() {
         if cause.downcast_ref::<ConfigError>().is_some() {

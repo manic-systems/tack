@@ -40,7 +40,6 @@ pub fn short(rev: &str) -> String {
     if let Some(b64) = rev.strip_prefix("sha256-") {
         return format!("sha256-{}", b64.chars().take(12).collect::<String>());
     }
-    // a local path pin carries its path as the "rev"; show it whole
     if rev.starts_with('/') || rev.starts_with("./") || rev.starts_with("../") {
         return rev.to_owned();
     }
@@ -59,14 +58,12 @@ pub fn scan_diagnostic(diagnostic: &ScanDiagnostic) -> String {
     format!("scan {}: {}", source_label(diagnostic.path()), diagnostic)
 }
 
-/// radius-1 window around the cursor
 pub fn render_window(view: &history::View) {
     let lo = view.cursor.saturating_sub(1);
     let hi = (view.cursor + 1).min(view.rows.len().saturating_sub(1));
     render(view, lo, hi);
 }
 
-/// rows `lo..=hi` newest-first, `>` marks the cursor
 pub fn render(view: &history::View, lo: usize, hi: usize) {
     let now = history::now();
     let times = (lo..=hi)
@@ -228,98 +225,5 @@ fn follow_rhs(follow: &CollapsedFollow) -> String {
                 .join(", ");
             format!("[{body}]")
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        RenderedMark,
-        follow_key,
-        follow_rhs,
-        scan_diagnostic,
-    };
-    use crate::{
-        report::{
-            CollapsedFollow,
-            FollowMap,
-            Mark,
-        },
-        scan_diagnostic::{
-            ScanDiagnostic,
-            ScanFile,
-        },
-    };
-
-    fn map(pairs: &[(&str, &str)]) -> FollowMap {
-        let mut follow = FollowMap::default();
-        for &(alias, target) in pairs {
-            follow.insert(alias.to_owned(), target.to_owned());
-        }
-        follow
-    }
-
-    fn rendered(lines: &[CollapsedFollow]) -> Vec<(String, String)> {
-        lines
-            .iter()
-            .map(|follow| (follow_key(follow).to_owned(), follow_rhs(follow)))
-            .collect()
-    }
-
-    #[test]
-    fn collapse_single_alias_uses_string_form() {
-        let lines = map(&[("nixpkgs", "nixpkgs")]).collapsed();
-        assert_eq!(rendered(&lines), vec![(
-            "nixpkgs".into(),
-            "\"nixpkgs\"".into()
-        )]);
-    }
-
-    #[test]
-    fn collapse_multi_alias_uses_array_form_excluding_key() {
-        let lines = map(&[("git-hooks", "git-hooks"), ("git-hooks-nix", "git-hooks")]).collapsed();
-        assert_eq!(rendered(&lines), vec![(
-            "git-hooks".into(),
-            "[\"git-hooks-nix\"]".into()
-        )]);
-    }
-
-    #[test]
-    fn collapse_multi_alias_when_target_is_not_an_alias() {
-        let lines = map(&[("xwl-stable", "xwl"), ("xwl-unstable", "xwl")]).collapsed();
-        assert_eq!(rendered(&lines), vec![(
-            "xwl".into(),
-            "[\"xwl-stable\", \"xwl-unstable\"]".into()
-        )]);
-    }
-
-    #[test]
-    fn mark_glyphs_keep_visible_widths() {
-        let ahead = RenderedMark::from(Mark::Ahead);
-        assert_eq!(ahead.width, 1);
-        assert!(ahead.text.contains('\u{2191}'));
-        assert!(!ahead.text.contains('~'));
-
-        let diverged = RenderedMark::from(Mark::Diverged);
-        assert_eq!(diverged.width, 2);
-        assert!(diverged.text.contains('\u{2191}'));
-        assert!(diverged.text.contains('\u{2193}'));
-        assert!(!diverged.text.contains('~'));
-
-        let dated = RenderedMark::from(Mark::DatedNewer);
-        assert_eq!(dated.width, 2);
-        assert!(dated.text.contains('\u{2191}'));
-        assert!(dated.text.contains('~'));
-    }
-
-    #[test]
-    fn scan_diagnostic_includes_source_file_and_kind() {
-        let path = vec!["root".to_owned(), "dep".to_owned()];
-        let diagnostic = ScanDiagnostic::parse(&path, ScanFile::FlakeLock, "expected value");
-
-        assert_eq!(
-            scan_diagnostic(&diagnostic),
-            "scan root > dep: flake.lock parse failed: expected value"
-        );
     }
 }

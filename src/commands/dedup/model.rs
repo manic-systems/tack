@@ -16,13 +16,9 @@ impl Side {
 }
 
 pub(super) struct Entry {
-    /// lineage from top pin down to the parent tree scanned
     pub path: Vec<String>,
     pub name: String,
-    /// for side-scoped follow matching
     pub side: Side,
-    /// untruncated
     pub rev:  String,
-    /// node lastModified
     pub lm:   Option<u64>,
 }
