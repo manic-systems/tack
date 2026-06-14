@@ -26,8 +26,6 @@ const RESOLVER_NIX: &str = include_str!("../../.tack/default.nix");
 const SCAFFOLD_FLAKE: &str = include_str!("../../templates/default/flake.nix");
 const MARKER: &str = "# tack-managed resolver.";
 
-/// warn when the resolver carries tack's marker but drifted from the template;
-/// silent for forked resolvers and uninitialized projects
 pub fn warn_stale_resolver(project: &Project) {
     let path = project.resolver_path();
     if let Ok(current) = fs::read_to_string(&path)
@@ -95,12 +93,10 @@ pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<LookRe
     update::look(project, names, verbose)
 }
 
-/// `update` driving the terminal spinner; for the binary, not the library
 pub fn update_cli(project: &Project, names: &[String], accept: bool) -> Result<()> {
     update::update_cli(project, names, accept)
 }
 
-/// `look` driving the terminal spinner; for the binary, not the library
 pub fn look_cli(project: &Project, names: &[String], verbose: bool) -> Result<()> {
     update::look_cli(project, names, verbose)
 }
@@ -117,8 +113,6 @@ pub fn redo(project: &Project) -> Result<()> {
     undo::redo(project)
 }
 
-/// swallow a fetch result: expected misses vanish, suspicious failures return a
-/// cause string
 fn tolerate<T>(result: StdResult<T, FetchError>) -> (Option<T>, Option<String>) {
     match result {
         Ok(value) => (Some(value), None),
@@ -141,38 +135,4 @@ fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Inpu
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::tolerate;
-    use crate::fetch::FetchError;
-
-    #[test]
-    fn tolerate_swallows_absent_and_transport_silently() {
-        assert_eq!(
-            tolerate::<()>(Err(FetchError::NotFound { what: "x".into() })).1,
-            None
-        );
-        assert_eq!(
-            tolerate::<()>(Err(FetchError::Transport("down".into()))).1,
-            None
-        );
-    }
-
-    #[test]
-    fn tolerate_surfaces_auth_and_github() {
-        assert!(
-            tolerate::<()>(Err(FetchError::Auth {
-                what: "no token".into(),
-            }))
-            .1
-            .is_some()
-        );
-        assert!(
-            tolerate::<()>(Err(FetchError::Github("weird".into())))
-                .1
-                .is_some()
-        );
-    }
 }

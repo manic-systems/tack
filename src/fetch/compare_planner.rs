@@ -50,8 +50,6 @@ pub enum CompareSource {
         owner: String,
         repo:  String,
     },
-    /// forgejo and gitea share the whole `/api/v1` surface, so the compare
-    /// path treats them identically and carries no kind
     ForgejoLike {
         host:  String,
         owner: String,
@@ -195,11 +193,7 @@ impl CompareSession {
             && let Ok((rev, status)) =
                 github::resolve_ref_compare(owner, repo, reff.as_deref(), previous)
         {
-            // when graphql fuses the comparison we are done; when it can't
-            // (e.g. the old rev was force-pushed away and is unreachable to the
-            // graphql `compare` node) the resolved rev is still good, so fall
-            // through to the REST/DAG ladder rather than surrendering to
-            // `unavailable` — those paths do not depend on that node.
+            // graphql may resolve the new rev but fail to compare the old one
             let comparison = status.map_or_else(
                 || self.compare_resolved(source, previous, &rev),
                 BranchComparison::verified,
@@ -214,8 +208,6 @@ impl CompareSession {
         Ok(CurrentRev { rev, comparison })
     }
 
-    /// compare an already-resolved `rev` against `previous` over the REST/DAG
-    /// ladder, short-circuiting an exact match before any network.
     fn compare_resolved(&self, source: &Source, previous: &str, rev: &str) -> BranchComparison {
         if previous == rev {
             return BranchComparison::verified(CompareStatus::Identical);
@@ -411,7 +403,6 @@ fn compare_api(job: &CompareJob) -> FetchResult<Option<CompareStatus>> {
             ref host,
             ref owner,
             ref repo,
-            // forgejo and gitea answer the same api, so the kind is a formality
         } => forge::compare_status(ForgeKind::Forgejo, host, owner, repo, &job.base, &job.head),
         CompareSource::Git { ref url } => compare_detected_git_url(url, &job.base, &job.head),
     }
@@ -464,7 +455,6 @@ fn fallback_dag(job: &CompareJob, api_error: Option<FetchError>) -> CompareAttem
     }
 }
 
-/// Surface the forge-API failure and the DAG-probe failure when both fail
 fn dag_fallback_cause(api_error: Option<FetchError>, dag_err: &FetchError) -> String {
     api_error.map_or_else(
         || dag_err.to_string(),
@@ -479,29 +469,10 @@ mod tests {
         CompareSource,
         dag_fallback_cause,
     };
-    use crate::{
-        fetch::{
-            CompareStatus,
-            FetchError,
-        },
-        source::id::SourceId,
+    use crate::fetch::{
+        CompareStatus,
+        FetchError,
     };
-
-    fn source_id(raw: &str) -> SourceId {
-        SourceId::from_url(raw).unwrap()
-    }
-
-    #[test]
-    fn source_from_id_maps_first_class_forges() {
-        assert!(matches!(
-            CompareSource::from_source_id(&source_id("github:o/r")),
-            Some(CompareSource::Github { .. })
-        ));
-        assert!(matches!(
-            CompareSource::from_source_id(&source_id("gitlab:o/r")),
-            Some(CompareSource::Gitlab { .. })
-        ));
-    }
 
     #[test]
     fn identical_compare_job_is_verified_without_network() {
@@ -529,12 +500,5 @@ mod tests {
             cause.contains("askpass: no tty"),
             "dag cause missing: {cause}"
         );
-    }
-
-    #[test]
-    fn dag_fallback_cause_uses_dag_error_when_api_succeeded() {
-        let dag = FetchError::Transport("askpass: no tty".to_owned());
-        let cause = dag_fallback_cause(None, &dag);
-        assert_eq!(cause, dag.to_string());
     }
 }

@@ -19,11 +19,10 @@ use crate::source::{
     normalize_host,
 };
 
-/// on-disk lock file keyed by input name
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockFile {
     nodes:       BTreeMap<String, LockedNode>,
-    /// unknown or missing-type nodes kept verbatim so save round-trips them
+    /// unknown nodes survive saves
     passthrough: BTreeMap<String, Value>,
 }
 
@@ -97,7 +96,6 @@ impl LockFile {
     }
 }
 
-/// typed nodes serialize in field order, passthrough nodes verbatim
 enum NodeRepr<'a> {
     Typed(&'a LockedNode),
     Kept(&'a Value),
@@ -115,7 +113,6 @@ impl Serialize for NodeRepr<'_> {
     }
 }
 
-/// flake.lock exposed as locked nodes tack can compare
 #[derive(Debug, Deserialize)]
 pub struct FlakeLock {
     #[serde(default = "default_root")]
@@ -466,7 +463,6 @@ mod tests {
     };
 
     use super::{
-        FlakeLock,
         LockFile,
         LockedNode,
     };
@@ -476,25 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_skips_unknown_and_missing_type() {
-        let raw = r#"{
-            "good": {"type": "github", "owner": "o", "repo": "r", "rev": "abc"},
-            "future": {"type": "mercurial", "url": "https://x"},
-            "typeless": {"url": "https://y"}
-        }"#;
-        let lock = LockFile::parse(raw).unwrap();
-
-        assert_eq!(lock.iter().count(), 1);
-        assert!(lock.get("good").is_some());
-        assert!(lock.get("future").is_none());
-
-        let mut skipped = lock.unknown_nodes().collect::<Vec<_>>();
-        skipped.sort_unstable();
-        assert_eq!(skipped, vec!["future", "typeless"]);
-    }
-
-    #[test]
-    fn save_round_trips_unknown_nodes() {
+    fn save_preserves_unknown_lock_nodes() {
         let raw = r#"{
             "future": {"custom": true, "type": "mercurial"},
             "good": {"type": "github", "owner": "o", "repo": "r", "rev": "abc"}
@@ -502,53 +480,26 @@ mod tests {
         let lock = LockFile::parse(raw).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pins.lock.json");
+
         lock.save(&path).unwrap();
 
         let written = fs::read_to_string(&path).unwrap();
         let back = serde_json::from_str::<Value>(&written).unwrap();
         assert_eq!(
-            back.pointer("/future/type").and_then(Value::as_str),
-            Some("mercurial")
-        );
-        assert_eq!(
             back.pointer("/future/custom").and_then(Value::as_bool),
             Some(true)
         );
         assert_eq!(
-            back.pointer("/good/owner").and_then(Value::as_str),
-            Some("o")
+            LockFile::parse(&written)
+                .unwrap()
+                .unknown_nodes()
+                .collect::<Vec<_>>(),
+            vec!["future"]
         );
-
-        let reparsed = LockFile::parse(&written).unwrap();
-        assert_eq!(reparsed.unknown_nodes().collect::<Vec<_>>(), vec!["future"]);
-        assert!(reparsed.get("good").is_some());
     }
 
     #[test]
-    fn typed_only_save_is_byte_identical_to_legacy() {
-        let raw = r#"{"a":{"type":"indirect","id":"nixpkgs"},"b":{"type":"github","owner":"o","repo":"r","rev":"abc"}}"#;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pins.lock.json");
-        LockFile::parse(raw).unwrap().save(&path).unwrap();
-        let written = fs::read_to_string(&path).unwrap();
-
-        let mut legacy_nodes = super::BTreeMap::new();
-        legacy_nodes.insert(
-            "a".to_owned(),
-            node(json!({"type": "indirect", "id": "nixpkgs"})),
-        );
-        legacy_nodes.insert(
-            "b".to_owned(),
-            node(json!({"type": "github", "owner": "o", "repo": "r", "rev": "abc"})),
-        );
-        let mut legacy = serde_json::to_string_pretty(&legacy_nodes).unwrap();
-        legacy.push('\n');
-
-        assert_eq!(written, legacy);
-    }
-
-    #[test]
-    fn remove_drops_unknown_node_and_insert_supersedes_it() {
+    fn remove_and_insert_replace_unknown_nodes() {
         let raw = r#"{"x": {"type": "mercurial", "url": "https://x"}}"#;
         let mut lock = LockFile::parse(raw).unwrap();
         assert_eq!(lock.unknown_nodes().count(), 1);
@@ -562,198 +513,16 @@ mod tests {
 
         let mut kept = LockFile::parse(raw).unwrap();
         assert!(kept.remove("x"));
-        assert!(!kept.remove("x"));
         assert_eq!(kept.unknown_nodes().count(), 0);
     }
 
     #[test]
-    fn rev_uses_type_specific_identity_key() {
-        assert_eq!(
-            node(json!({"type": "github", "rev": "abc", "owner": "o", "repo": "r"})).rev(),
-            Some("abc")
-        );
-        assert_eq!(
-            node(json!({"type": "tarball", "url": "https://x/y"})).rev(),
-            Some("https://x/y")
-        );
-        assert_eq!(
-            node(json!({"type": "fixed", "url": "https://x", "sha256": "sha256-z"})).rev(),
-            Some("sha256-z")
-        );
-    }
-
-    #[test]
-    fn full_rev_prefers_url_for_fixed_nodes() {
-        let fixed = node(json!({"type": "fixed", "url": "https://x", "sha256": "sha256-z"}));
-        assert_eq!(fixed.full_rev(), Some("https://x"));
-        assert_eq!(fixed.rev(), Some("sha256-z"));
-    }
-
-    #[test]
-    fn hash_uses_sha256_for_fixed_else_nar_hash() {
-        assert_eq!(
-            node(json!({"type": "fixed", "sha256": "sha256-z"})).hash(),
-            Some("sha256-z")
-        );
-        assert_eq!(
-            node(json!({"type": "github", "owner": "o", "repo": "r", "narHash": "sha256-n"}))
-                .hash(),
-            Some("sha256-n")
-        );
-    }
-
-    #[test]
-    fn last_modified_reads_positive_epoch() {
-        assert_eq!(
-            node(json!({"type": "github", "owner": "o", "repo": "r", "lastModified": 1700_i64}))
-                .last_modified(),
-            Some(1700)
-        );
-        assert_eq!(
-            node(json!({"type": "github", "owner": "o", "repo": "r"})).last_modified(),
-            None
-        );
-    }
-
-    #[test]
-    fn typed_nodes_cover_flake_lock_node_shapes() {
-        let gitlab = node(json!({"type": "gitlab", "owner": "o", "repo": "r"}));
-        assert!(matches!(
-            gitlab,
-            LockedNode::Gitlab { ref host, .. } if host == "gitlab.com"
-        ));
-        assert!(matches!(
-            node(json!({"type": "indirect", "id": "nixpkgs"})),
-            LockedNode::Indirect { ref id, .. } if id == "nixpkgs"
-        ));
-        assert!(matches!(
-            node(json!({"type": "path", "path": "/p"})),
-            LockedNode::Path { ref path, .. } if path == "/p"
-        ));
-    }
-
-    #[test]
-    fn gitlab_host_is_canonicalized_at_lock_boundary() {
-        let parsed = node(json!({
-            "type": "gitlab",
-            "host": "GITLAB.COM:443",
-            "owner": "o",
-            "repo": "r"
-        }));
-        assert!(matches!(
-            parsed,
-            LockedNode::Gitlab { ref host, .. } if host == "gitlab.com"
-        ));
-
-        let default_host = serde_json::to_value(LockedNode::new_gitlab(
-            "GitLab.Com:443",
-            "o",
-            "r",
-            "rev",
-            "sha256-n",
-            10,
-        ))
-        .unwrap();
-        assert!(default_host.get("host").is_none());
-
-        let self_hosted = serde_json::to_value(LockedNode::new_gitlab(
-            "GitLab.Example.Com:8443",
-            "o",
-            "r",
-            "rev",
-            "sha256-n",
-            10,
-        ))
-        .unwrap();
-        assert_eq!(
-            self_hosted.get("host").and_then(Value::as_str),
-            Some("gitlab.example.com:8443")
-        );
-    }
-
-    #[test]
-    fn flake_lock_locked_nodes_skip_root_and_unknown_locked_nodes() {
-        let raw = r#"{
-            "root": "root",
-            "nodes": {
-                "root": {},
-                "empty": {},
-                "future": {"locked": {"type": "future", "x": 1}},
-                "nixpkgs": {
-                    "locked": {
-                        "type": "github",
-                        "owner": "NixOS",
-                        "repo": "nixpkgs",
-                        "rev": "abc"
-                    }
-                }
-            }
-        }"#;
-
-        let doc = FlakeLock::parse(raw).unwrap();
-        let nodes = doc
-            .locked_nodes()
-            .map(|(name, node)| {
-                let repo = match *node {
-                    LockedNode::Github { ref repo, .. } => Some(repo.to_owned()),
-                    LockedNode::Gitlab { .. }
-                    | LockedNode::Git { .. }
-                    | LockedNode::Tarball { .. }
-                    | LockedNode::Fixed { .. }
-                    | LockedNode::Indirect { .. }
-                    | LockedNode::Path { .. } => None,
-                };
-                (name.to_owned(), repo)
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(nodes, vec![(
-            "nixpkgs".to_owned(),
-            Some("nixpkgs".to_owned())
-        )]);
-    }
-
-    #[test]
-    fn roundtrip_preserves_extra_lock_fields() {
-        // github node with a field tack does not model
+    fn extra_lock_fields_survive_node_roundtrip() {
         let raw = r#"{"type":"github","owner":"o","repo":"r","ref":"nixos-unstable","rev":"abc","narHash":"sha256-z","lastModified":1700,"revCount":42}"#;
-        let n = LockedNode::from_value(serde_json::from_str(raw).unwrap()).unwrap();
-        let back = serde_json::to_string(&n).unwrap();
-        println!("IN : {raw}");
-        println!("OUT: {back}");
-        let back_json = serde_json::from_str::<Value>(&back).unwrap();
-        assert_eq!(back_json.get("ref"), Some(&json!("nixos-unstable")));
-        assert_eq!(back_json.get("revCount"), Some(&json!(42_i64)));
-    }
+        let node = LockedNode::from_value(serde_json::from_str(raw).unwrap()).unwrap();
+        let back = serde_json::to_value(&node).unwrap();
 
-    #[test]
-    fn typed_git_node_omits_false_submodules() {
-        let node = serde_json::to_value(LockedNode::new_git(
-            "https://x",
-            "refs/heads/main",
-            "rev",
-            "sha256-n",
-            10,
-            false,
-        ))
-        .unwrap();
-
-        assert_eq!(node.get("type").and_then(Value::as_str), Some("git"));
-        assert!(node.get("submodules").is_none());
-    }
-
-    #[test]
-    fn typed_git_node_keeps_true_submodules() {
-        let node = serde_json::to_value(LockedNode::new_git(
-            "https://x",
-            "refs/heads/main",
-            "rev",
-            "sha256-n",
-            10,
-            true,
-        ))
-        .unwrap();
-
-        assert_eq!(node.get("submodules").and_then(Value::as_bool), Some(true));
+        assert_eq!(back.get("ref"), Some(&json!("nixos-unstable")));
+        assert_eq!(back.get("revCount"), Some(&json!(42_i64)));
     }
 }

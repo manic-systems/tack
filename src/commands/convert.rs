@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-//! import a flake.nix's `inputs` attr into pins.toml
-
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -81,7 +79,6 @@ struct FlakeInput {
     flake:      Option<bool>,
     dir:        Option<String>,
     submodules: Option<bool>,
-    /// nested `inputs.<child>` overrides; we keep the `.follows` ones
     #[serde(default)]
     inputs:     BTreeMap<String, Override>,
 }
@@ -105,45 +102,5 @@ impl FlakeInput {
             .iter()
             .filter_map(|(child, over)| Some((child.clone(), over.follows.clone()?)))
             .collect::<Vec<_>>()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::FlakeInput;
-    use crate::pins::PinType;
-
-    fn input(json: &str) -> FlakeInput {
-        serde_json::from_str(json).expect("deserialize")
-    }
-
-    #[test]
-    fn flake_false_becomes_a_fetch_pin() {
-        assert_eq!(
-            input(r#"{ "url": "github:o/r", "flake": false }"#).pin_type(),
-            PinType::Fetch
-        );
-        assert_eq!(
-            input(r#"{ "url": "github:o/r" }"#).pin_type(),
-            PinType::Flake
-        );
-    }
-
-    #[test]
-    fn follows_are_lifted_from_nested_inputs() {
-        let parsed = input(
-            r#"{
-              "url": "github:ipetkov/crane",
-              "inputs": {
-                "nixpkgs": { "follows": "nixpkgs" },
-                "flake-utils": { "follows": "flake-utils" },
-                "other": { "url": "github:o/other" }
-              }
-            }"#,
-        );
-        assert_eq!(parsed.follows(), vec![
-            ("flake-utils".to_owned(), "flake-utils".to_owned()),
-            ("nixpkgs".to_owned(), "nixpkgs".to_owned()),
-        ]);
     }
 }

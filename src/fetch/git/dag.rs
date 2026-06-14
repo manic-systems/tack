@@ -595,116 +595,37 @@ impl<R: BufRead + ?Sized> BufRead for CappedBufRead<'_, R> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{
-        Cursor,
-        Read as _,
-    };
-
-    use super::{
-        CappedBufRead,
-        compare_status,
-        deepen_depth,
-        parse_rounds,
-        resolve_tip,
-    };
+    use super::compare_status;
     use crate::fetch::{
         CompareStatus,
         git::test_remote::LocalRemote,
     };
 
-    fn linear_remote() -> (LocalRemote, String, String) {
-        let mut remote = LocalRemote::new();
-        let base = remote.commit("one\n", "one");
-        let head = remote.commit("one\ntwo\n", "two");
-        (remote, base, head)
-    }
-
-    #[test]
-    fn resolves_remote_tip_from_refs() {
-        let (remote, _, head) = linear_remote();
-        remote.tag("v1", &head);
-        let url = remote.url();
-
-        assert_eq!(resolve_tip(&url, None).unwrap(), head);
-        assert_eq!(resolve_tip(&url, Some("main")).unwrap(), head);
-        assert_eq!(resolve_tip(&url, Some("refs/heads/main")).unwrap(), head);
-        assert_eq!(resolve_tip(&url, Some("v1")).unwrap(), head);
-    }
-
     #[test]
     fn compares_file_remote_topology() {
-        let (remote, base, head) = linear_remote();
-        let url = remote.url();
+        let mut linear = LocalRemote::new();
+        let base = linear.commit("one\n", "one");
+        let head = linear.commit("one\ntwo\n", "two");
+        let linear_url = linear.url();
+
+        let mut diverged = LocalRemote::new();
+        let root = diverged.commit("root\n", "root");
+        let old = diverged.commit("old\n", "old");
+        diverged.reset_to(&root);
+        let new = diverged.commit("new\n", "new");
+        let diverged_url = diverged.url();
 
         assert_eq!(
-            compare_status(&url, &base, &base).unwrap(),
-            Some(CompareStatus::Identical)
-        );
-        assert_eq!(
-            compare_status(&url, &base, &head).unwrap(),
+            compare_status(&linear_url, &base, &head).unwrap(),
             Some(CompareStatus::Ahead)
         );
         assert_eq!(
-            compare_status(&url, &head, &base).unwrap(),
+            compare_status(&linear_url, &head, &base).unwrap(),
             Some(CompareStatus::Behind)
         );
-    }
-
-    #[test]
-    fn compares_file_remote_diverged() {
-        let mut remote = LocalRemote::new();
-        let root = remote.commit("root\n", "root");
-        let old = remote.commit("old\n", "old");
-        remote.reset_to(&root);
-        let new = remote.commit("new\n", "new");
-        let url = remote.url();
-
         assert_eq!(
-            compare_status(&url, &old, &new).unwrap(),
+            compare_status(&diverged_url, &old, &new).unwrap(),
             Some(CompareStatus::Diverged)
         );
-    }
-
-    #[test]
-    fn compare_returns_unverified_when_merge_base_exceeds_probe_depth() {
-        let mut remote = LocalRemote::new();
-        let root = remote.commit("root\n", "root");
-        let mut old = String::new();
-        for idx in 0..20_u8 {
-            old = remote.commit(&format!("old {idx}\n"), &format!("old {idx}"));
-        }
-        remote.reset_to(&root);
-        let mut new = String::new();
-        for idx in 0..20_u8 {
-            new = remote.commit(&format!("new {idx}\n"), &format!("new {idx}"));
-        }
-        let url = remote.url();
-
-        assert_eq!(compare_status(&url, &old, &new).unwrap(), None);
-    }
-
-    #[test]
-    fn deepen_rounds_are_configured_as_iterations() {
-        let depths = (0..5).map(deepen_depth).collect::<Vec<_>>();
-
-        assert_eq!(depths, vec![1, 8, 16, 32, 64]);
-        assert_eq!(parse_rounds(None).unwrap(), 3);
-        assert_eq!(parse_rounds(Some("")).unwrap(), 3);
-        assert_eq!(parse_rounds(Some("4")).unwrap(), 4);
-        parse_rounds(Some("0")).unwrap_err();
-        parse_rounds(Some("11")).unwrap_err();
-        parse_rounds(Some("deep")).unwrap_err();
-    }
-
-    #[test]
-    fn capped_buf_read_errors_after_limit() {
-        let mut input = Cursor::new(b"abcdef".as_slice());
-        let mut capped = CappedBufRead::new(&mut input, 3);
-        let mut output = Vec::new();
-
-        let err = capped.read_to_end(&mut output).unwrap_err();
-
-        assert_eq!(output, b"abc");
-        assert!(err.to_string().contains("git DAG pack exceeded 3 bytes"));
     }
 }

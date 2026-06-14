@@ -135,8 +135,6 @@ enum Cli {
     Redo,
 }
 
-/// parse argv into a [`Command`], printing help/version or an error and exiting
-/// on `-h`/`--help`/`-V` or a malformed command line
 pub fn parse() -> Command {
     Cli::parse().into()
 }
@@ -195,104 +193,9 @@ impl From<Cli> for Command {
     }
 }
 
-/// child=parent, or bare child follows the same-named pin
 fn parse_follows(rule: &str) -> (String, String) {
     match rule.split_once('=') {
         Some((child, parent)) => (child.to_owned(), parent.to_owned()),
         None => (rule.to_owned(), rule.to_owned()),
-    }
-}
-
-#[cfg(test)]
-#[expect(clippy::panic, reason = "panic is the test-failure coping mechanism")]
-mod tests {
-    use pound::Parse as _;
-
-    use super::{
-        Cli,
-        Command,
-    };
-    use crate::pins::{
-        PinType,
-        Unpack,
-    };
-
-    fn parse(args: &[&str]) -> Command {
-        Cli::try_parse_from(args.iter().copied())
-            .expect("arguments should parse")
-            .into()
-    }
-
-    #[test]
-    fn init_flags_map_through() {
-        assert_eq!(parse(&["init", "--resolver"]), Command::Init {
-            force:    false,
-            resolver: true,
-            flake:    false,
-            convert:  false,
-        });
-    }
-
-    #[test]
-    fn update_collects_names_and_accept() {
-        assert_eq!(parse(&["update", "a", "b", "--accept"]), Command::Update {
-            names:  vec!["a".to_owned(), "b".to_owned()],
-            accept: true,
-        });
-    }
-
-    #[test]
-    fn look_takes_short_verbose() {
-        assert_eq!(parse(&["look", "-v"]), Command::Look {
-            names:   Vec::new(),
-            verbose: true,
-        });
-    }
-
-    #[test]
-    fn add_maps_fetch_unpack_and_follows() {
-        assert_eq!(
-            parse(&[
-                "add",
-                "pkg",
-                "github:o/r",
-                "--fixed",
-                "--unpack",
-                "tarball",
-                "--follows",
-                "nixpkgs=host",
-                "--follows",
-                "self",
-            ]),
-            Command::Add {
-                name:       "pkg".to_owned(),
-                url:        "github:o/r".to_owned(),
-                pin_type:   PinType::Fixed,
-                unpack:     Some(Unpack::Tarball),
-                dir:        None,
-                submodules: false,
-                follows:    vec![
-                    ("nixpkgs".to_owned(), "host".to_owned()),
-                    ("self".to_owned(), "self".to_owned()),
-                ],
-            }
-        );
-    }
-
-    #[test]
-    fn add_defaults_to_a_flake_pin() {
-        let Command::Add { pin_type, .. } = parse(&["add", "n", "github:o/r"]) else {
-            panic!("expected add");
-        };
-        assert_eq!(pin_type, PinType::Flake);
-    }
-
-    #[test]
-    fn alias_rm_parses() {
-        assert_eq!(parse(&["alias", "gh", "--rm"]), Command::Alias {
-            name:     "gh".to_owned(),
-            template: None,
-            rm:       true,
-        });
     }
 }

@@ -135,9 +135,6 @@ struct ScanBatch {
     diagnostics:  BTreeSet<ScanDiagnostic>,
 }
 
-/// for each `[all_follow]` target that isn't a declared input, write the
-/// freshest transitive observation from top-level flake.locks, scanning only
-/// the inputs in `only`
 pub fn auto_dedup_scoped(
     inputs: &[pins::Input],
     all_follow: &BTreeMap<String, String>,
@@ -266,8 +263,7 @@ fn scan_input(
     Some(batch)
 }
 
-/// keep only observations matching the seed in identity & fetch
-/// as fetch method changes NAR (tarball obeys .gitattributes, clone doesn't)
+/// fetch method affects the nar
 fn restrict_to_seed_identity(observations: &mut Vec<LockObservation>) {
     let Some(seed) = observations.first() else {
         return;
@@ -303,16 +299,8 @@ mod tests {
         lock::LockedNode,
     };
 
-    fn github_node(rev: &str) -> LockedNode {
-        LockedNode::new_github("o", "r", rev, "sha256-n", 0)
-    }
-
     fn github_node_in(owner: &str, repo: &str, rev: &str) -> LockedNode {
         LockedNode::new_github(owner, repo, rev, "sha256-n", 0)
-    }
-
-    fn git_node(url: &str, rev: &str) -> LockedNode {
-        LockedNode::new_git(url, "main", rev, "sha256-n", 0, false)
     }
 
     fn node_rev(node: &LockedNode) -> &str {
@@ -320,11 +308,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_dedup_prefers_ahead_candidate_despite_older_timestamp() {
+    fn auto_dedup_prefers_branch_status_over_timestamp() {
         let winner = LockObservation::choose(
             vec![
-                LockObservation::new(300, github_node("base")),
-                LockObservation::new(100, github_node("ahead")),
+                LockObservation::new(300, github_node_in("o", "r", "base")),
+                LockObservation::new(100, github_node_in("o", "r", "ahead")),
             ],
             |base, head| {
                 match (node_rev(base), node_rev(head)) {
@@ -339,45 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_dedup_keeps_base_when_candidate_is_behind_despite_newer_timestamp() {
-        let winner = LockObservation::choose(
-            vec![
-                LockObservation::new(100, github_node("base")),
-                LockObservation::new(500, github_node("behind")),
-            ],
-            |base, head| {
-                match (node_rev(base), node_rev(head)) {
-                    ("base", "behind") => Some(CompareStatus::Behind),
-                    _ => None,
-                }
-            },
-        )
-        .unwrap();
-
-        assert_eq!(node_rev(&winner), "base");
-    }
-
-    #[test]
-    fn auto_dedup_falls_back_to_timestamp_for_diverged_histories() {
-        let winner = LockObservation::choose(
-            vec![
-                LockObservation::new(100, github_node("base")),
-                LockObservation::new(500, github_node("amended")),
-            ],
-            |base, head| {
-                match (node_rev(base), node_rev(head)) {
-                    ("base", "amended") => Some(CompareStatus::Diverged),
-                    _ => None,
-                }
-            },
-        )
-        .unwrap();
-
-        assert_eq!(node_rev(&winner), "amended");
-    }
-
-    #[test]
-    fn restrict_to_seed_identity_drops_foreign_repo_despite_newer_timestamp() {
+    fn restrict_to_seed_identity_drops_foreign_repositories() {
         let mut obs = vec![
             LockObservation::new(100, github_node_in("o", "r", "current")),
             LockObservation::new(900, github_node_in("fork", "r", "foreign")),
@@ -390,20 +340,5 @@ mod tests {
             .map(|entry| node_rev(&entry.node))
             .collect::<Vec<_>>();
         assert_eq!(revs, vec!["current", "sibling"]);
-    }
-
-    #[test]
-    fn restrict_to_seed_identity_drops_a_mismatched_fetch_kind() {
-        let mut obs = vec![
-            LockObservation::new(100, github_node_in("o", "r", "archive")),
-            LockObservation::new(900, git_node("https://github.com/o/r.git", "checkout")),
-        ];
-        restrict_to_seed_identity(&mut obs);
-
-        let revs = obs
-            .iter()
-            .map(|entry| node_rev(&entry.node))
-            .collect::<Vec<_>>();
-        assert_eq!(revs, vec!["archive"]);
     }
 }

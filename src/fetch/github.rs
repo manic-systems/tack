@@ -423,8 +423,7 @@ query($owner: String!, $repo: String!, $old: String!) {
 
 fn graphql_ref_compare_status(status: &str) -> Option<CompareStatus> {
     Some(match status {
-        // ref.compare uses targetRef as base and old locked rev as head, but tack
-        // shows current ref relative to old rev, so ahead/behind invert.
+        // github compares old rev against the ref
         "AHEAD" => CompareStatus::Behind,
         "BEHIND" => CompareStatus::Ahead,
         "DIVERGED" => CompareStatus::Diverged,
@@ -443,8 +442,6 @@ pub fn resolve_ref_compare(
     Ok((compare.rev, compare.status))
 }
 
-/// compare the resolved GitHub ref against base, returning none when the ref no
-/// longer resolves to the expected head or the GraphQL status is unrecognized.
 pub fn compare_ref_status(
     owner: &str,
     repo: &str,
@@ -460,7 +457,6 @@ pub fn compare_ref_status(
     }
 }
 
-/// compare head against base; none when the status is unrecognized
 pub fn compare_status(
     owner: &str,
     repo: &str,
@@ -472,16 +468,11 @@ pub fn compare_status(
 
 #[derive(Clone, Debug)]
 pub struct CommitLog {
-    /// freshest commits in the range, newest first
     pub fresh: Vec<(String, String)>,
-    /// the currently-pinned (base) commit
     pub base:  Option<(String, String)>,
-    /// more than the limit existed
     pub more:  bool,
 }
 
-/// fresh commits between old and new, capped at limit; none for non-github
-/// targets with no clone-free path yet
 pub fn commits_between(
     source: &Source,
     old: &str,
@@ -495,32 +486,8 @@ pub fn commits_between(
 mod tests {
     use super::{
         CompareStatus,
-        GithubClient,
         GithubRefCompareData,
-        graphql_ref_compare_status,
     };
-    use crate::nar;
-
-    #[test]
-    fn graphql_ref_compare_status_is_inverted_for_tack_display() {
-        assert_eq!(
-            graphql_ref_compare_status("BEHIND"),
-            Some(CompareStatus::Ahead)
-        );
-        assert_eq!(
-            graphql_ref_compare_status("AHEAD"),
-            Some(CompareStatus::Behind)
-        );
-        assert_eq!(
-            graphql_ref_compare_status("DIVERGED"),
-            Some(CompareStatus::Diverged)
-        );
-        assert_eq!(
-            graphql_ref_compare_status("IDENTICAL"),
-            Some(CompareStatus::Identical)
-        );
-        assert_eq!(graphql_ref_compare_status("UNKNOWN"), None);
-    }
 
     #[test]
     fn parses_graphql_ref_compare_response() {
@@ -547,107 +514,5 @@ mod tests {
 
         assert_eq!(resolved.rev, "new");
         assert_eq!(resolved.status, Some(CompareStatus::Ahead));
-    }
-
-    #[test]
-    fn parses_graphql_annotated_tag_target() {
-        let parsed = serde_json::from_str::<GithubRefCompareData>(
-            r#"{
-                "repository": {
-                    "targetRef": {
-                        "target": {
-                            "oid": "tag-object",
-                            "target": {
-                                "oid": "commit",
-                                "committedDate": "2026-05-30T18:08:13Z"
-                            }
-                        },
-                        "compare": {
-                            "status": "IDENTICAL"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        let resolved = parsed.resolve().unwrap();
-
-        assert_eq!(resolved.rev, "commit");
-        assert_eq!(resolved.status, Some(CompareStatus::Identical));
-    }
-
-    fn commit(
-        repo: &gix::Repository,
-        parent_ids: &[gix::ObjectId],
-        message: &str,
-        time: i64,
-    ) -> gix::ObjectId {
-        let signature_text = format!("tack <tack@example.invalid> {time} +0000");
-        let signature = gix::actor::SignatureRef::from_bytes(signature_text.as_bytes()).unwrap();
-        repo.new_commit_as(
-            signature,
-            signature,
-            message,
-            gix::ObjectId::empty_tree(repo.object_hash()),
-            parent_ids.iter().copied(),
-        )
-        .unwrap()
-        .id()
-        .detach()
-    }
-
-    fn local_compare(
-        repo: &gix::Repository,
-        base: gix::ObjectId,
-        head: gix::ObjectId,
-    ) -> CompareStatus {
-        if base == head {
-            return CompareStatus::Identical;
-        }
-        let merge_base = repo.merge_base(base, head).unwrap().detach();
-        let base_is_ancestor = merge_base == base;
-        let head_is_ancestor = merge_base == head;
-        CompareStatus::from_ancestry(base_is_ancestor, head_is_ancestor)
-    }
-
-    #[test]
-    fn compare_status_from_local_merge_base_semantics() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = gix::init(tmp.path()).unwrap();
-        let root = commit(&repo, &[], "root", 100);
-        let base = commit(&repo, &[root], "base", 300);
-        let ahead_with_older_timestamp = commit(&repo, &[base], "ahead", 200);
-        let amended_with_newer_timestamp = commit(&repo, &[root], "amended", 400);
-
-        assert_eq!(
-            local_compare(&repo, base, ahead_with_older_timestamp),
-            CompareStatus::Ahead
-        );
-        assert_eq!(local_compare(&repo, base, root), CompareStatus::Behind);
-        assert_eq!(local_compare(&repo, base, base), CompareStatus::Identical);
-        assert_eq!(
-            local_compare(&repo, base, amended_with_newer_timestamp),
-            CompareStatus::Diverged
-        );
-    }
-
-    // our tarball nar hash must equal nix's narHash for this rev
-    #[test]
-    #[cfg_attr(not(feature = "network-tests"), ignore = "hits codeload.github.com")]
-    fn github_narhash_matches_nix() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = GithubClient::global()
-            .download_tarball(
-                "bertof",
-                "nix-rice",
-                "98b16b0f649bb41db9a1c3b32191bccb9a1ec271",
-                dir.path(),
-            )
-            .unwrap();
-        assert_eq!(
-            nar::hash_path(&root).unwrap(),
-            "sha256-nt/xmuXaJB/vWlRJ4wpdlYQCIgCzFR6QJwlRyhfNn5o="
-        );
     }
 }

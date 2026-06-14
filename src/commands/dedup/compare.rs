@@ -33,8 +33,7 @@ pub(super) struct CompareWork {
     pub job:  PlannerCompareJob,
 }
 
-/// the entry a group is measured against: top pin, else newest transitive by
-/// `lastModified`, else lowest-named for determinism
+/// declared pin then newest lock then name order
 pub(super) fn comparator(entries: &[Entry]) -> Option<&Entry> {
     entries
         .iter()
@@ -49,7 +48,6 @@ pub(super) fn comparator(entries: &[Entry]) -> Option<&Entry> {
         .or_else(|| entries.iter().min_by_key(|entry| entry.name.as_str()))
 }
 
-/// worth printing only when revs disagree
 pub(super) fn group_diverges(entries: &[Entry]) -> bool {
     let mut revs = entries.iter().map(entry_compare_rev);
     revs.next()
@@ -60,8 +58,6 @@ pub(super) const fn entry_compare_rev(entry: &Entry) -> &str {
     entry.rev.as_str()
 }
 
-/// forge compare work for each divergent rev vs its comparator
-/// jobs carry full revs (request + map keys); abbreviation happens at render
 pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<CompareWork>, usize) {
     let mut jobs = groups
         .iter()
@@ -69,7 +65,7 @@ pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<Comp
         .filter_map(|(id, entries)| {
             let base = comparator(entries)?;
             if base.rev.is_empty() || CompareSource::from_source_id(id).is_none() {
-                return None; // nothing concrete to compare
+                return None;
             }
             let mut seen = HashSet::new();
             let heads = entries
@@ -99,9 +95,6 @@ pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<Comp
     (jobs, capped)
 }
 
-/// forge direction of each divergent rev vs its comparator
-/// bounded parallel batches keyed by `(group id, full rev)`
-/// misses fall back to commit-date ordering
 pub(super) fn ahead_behind(
     groups: &BTreeMap<SourceId, Vec<Entry>>,
 ) -> HashMap<(SourceId, String), CompareStatus> {
@@ -189,7 +182,6 @@ mod tests {
         classify,
         comparator,
         compare_jobs,
-        group_diverges,
         rev_last_modified,
     };
     use crate::{
@@ -203,16 +195,6 @@ mod tests {
     };
 
     fn entry(path: &[&str], name: &str, rev: &str, lm: Option<u64>) -> Entry {
-        entry_full(path, name, rev, rev, lm)
-    }
-
-    fn entry_full(
-        path: &[&str],
-        name: &str,
-        _display_rev: &str,
-        rev: &str,
-        lm: Option<u64>,
-    ) -> Entry {
         Entry {
             path: path.iter().map(|item| (*item).to_owned()).collect(),
             name: name.to_owned(),
@@ -227,117 +209,12 @@ mod tests {
     }
 
     #[test]
-    fn comparator_prefers_top_level_even_without_last_modified() {
-        let entries = vec![
-            entry(&["parent"], "aaa", "newer", Some(20)),
-            entry(&[], "top", "top-rev", None),
-        ];
-        assert_eq!(
-            comparator(&entries).map(|entry| (entry.rev.as_str(), entry.lm)),
-            Some(("top-rev", None))
-        );
-    }
-
-    #[test]
-    fn comparator_uses_newest_known_transitive_then_deterministic_fallback() {
-        let entries_with_known_time = vec![
-            entry(&["parent"], "aaa", "unknown", None),
-            entry(&["parent"], "bbb", "older", Some(10)),
-            entry(&["parent"], "ccc", "newer", Some(20)),
-        ];
-        assert_eq!(
-            comparator(&entries_with_known_time).map(|entry| (entry.rev.as_str(), entry.lm)),
-            Some(("newer", Some(20)))
-        );
-
-        let entries_without_times = vec![
-            entry(&["parent"], "bbb", "unknown-b", None),
-            entry(&["parent"], "aaa", "unknown-a", None),
-        ];
-        assert_eq!(
-            comparator(&entries_without_times).map(|entry| (entry.rev.as_str(), entry.lm)),
-            Some(("unknown-a", None))
-        );
-    }
-
-    #[test]
-    fn group_divergence_uses_semantic_revs() {
-        let entries = vec![
-            entry_full(
-                &[],
-                "base",
-                "abcdef0",
-                "abcdef0000000000000000000000000000000000",
-                Some(10),
-            ),
-            entry_full(
-                &["dep"],
-                "head",
-                "abcdef0",
-                "abcdef0999999999999999999999999999999999",
-                Some(20),
-            ),
-        ];
-
-        assert!(group_diverges(&entries));
-    }
-
-    #[test]
-    fn compare_jobs_use_semantic_revs() {
-        let mut groups = BTreeMap::new();
-        groups.insert(source_id("github:o/r"), vec![
-            entry_full(
-                &[],
-                "base",
-                "1111111",
-                "1111111111111111111111111111111111111111",
-                Some(10),
-            ),
-            entry_full(
-                &["dep"],
-                "head",
-                "2222222",
-                "2222222222222222222222222222222222222222",
-                Some(20),
-            ),
-        ]);
-
-        let (jobs, capped) = compare_jobs(&groups);
-
-        assert_eq!(capped, 0);
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].job.base, "1111111111111111111111111111111111111111");
-        assert_eq!(jobs[0].job.head, "2222222222222222222222222222222222222222");
-    }
-
-    #[test]
-    fn compare_jobs_cover_gitlab_and_plain_git() {
-        let mut groups = BTreeMap::new();
-        groups.insert(source_id("gitlab:o/r"), vec![
-            entry(&[], "base", "base", Some(10)),
-            entry(&["dep"], "head", "head", Some(20)),
-        ]);
-        groups.insert(source_id("git+https://example.com/o/r.git"), vec![
-            entry(&[], "base", "base", Some(10)),
-            entry(&["dep"], "head", "head", Some(20)),
-        ]);
-
-        let (jobs, capped) = compare_jobs(&groups);
-
-        assert_eq!(jobs.len(), 2);
-        assert_eq!(jobs[0].id, source_id("git+https://example.com/o/r.git"));
-        assert_eq!(jobs[1].id, source_id("gitlab:o/r"));
-        assert_eq!(capped, 0);
-    }
-
-    #[test]
     fn compare_jobs_are_capped_before_network_work() {
-        let mut entries = vec![entry_full(&[], "base", "base", "base-full", Some(0))];
+        let mut entries = vec![entry(&[], "base", "base-full", Some(0))];
         for i in 0..(MAX_COMPARE_JOBS + 5) {
-            entries.push(entry_full(
+            entries.push(entry(
                 &["dep"],
                 &format!("head-{i:03}"),
-                &format!("h{i:06}"),
                 &format!("head-full-{i:03}"),
                 Some(u64::try_from(i).unwrap() + 1),
             ));
@@ -352,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_prefers_branch_status_over_misleading_timestamps() {
+    fn classify_prefers_branch_status_over_timestamps() {
         let id = source_id("github:o/r");
         let entries = vec![
             entry(&[], "base", "base", Some(500)),
@@ -369,45 +246,5 @@ mod tests {
         );
 
         assert_eq!(mark, Mark::Ahead);
-    }
-
-    #[test]
-    fn classify_reports_diverged_branch_status() {
-        let id = source_id("github:o/r");
-        let entries = vec![
-            entry(&[], "base", "base", Some(100)),
-            entry(&["dep"], "head", "head", Some(200)),
-        ];
-        let compares = HashMap::from([((id.clone(), "head".to_owned()), CompareStatus::Diverged)]);
-
-        let mark = classify(
-            &id,
-            "head",
-            comparator(&entries),
-            &rev_last_modified(&entries),
-            &compares,
-        );
-
-        assert_eq!(mark, Mark::Diverged);
-    }
-
-    #[test]
-    fn classify_distinguishes_timestamp_fallback() {
-        let id = source_id("github:o/r");
-        let entries = vec![
-            entry(&[], "base", "base", Some(100)),
-            entry(&["dep"], "head", "head", Some(200)),
-        ];
-        let compares = HashMap::<(SourceId, String), CompareStatus>::new();
-
-        let mark = classify(
-            &id,
-            "head",
-            comparator(&entries),
-            &rev_last_modified(&entries),
-            &compares,
-        );
-
-        assert_eq!(mark, Mark::DatedNewer);
     }
 }

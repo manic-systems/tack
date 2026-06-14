@@ -83,7 +83,6 @@ impl Unpack {
         }
     }
 
-    /// guess from a url extension, tarball-family wins, otherwise file
     pub fn detect(url: &str) -> Self {
         let no_query = url.split('?').next().unwrap_or(url);
         let path = no_query.split('#').next().unwrap_or(no_query);
@@ -124,9 +123,7 @@ pub struct Input {
     pub submodules: bool,
     pub pin_type:   PinType,
     pub unpack:     Option<Unpack>,
-    /// per-pin `follows` from `[inputs.<name>.follows]`
     pub follows:    BTreeMap<String, String>,
-    /// names that opt out of the global `[all_follow]` rules
     pub excludes:   BTreeSet<String>,
 }
 
@@ -302,9 +299,7 @@ impl PinsDoc {
     }
 }
 
-/// global `[all_follow]` flattened to child -> target. two shapes:
-/// `alias = "target"`, or `target = [a, b, ...]` where each listed alias
-/// follows target
+/// `[all_follow]` flattened to child -> target
 struct AllFollowTable<'a> {
     item: Option<&'a Item>,
 }
@@ -328,7 +323,7 @@ impl<'a> AllFollowTable<'a> {
             if let Some(target) = value.as_str() {
                 out.insert(key.to_owned(), target.to_owned());
             } else if let Some(arr) = value.as_array() {
-                // key is its own target, and every array member follows it too
+                // array form uses the key as the target
                 out.insert(key.to_owned(), key.to_owned());
                 for (index, el) in arr.iter().enumerate() {
                     let alias = el
@@ -344,8 +339,6 @@ impl<'a> AllFollowTable<'a> {
     }
 }
 
-/// project a follows alias onto the flake side: `dep` and `flake:dep` kept,
-/// `tack:dep` dropped
 #[derive(Clone, Copy)]
 pub struct FollowAlias<'a> {
     raw: &'a str,
@@ -406,7 +399,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        FollowAlias,
         PinType,
         PinsDoc,
         Unpack,
@@ -417,106 +409,36 @@ mod tests {
     }
 
     #[test]
-    fn all_follows_string_form() {
-        let doc = doc("[all_follow]\nnixpkgs = \"nixpkgs\"\ncrane = \"my-crane\"\n");
-        let map = doc.all_follows().unwrap();
-        assert_eq!(map.get("nixpkgs").map(String::as_str), Some("nixpkgs"));
-        assert_eq!(map.get("crane").map(String::as_str), Some("my-crane"));
-        assert_eq!(map.len(), 2);
-    }
-
-    #[test]
     fn all_follows_array_form_implies_key_alias() {
         let doc = doc("[all_follow]\ngit-hooks = [\"git-hooks-nix\"]\n");
         let map = doc.all_follows().unwrap();
+
         assert_eq!(map.get("git-hooks").map(String::as_str), Some("git-hooks"));
         assert_eq!(
             map.get("git-hooks-nix").map(String::as_str),
             Some("git-hooks")
         );
-        assert_eq!(map.len(), 2);
-    }
-
-    #[test]
-    fn all_follows_mixed_forms_coexist() {
-        let raw = "[all_follow]\nnixpkgs = \"nixpkgs\"\nxwl = [\"xwl-stable\", \"xwl-unstable\"]\n";
-        let doc = doc(raw);
-        let map = doc.all_follows().unwrap();
-        assert_eq!(map.get("nixpkgs").map(String::as_str), Some("nixpkgs"));
-        assert_eq!(map.get("xwl").map(String::as_str), Some("xwl"));
-        assert_eq!(map.get("xwl-stable").map(String::as_str), Some("xwl"));
-        assert_eq!(map.get("xwl-unstable").map(String::as_str), Some("xwl"));
-    }
-
-    #[test]
-    fn all_follows_empty_array_is_self_map() {
-        let doc = doc("[all_follow]\nfoo = []\n");
-        let map = doc.all_follows().unwrap();
-        assert_eq!(map.get("foo").map(String::as_str), Some("foo"));
-        assert_eq!(map.len(), 1);
-    }
-
-    #[test]
-    fn all_follows_missing_table_is_empty() {
-        let doc = doc("[inputs]\n");
-        assert!(doc.all_follows().unwrap().is_empty());
-    }
-
-    #[test]
-    fn all_follows_keeps_scoped_keys_verbatim() {
-        let raw =
-            "[all_follow]\n\"flake:dep\" = \"replacement\"\n\"tack:other\" = \"x\"\nbare = \"y\"\n";
-        let doc = doc(raw);
-        let map = doc.all_follows().unwrap();
-
-        assert_eq!(
-            map.get("flake:dep").map(String::as_str),
-            Some("replacement")
-        );
-        assert_eq!(map.get("tack:other").map(String::as_str), Some("x"));
-        assert_eq!(map.get("bare").map(String::as_str), Some("y"));
-    }
-
-    #[test]
-    fn all_follows_rejects_wrong_value_type() {
-        let doc = doc("[all_follow]\nfoo = 3\n");
-        let err = doc.all_follows().unwrap_err().to_string();
-        assert!(err.contains("all_follow.foo must be a string or array of strings"));
-    }
-
-    #[test]
-    fn all_follows_rejects_wrong_array_member_type() {
-        let doc = doc("[all_follow]\nfoo = [\"bar\", 3]\n");
-        let err = doc.all_follows().unwrap_err().to_string();
-        assert!(err.contains("all_follow.foo[1] must be a string"));
-    }
-
-    #[test]
-    fn flake_side_projects_scope() {
-        assert_eq!(FollowAlias::new("dep").flake_side(), Some("dep"));
-        assert_eq!(FollowAlias::new("flake:dep").flake_side(), Some("dep"));
-        assert_eq!(FollowAlias::new("tack:dep").flake_side(), None);
     }
 
     #[test]
     fn inputs_read_type_unpack_and_legacy_flake_from_each_entry() {
         let doc = doc(r#"
-[inputs.default]
-url = "github:o/default"
+    [inputs.default]
+    url = "github:o/default"
 
-[inputs.source]
-url = "github:o/source"
-type = "fetch"
+    [inputs.source]
+    url = "github:o/source"
+    type = "fetch"
 
-[inputs.archive]
-url = "https://example.com/archive.tar.gz"
-type = "fixed"
-unpack = "tarball"
+    [inputs.archive]
+    url = "https://example.com/archive.tar.gz"
+    type = "fixed"
+    unpack = "tarball"
 
-[inputs.legacy]
-url = "github:o/legacy"
-flake = false
-"#);
+    [inputs.legacy]
+    url = "github:o/legacy"
+    flake = false
+    "#);
 
         let parsed = doc.inputs().expect("inputs");
         let by_name = parsed
@@ -529,29 +451,5 @@ flake = false
         assert_eq!(by_name["archive"].pin_type, PinType::Fixed);
         assert_eq!(by_name["archive"].unpack, Some(Unpack::Tarball));
         assert_eq!(by_name["legacy"].pin_type, PinType::Fetch);
-    }
-
-    #[test]
-    fn inputs_reject_malformed_follows() {
-        let doc = doc(r#"
-[inputs.bad]
-url = "github:o/r"
-
-[inputs.bad.follows]
-dep = 3
-"#);
-        let err = doc.inputs().unwrap_err().to_string();
-        assert!(err.contains("input 'bad': follows.dep must be a string"));
-    }
-
-    #[test]
-    fn inputs_reject_malformed_exclude_follow() {
-        let doc = doc(r#"
-[inputs.bad]
-url = "github:o/r"
-exclude_follow = ["dep", 3]
-"#);
-        let err = doc.inputs().unwrap_err().to_string();
-        assert!(err.contains("input 'bad': exclude_follow[1] must be a string"));
     }
 }

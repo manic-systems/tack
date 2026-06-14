@@ -184,8 +184,7 @@ fn clone_fetch_candidate(
     Ok((repo, fetched_ref))
 }
 
-/// fetch the full history of the smallest ref set that contains `pinned`,
-/// widening only on a miss
+/// widen refspecs only when the pin is not reachable
 fn fetch_pinned(
     url: &str,
     reff: Option<&str>,
@@ -487,8 +486,7 @@ fn update_submodules(repo: &gix::Repository, parent_url: &str, depth: u8) -> Res
         if matches!(submodule.update()?, Some(SubmoduleUpdate::None)) {
             continue;
         }
-        // no `is_active` gate: it requires a configured `submodule.<name>.active`
-        // a fresh checkout lacks, so every recorded gitlink is materialized.
+        // fresh checkouts lack `submodule.<name>.active`
         let Some(expected) = submodule.head_id().ok().flatten().or(submodule.index_id()?) else {
             continue;
         };
@@ -500,7 +498,6 @@ fn update_submodules(repo: &gix::Repository, parent_url: &str, depth: u8) -> Res
         checkout_existing_commit(&sub_repo, &expected.to_string())
             .wrap_err_with(|| format!("checkout submodule {} at {expected}", submodule.name()))?;
         update_submodules(&sub_repo, &url, depth + 1)?;
-        // nix's git+submodules narHash records no nested .git.
         remove_root_git_dir(&work_dir);
     }
 
@@ -545,7 +542,6 @@ fn ref_candidates(reff: Option<&str>) -> Vec<Option<String>> {
     }
 }
 
-/// refspec for a moving ref's tip
 fn fetch_refspecs(reff: Option<&str>) -> (Vec<String>, String) {
     reff.map_or_else(
         || {

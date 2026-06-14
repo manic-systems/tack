@@ -39,7 +39,6 @@ use crate::project::{
     Project,
 };
 
-/// undo history for one project
 pub struct HistoryStore {
     dir: PathBuf,
 }
@@ -56,19 +55,16 @@ impl HistoryStore {
         Self { dir }
     }
 
-    /// history dir for project, under the xdg state dir
     pub fn for_project(project: &Project) -> Self {
         Self {
             dir: store_dir(project),
         }
     }
 
-    /// record a pre to post transition under label
     pub fn record(&self, label: &str, pre: Snapshot, post: Snapshot) -> Result<bool> {
         self.record_inner(label, pre, post)
     }
 
-    /// run a mutating command and record the resulting file diff
     pub fn record_run<F>(&self, project: &Project, label: &str, run: F) -> RecordedRun
     where
         F: FnOnce() -> Result<()>,
