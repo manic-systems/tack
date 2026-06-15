@@ -1761,8 +1761,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "tack"
-version = "0.1.2"
+name = "tack-pins"
+version = "1.0.0"
 dependencies = [
  "color-eyre",
  "data-encoding",
