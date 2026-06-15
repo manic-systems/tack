@@ -46,11 +46,13 @@ impl History {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub label: String,
     pub ts:    u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct View {
     pub cursor: usize,
     pub rows:   Vec<Row>,

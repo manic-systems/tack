@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 
+mod api;
 mod app;
 mod cli;
 mod commands;
@@ -20,8 +21,15 @@ mod ui;
 
 use std::process::ExitCode;
 
-use color_eyre::config::HookBuilder;
 // this is our public surface
+pub use api::{
+    CommandOutcome,
+    CommandResultSet,
+    CommandStatus,
+    Tack,
+};
+pub use cli::Command;
+use color_eyre::config::HookBuilder;
 pub use commands::{
     AddRequest,
     InitRequest,
@@ -40,6 +48,10 @@ pub use fetch::{
     CompareStatus,
     github::CommitLog,
 };
+pub use history::{
+    Row as HistoryRow,
+    View as HistoryView,
+};
 pub use lock::{
     LockFile,
     LockedNode,
@@ -55,10 +67,18 @@ pub use project::{
     Project,
 };
 pub use report::{
+    CollapsedFollow,
+    DedupGroup,
+    DedupReport,
+    FollowMap,
+    FollowSuggestions,
     LookOutcome,
     LookReport,
+    Mark,
+    NameSources,
     PinLook,
     PinUpdate,
+    RevGroup,
     UpdateOutcome,
     UpdateReport,
 };

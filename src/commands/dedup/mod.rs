@@ -46,6 +46,7 @@ use crate::{
     },
     project::Project,
     render,
+    report::DedupReport,
     source::id::SourceId,
 };
 
@@ -76,6 +77,16 @@ fn top_map<T>(
 }
 
 pub fn dedup(project: &Project) -> Result<()> {
+    let report = dedup_report_inner(project, true)?;
+    render::print_report(&report);
+    Ok(())
+}
+
+pub fn dedup_report(project: &Project) -> Result<DedupReport> {
+    dedup_report_inner(project, false)
+}
+
+fn dedup_report_inner(project: &Project, emit_diagnostics: bool) -> Result<DedupReport> {
     let doc = project.load_pins()?;
     let lock = project.load_lock()?;
     let inputs = doc.inputs()?;
@@ -120,7 +131,9 @@ pub fn dedup(project: &Project) -> Result<()> {
             })
         })
         .collect::<Vec<ScanTarget>>();
-    eprintln!("scanning {} pin(s)...", frontier.len());
+    if emit_diagnostics {
+        eprintln!("scanning {} pin(s)...", frontier.len());
+    }
 
     // breadth first so `visited` cuts cycles before the next batch
     let mut visited = HashSet::<String>::new();
@@ -136,8 +149,10 @@ pub fn dedup(project: &Project) -> Result<()> {
         for (path, res) in results {
             match res {
                 Ok(scan) => {
-                    for diagnostic in scan.diagnostics {
-                        eprintln!("tack: {}", render::scan_diagnostic(&diagnostic));
+                    if emit_diagnostics {
+                        for diagnostic in scan.diagnostics {
+                            eprintln!("tack: {}", render::scan_diagnostic(&diagnostic));
+                        }
                     }
                     for finding in scan.findings {
                         groups
@@ -147,7 +162,11 @@ pub fn dedup(project: &Project) -> Result<()> {
                     }
                     frontier.extend(scan.transitive);
                 },
-                Err(err) => eprintln!("tack: scan {}: {err:#}", render::source_label(&path)),
+                Err(err) => {
+                    if emit_diagnostics {
+                        eprintln!("tack: scan {}: {err:#}", render::source_label(&path));
+                    }
+                },
             }
         }
     }
@@ -155,7 +174,5 @@ pub fn dedup(project: &Project) -> Result<()> {
     apply_follows(&mut groups, &by_name, &all_follow, &top_revs, &top_lms);
 
     let compares = ahead_behind(&groups);
-    let report = build_report(&groups, &all_follow, &compares);
-    render::print_report(&report);
-    Ok(())
+    Ok(build_report(&groups, &all_follow, &compares))
 }
