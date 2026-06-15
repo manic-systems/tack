@@ -9,6 +9,7 @@ use eyre::Result;
 
 use crate::{
     fetch::FetchError,
+    history::View,
     pins::{
         self,
         PinType,
@@ -16,6 +17,7 @@ use crate::{
     },
     project::Project,
     report::{
+        DedupReport,
         LookReport,
         UpdateReport,
     },
@@ -27,16 +29,19 @@ const SCAFFOLD_FLAKE: &str = include_str!("../../templates/default/flake.nix");
 const MARKER: &str = "# tack-managed resolver.";
 
 pub fn warn_stale_resolver(project: &Project) {
-    let path = project.resolver_path();
-    if let Ok(current) = fs::read_to_string(&path)
-        && current.contains(MARKER)
-        && current != RESOLVER_NIX
-    {
-        eprintln!(
-            "tack: resolver at {} is out of date. run `tack init --resolver` to update",
-            path.display()
-        );
+    if !stale_resolver(project) {
+        return;
     }
+    let path = project.resolver_path();
+    eprintln!(
+        "tack: resolver at {} is out of date. run `tack init --resolver` to update",
+        path.display()
+    );
+}
+
+pub fn stale_resolver(project: &Project) -> bool {
+    fs::read_to_string(project.resolver_path())
+        .is_ok_and(|current| current.contains(MARKER) && current != RESOLVER_NIX)
 }
 
 mod convert;
@@ -105,12 +110,28 @@ pub fn dedup(project: &Project) -> Result<()> {
     dedup::dedup(project)
 }
 
+pub fn dedup_report(project: &Project) -> Result<DedupReport> {
+    dedup::dedup_report(project)
+}
+
 pub fn undo(project: &Project, list: bool) -> Result<()> {
     undo::undo(project, list)
 }
 
 pub fn redo(project: &Project) -> Result<()> {
     undo::redo(project)
+}
+
+pub fn history(project: &Project) -> Option<View> {
+    undo::history(project)
+}
+
+pub fn undo_view(project: &Project) -> Result<Option<View>> {
+    undo::undo_view(project)
+}
+
+pub fn redo_view(project: &Project) -> Result<Option<View>> {
+    undo::redo_view(project)
 }
 
 fn tolerate<T>(result: StdResult<T, FetchError>) -> (Option<T>, Option<String>) {
