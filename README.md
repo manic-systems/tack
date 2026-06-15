@@ -86,6 +86,7 @@ type = "fixed"
   `?rev=<sha>` to pin, `submodules = true` to recurse
 - `https://...` / `http://...` raw tarball, where the format is inferred
   from the extension (e.g. `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`).
+- `file://...` / `git+file://...` any local repo (absolute path)
 
 ## shorturls
 

@@ -1047,8 +1047,9 @@ fn git_checkout(
     let mut fo = FetchOptions::new();
     fo.remote_callbacks(callbacks());
     // a specific rev can be anywhere in history, so fetch the ref in full;
-    // for a moving ref we only need the tip
-    if requested_rev.is_none() {
+    // for a moving ref we only need the tip. local repos don't support shallow
+    // fetch.
+    if requested_rev.is_none() && !url.starts_with("file://") {
         fo.depth(1);
     }
     remote
