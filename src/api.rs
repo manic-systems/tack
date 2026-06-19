@@ -14,7 +14,6 @@ use crate::{
     report::{
         DedupReport,
         LookReport,
-        UpdateOutcome,
         UpdateReport,
     },
 };
@@ -231,20 +230,7 @@ fn status_for(outcome: &CommandOutcome) -> CommandStatus {
 }
 
 fn update_status(report: &UpdateReport) -> CommandStatus {
-    let failed = report
-        .pins
-        .iter()
-        .filter(|pin| matches!(pin.outcome, UpdateOutcome::Failed(_)))
-        .count();
-    if failed > 0 {
-        return CommandStatus::UserError(format!("{failed} pin(s) failed to update"));
-    }
-    if report.drift > 0 {
-        return CommandStatus::UserError(
-            "upstream content differs from lock (drifted pins kept; investigate, then re-run with \
-             --accept to relock)"
-                .to_owned(),
-        );
-    }
-    CommandStatus::Success
+    report
+        .user_error()
+        .map_or(CommandStatus::Success, CommandStatus::UserError)
 }
