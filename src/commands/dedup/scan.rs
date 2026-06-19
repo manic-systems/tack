@@ -25,6 +25,7 @@ use crate::{
     },
     lock::{
         self,
+        LockIdentity,
         LockedNode,
     },
     pins::{
@@ -101,7 +102,7 @@ impl SourceRef {
         match *self {
             Self::Locked(ref node) => {
                 // transitive deps can differ across revisions
-                let rev = node.full_rev().unwrap_or("");
+                let rev = node.source_identity().map_or("", LockIdentity::as_str);
                 SourceId::from_locked(node).map_or_else(
                     || Self::tagged_key("locked", &[node.kind(), rev]),
                     |source_id| {
@@ -159,7 +160,7 @@ impl<'a> RawProbe<'a> {
     fn from_locked(node: &'a LockedNode) -> Option<Self> {
         Some(Self {
             forge: Forge::from_locked(node)?,
-            rev:   node.rev()?,
+            rev:   node.forge_rev()?,
         })
     }
 
@@ -268,7 +269,11 @@ impl ScanDocuments {
                         path: path.to_vec(),
                         name: strip_disambiguator(key).to_owned(),
                         side: Side::Flake,
-                        rev:  locked.full_rev().map(str::to_owned).unwrap_or_default(),
+                        rev:  locked
+                            .source_identity()
+                            .map(LockIdentity::as_str)
+                            .map(str::to_owned)
+                            .unwrap_or_default(),
                         lm:   locked.last_modified(),
                     },
                 });
@@ -342,7 +347,11 @@ impl ScanDocuments {
                     side: Side::Tack,
                     rev:  lock
                         .get(&input.name)
-                        .and_then(|n| n.full_rev().map(str::to_owned))
+                        .and_then(|n| {
+                            n.source_identity()
+                                .map(LockIdentity::as_str)
+                                .map(str::to_owned)
+                        })
                         .unwrap_or_default(),
                     lm:   lock.get(&input.name).and_then(LockedNode::last_modified),
                 },

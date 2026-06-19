@@ -38,6 +38,7 @@ use crate::{
     dispatcher,
     lock::{
         LockFile,
+        LockIdentity,
         LockedNode,
     },
     pins::{
@@ -97,7 +98,11 @@ fn dedup_report_inner(project: &Project, emit_diagnostics: bool) -> Result<Dedup
         .map(|inp| (inp.name.as_str(), inp))
         .collect::<BTreeMap<&str, &pins::Input>>();
 
-    let top_revs = top_map(&inputs, &lock, |n| n.full_rev().map(str::to_owned));
+    let top_revs = top_map(&inputs, &lock, |n| {
+        n.source_identity()
+            .map(LockIdentity::as_str)
+            .map(str::to_owned)
+    });
     let top_lms = top_map(&inputs, &lock, LockedNode::last_modified);
 
     let mut groups = BTreeMap::<SourceId, Vec<Entry>>::new();

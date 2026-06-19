@@ -54,6 +54,7 @@ pub use history::{
 };
 pub use lock::{
     LockFile,
+    LockIdentity,
     LockedNode,
 };
 pub use pins::{
