@@ -13,6 +13,7 @@ use crate::{
         self,
         BranchComparison,
         CompareStatus,
+        FetchedPin,
         compare_planner::{
             CompareJob,
             CompareSession,
@@ -61,22 +62,13 @@ impl<O> Progress<O> for NoProgress {
     fn finished(&self, _index: usize, _outcome: &O) {}
 }
 
-struct UpdateFetch {
-    node: LockedNode,
-    rev:  String,
-}
-
-impl UpdateFetch {
-    fn fetch(input: &pins::Input, expanded: &str) -> Result<Self> {
-        match input.pin_type {
-            PinType::Fixed => {
-                fetch::fetch_fixed_pin(expanded, input.unpack).map(|(node, rev)| Self { node, rev })
-            },
-            PinType::Flake | PinType::Fetch => {
-                let source = expanded.parse::<Source>()?;
-                fetch::fetch_pin(&source, input.submodules).map(|(node, rev)| Self { node, rev })
-            },
-        }
+fn fetch_input(input: &pins::Input, expanded: &str) -> Result<FetchedPin> {
+    match input.pin_type {
+        PinType::Fixed => fetch::fetch_fixed_pin(expanded, input.unpack),
+        PinType::Flake | PinType::Fetch => {
+            let source = expanded.parse::<Source>()?;
+            fetch::fetch_pin(&source, input.submodules)
+        },
     }
 }
 
@@ -95,23 +87,23 @@ fn classify(
     warning: Option<String>,
     session: &CompareSession,
 ) -> PinResolution {
-    let old_rev = old.and_then(LockedNode::rev);
+    let old_identity = old.and_then(LockedNode::rev);
 
     let resolved = if input.pin_type != PinType::Fixed
         && let Ok(source) = expanded.parse::<Source>()
     {
-        session.resolve_and_compare(&source, old_rev).ok()
+        session.resolve_and_compare(&source, old_identity).ok()
     } else {
         None
     };
 
     if let Some(ref current) = resolved
-        && old_rev == Some(current.rev.as_str())
+        && old_identity == Some(current.rev.as_str())
     {
         return unchanged(warning);
     }
 
-    let UpdateFetch { node, rev } = match UpdateFetch::fetch(input, expanded) {
+    let fetched = match fetch_input(input, expanded) {
         Ok(fetched) => fetched,
         Err(err) => {
             return PinResolution {
@@ -122,15 +114,20 @@ fn classify(
             };
         },
     };
+    let (node, identity) = fetched.into_parts();
+    let new_identity = String::from(identity);
 
     if old == Some(&node) {
         return unchanged(warning);
     }
-    if input.pin_type == PinType::Fixed && old_rev.is_some() && old_rev != Some(rev.as_str()) {
+    if input.pin_type == PinType::Fixed
+        && old_identity.is_some()
+        && old_identity != Some(new_identity.as_str())
+    {
         return resolve_drift(
             UpdateOutcome::FixedDrift {
-                old:      old_rev.unwrap_or_default().to_owned(),
-                new:      rev,
+                old:      old_identity.unwrap_or_default().to_owned(),
+                new:      new_identity,
                 accepted: accept,
             },
             node,
@@ -138,11 +135,11 @@ fn classify(
             warning,
         );
     }
-    if old_rev == Some(rev.as_str()) {
+    if old_identity == Some(new_identity.as_str()) {
         return if hash_drifted(old, &node) {
             resolve_drift(
                 UpdateOutcome::Drift {
-                    rev,
+                    rev:      new_identity,
                     accepted: accept,
                 },
                 node,
@@ -154,22 +151,24 @@ fn classify(
         };
     }
 
-    let comparison = resolved.filter(|current| current.rev == rev).map_or_else(
-        || {
-            expanded
-                .parse::<Source>()
-                .ok()
-                .map_or_else(BranchComparison::none, |source| {
-                    compare_with_planner(session, &source, old_rev, &rev)
-                })
-        },
-        |current| current.comparison,
-    );
+    let comparison = resolved
+        .filter(|current| current.rev == new_identity)
+        .map_or_else(
+            || {
+                expanded
+                    .parse::<Source>()
+                    .ok()
+                    .map_or_else(BranchComparison::none, |source| {
+                        compare_with_planner(session, &source, old_identity, &new_identity)
+                    })
+            },
+            |current| current.comparison,
+        );
 
     PinResolution {
         outcome: UpdateOutcome::Updated {
-            old: old_rev.map(str::to_owned),
-            new: rev,
+            old: old_identity.map(str::to_owned),
+            new: new_identity,
             comparison,
         },
         node: Some(node),
