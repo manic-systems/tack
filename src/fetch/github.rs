@@ -20,6 +20,7 @@ use serde::{
 use super::{
     FetchError,
     FetchResult,
+    FetchedPin,
     archive::{
         TarFormat,
         unpack_tar_stream,
@@ -277,7 +278,7 @@ pub(super) fn fetch_pin(
     repo: &str,
     reff: Option<&str>,
     pinned: Option<String>,
-) -> Result<(LockedNode, String)> {
+) -> Result<FetchedPin> {
     let github = GithubClient::global();
     let resolved = github.resolve_for_pin(owner, repo, reff, pinned)?;
     let dir = tempfile::tempdir()?;
@@ -285,7 +286,7 @@ pub(super) fn fetch_pin(
     let nar_hash = nar::hash_path(&root)?;
     let rev = resolved.rev;
     let node = LockedNode::new_github(owner, repo, rev.clone(), nar_hash, resolved.last_modified);
-    Ok((node, rev))
+    Ok(FetchedPin::rev(node, rev))
 }
 
 struct ResolvedGithubRef {

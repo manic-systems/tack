@@ -3,6 +3,7 @@
 use serde_json::json;
 
 use super::{
+    FetchIdentity,
     fetch_pin,
     git,
     git_pin_from_checkout,
@@ -27,18 +28,28 @@ fn path_pin_locks_absolute_targets_with_a_nar_hash() {
     let absolute = Source::Path {
         path: tmp.path().to_string_lossy().into_owned(),
     };
-    let (absolute_locked, _) = fetch_pin(&absolute, false).unwrap();
+    let absolute_fetched = fetch_pin(&absolute, false).unwrap();
+    let (absolute_locked, absolute_identity) = absolute_fetched.into_parts();
     assert!(
         absolute_locked
             .hash()
             .is_some_and(|hash| hash.starts_with("sha256-"))
     );
+    assert_eq!(
+        absolute_identity,
+        FetchIdentity::Path(tmp.path().to_string_lossy().into_owned())
+    );
 
     let relative = Source::Path {
         path: "../vendor/dep".to_owned(),
     };
-    let (relative_locked, _) = fetch_pin(&relative, false).unwrap();
+    let relative_fetched = fetch_pin(&relative, false).unwrap();
+    let (relative_locked, relative_identity) = relative_fetched.into_parts();
     assert_eq!(relative_locked.hash(), None);
+    assert_eq!(
+        relative_identity,
+        FetchIdentity::Path("../vendor/dep".to_owned())
+    );
 }
 
 #[test]
@@ -46,7 +57,7 @@ fn gitlab_git_url_checkout_stays_generic_git_lock() {
     let source = "git+https://gitlab.com/Group/Repo.git?ref=main&rev=abc123"
         .parse::<Source>()
         .unwrap();
-    let (fetched, _) = git_pin_from_checkout(
+    let fetched = git_pin_from_checkout(
         &source,
         git::PinCheckout {
             rev:           "abc123".to_owned(),
@@ -57,9 +68,10 @@ fn gitlab_git_url_checkout_stays_generic_git_lock() {
         true,
     )
     .unwrap();
+    let (locked_node, identity) = fetched.into_parts();
 
     assert_eq!(
-        fetched,
+        locked_node,
         node(json!({
             "type": "git",
             "url": "https://gitlab.com/Group/Repo.git",
@@ -70,6 +82,7 @@ fn gitlab_git_url_checkout_stays_generic_git_lock() {
             "submodules": true
         }))
     );
+    assert_eq!(identity, FetchIdentity::Rev("abc123".to_owned()));
 }
 
 #[test]

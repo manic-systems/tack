@@ -61,11 +61,12 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
         },
     };
     match fetched {
-        Ok((node, rev)) => {
+        Ok(fetched_pin) => {
+            let (node, identity) = fetched_pin.into_parts();
             let mut lk = project.load_lock()?;
             lk.insert(name.to_owned(), node);
             project.save_lock(&lk)?;
-            println!("added {name}  NEW -> {}", render::short(&rev));
+            println!("added {name}  NEW -> {}", render::short(identity.as_str()));
         },
         Err(err) => {
             println!("added {name} to pins.toml, but locking failed: {err:#}");

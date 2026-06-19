@@ -46,6 +46,76 @@ use crate::{
     },
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FetchedPin {
+    node:     LockedNode,
+    identity: FetchIdentity,
+}
+
+impl FetchedPin {
+    pub(super) const fn rev(node: LockedNode, rev: String) -> Self {
+        Self {
+            node,
+            identity: FetchIdentity::Rev(rev),
+        }
+    }
+
+    const fn content_hash(node: LockedNode, hash: String) -> Self {
+        Self {
+            node,
+            identity: FetchIdentity::ContentHash(hash),
+        }
+    }
+
+    const fn immutable_url(node: LockedNode, url: String) -> Self {
+        Self {
+            node,
+            identity: FetchIdentity::ImmutableUrl(url),
+        }
+    }
+
+    const fn path(node: LockedNode, path: String) -> Self {
+        Self {
+            node,
+            identity: FetchIdentity::Path(path),
+        }
+    }
+
+    pub fn into_parts(self) -> (LockedNode, FetchIdentity) {
+        (self.node, self.identity)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FetchIdentity {
+    Rev(String),
+    ContentHash(String),
+    ImmutableUrl(String),
+    Path(String),
+}
+
+impl FetchIdentity {
+    pub fn as_str(&self) -> &str {
+        match *self {
+            Self::Rev(ref value)
+            | Self::ContentHash(ref value)
+            | Self::ImmutableUrl(ref value)
+            | Self::Path(ref value) => value,
+        }
+    }
+}
+
+impl From<FetchIdentity> for String {
+    fn from(identity: FetchIdentity) -> Self {
+        match identity {
+            FetchIdentity::Rev(value)
+            | FetchIdentity::ContentHash(value)
+            | FetchIdentity::ImmutableUrl(value)
+            | FetchIdentity::Path(value) => value,
+        }
+    }
+}
+
 pub fn current_rev(source: &Source) -> Result<String> {
     match *source {
         Source::Github {
@@ -85,7 +155,7 @@ fn forge_resolve_ref(url: &str, reff: Option<&str>) -> Option<String> {
         .flatten()
 }
 
-pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<(LockedNode, String)> {
+pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<FetchedPin> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         user_bail!("fixed pins require a plain http(s) URL, got: {url}");
     }
@@ -112,7 +182,7 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<(LockedNode,
         }
     });
     let node = LockedNode::new_fixed(immutable_url, sha256.clone(), kind.as_str());
-    Ok((node, sha256))
+    Ok(FetchedPin::content_hash(node, sha256))
 }
 
 pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> {
@@ -200,7 +270,7 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
     }
 }
 
-pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, String)> {
+pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
     let resolved = downgrade_forge_for_submodules(source, submodules);
     match *resolved {
         Source::Github {
@@ -249,7 +319,7 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, Strin
                     LockedNode::new_tarball_with_rev(immutable_url.clone(), rev, nar_hash.clone())
                 },
             );
-            Ok((node, immutable_url))
+            Ok(FetchedPin::immutable_url(node, immutable_url))
         },
         Source::Path { ref path } => {
             let nar_hash = Path::new(path)
@@ -257,7 +327,10 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<(LockedNode, Strin
                 .then(|| nar::hash_path(Path::new(path)))
                 .transpose()
                 .wrap_err_with(|| format!("hash path pin {path}"))?;
-            Ok((LockedNode::new_path(path.clone(), nar_hash), path.clone()))
+            Ok(FetchedPin::path(
+                LockedNode::new_path(path.clone(), nar_hash),
+                path.clone(),
+            ))
         },
     }
 }
@@ -302,7 +375,7 @@ fn fetch_gitlab_archive_pin(
     host: &str,
     owner: &str,
     repo: &str,
-) -> Result<(LockedNode, String)> {
+) -> Result<FetchedPin> {
     let rev = current_rev(source)
         .wrap_err_with(|| format!("resolve gitlab ref for {host}/{owner}/{repo}"))?;
     let dir = tempfile::tempdir()?;
@@ -310,14 +383,14 @@ fn fetch_gitlab_archive_pin(
     let nar_hash = nar::hash_path(&root)?;
     let last_modified = gitlab::commit_last_modified(host, owner, repo, &rev).unwrap_or(0);
     let node = LockedNode::new_gitlab(host, owner, repo, rev.clone(), nar_hash, last_modified);
-    Ok((node, rev))
+    Ok(FetchedPin::rev(node, rev))
 }
 
 fn git_pin_from_checkout(
     source: &Source,
     checkout: git::PinCheckout,
     submodules: bool,
-) -> Result<(LockedNode, String)> {
+) -> Result<FetchedPin> {
     let rev = checkout.rev.clone();
     let node = match *source {
         Source::Git { ref url, .. } => {
@@ -338,7 +411,7 @@ fn git_pin_from_checkout(
         },
     };
 
-    Ok((node, rev))
+    Ok(FetchedPin::rev(node, rev))
 }
 
 fn immutable_url_of(resp: &ureq_http::Response<Body>, fallback: &str) -> String {
