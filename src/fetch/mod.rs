@@ -20,6 +20,7 @@ pub use error::{
     FetchResult,
 };
 pub use resolve::{
+    FetchedPin,
     fetch_fixed_pin,
     fetch_locked_tree_into,
     fetch_pin,
