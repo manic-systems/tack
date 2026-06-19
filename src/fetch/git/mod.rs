@@ -28,7 +28,10 @@ use gix::{
         tree::EntryKind,
     },
     progress::Discard,
-    refs::transaction::PreviousValue,
+    refs::{
+        store::WriteReflog,
+        transaction::PreviousValue,
+    },
     remote::{
         Connection,
         Direction,
@@ -170,8 +173,7 @@ fn clone_fetch_candidate(
     into: &Path,
     write_worktree: bool,
 ) -> Result<(gix::Repository, String)> {
-    let repo =
-        gix::init(into).wrap_err_with(|| format!("init repository at {}", into.display()))?;
+    let repo = init_scratch_repo(into)?;
     let (refspecs, fetched_ref) = fetch_refspecs(reff);
     fetch_refspecs_into(&repo, url, &refspecs, shallow)?;
 
@@ -191,8 +193,7 @@ fn fetch_pinned(
     pinned: &str,
     into: &Path,
 ) -> Result<gix::Repository> {
-    let repo =
-        gix::init(into).wrap_err_with(|| format!("init repository at {}", into.display()))?;
+    let repo = init_scratch_repo(into)?;
     let primary = match reff {
         Some(target) if target.starts_with("refs/") => target.to_owned(),
         Some(target) => format!("refs/heads/{target}"),
@@ -218,6 +219,13 @@ fn fetch_pinned(
         || eyre::eyre!("rev '{pinned}' not reachable from refs on {url}"),
         |err| err.wrap_err(format!("rev '{pinned}' not reachable from refs on {url}")),
     ))
+}
+
+fn init_scratch_repo(into: &Path) -> Result<gix::Repository> {
+    let mut repo =
+        gix::init(into).wrap_err_with(|| format!("init repository at {}", into.display()))?;
+    repo.refs.write_reflog = WriteReflog::Disable;
+    Ok(repo)
 }
 
 fn fetch_refspecs_into(
