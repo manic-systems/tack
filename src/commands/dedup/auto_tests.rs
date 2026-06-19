@@ -14,7 +14,7 @@ fn github_node_in(owner: &str, repo: &str, rev: &str) -> LockedNode {
 }
 
 fn node_rev(node: &LockedNode) -> &str {
-    node.rev().unwrap()
+    node.forge_rev().unwrap()
 }
 
 #[test]

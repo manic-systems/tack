@@ -235,6 +235,25 @@ pub enum LockedNode {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockIdentity<'a> {
+    Rev(&'a str),
+    ContentHash(&'a str),
+    ImmutableUrl(&'a str),
+    SourceUrl(&'a str),
+}
+
+impl<'a> LockIdentity<'a> {
+    pub const fn as_str(self) -> &'a str {
+        match self {
+            Self::Rev(value)
+            | Self::ContentHash(value)
+            | Self::ImmutableUrl(value)
+            | Self::SourceUrl(value) => value,
+        }
+    }
+}
+
 #[expect(
     clippy::pattern_type_mismatch,
     reason = "these accessors borrow fields out of an enum behind &self"
@@ -387,25 +406,41 @@ impl LockedNode {
         }
     }
 
-    pub fn rev(&self) -> Option<&str> {
+    pub fn resolved_identity(&self) -> Option<LockIdentity<'_>> {
         match self {
-            Self::Tarball { url, .. } => Some(url),
-            Self::Fixed { sha256, .. } => sha256.as_deref(),
+            Self::Tarball { url, .. } => Some(LockIdentity::ImmutableUrl(url)),
+            Self::Fixed { sha256, .. } => sha256.as_deref().map(LockIdentity::ContentHash),
             Self::Github { rev, .. } | Self::Gitlab { rev, .. } | Self::Git { rev, .. } => {
-                rev.as_deref()
+                rev.as_deref().map(LockIdentity::Rev)
             },
             Self::Indirect { .. } | Self::Path { .. } => None,
         }
     }
 
-    pub fn full_rev(&self) -> Option<&str> {
+    pub fn source_identity(&self) -> Option<LockIdentity<'_>> {
+        match self {
+            Self::Github { rev, .. } | Self::Gitlab { rev, .. } | Self::Git { rev, .. } => {
+                rev.as_deref().map(LockIdentity::Rev)
+            },
+            Self::Tarball { url, .. } => Some(LockIdentity::ImmutableUrl(url)),
+            Self::Fixed { url, sha256, .. } => {
+                url.as_deref()
+                    .map(LockIdentity::SourceUrl)
+                    .or_else(|| sha256.as_deref().map(LockIdentity::ContentHash))
+            },
+            Self::Indirect { .. } | Self::Path { .. } => None,
+        }
+    }
+
+    pub fn forge_rev(&self) -> Option<&str> {
         match self {
             Self::Github { rev, .. } | Self::Gitlab { rev, .. } | Self::Git { rev, .. } => {
                 rev.as_deref()
             },
-            Self::Tarball { url, .. } => Some(url),
-            Self::Fixed { url, sha256, .. } => url.as_deref().or(sha256.as_deref()),
-            Self::Indirect { .. } | Self::Path { .. } => None,
+            Self::Tarball { .. }
+            | Self::Fixed { .. }
+            | Self::Indirect { .. }
+            | Self::Path { .. } => None,
         }
     }
 
