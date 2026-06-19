@@ -20,7 +20,10 @@ use crate::{
         },
         github::CommitLog,
     },
-    lock::LockedNode,
+    lock::{
+        LockIdentity,
+        LockedNode,
+    },
     pins::{
         self,
         PinType,
@@ -87,7 +90,9 @@ fn classify(
     warning: Option<String>,
     session: &CompareSession,
 ) -> PinResolution {
-    let old_identity = old.and_then(LockedNode::rev);
+    let old_identity = old
+        .and_then(LockedNode::resolved_identity)
+        .map(LockIdentity::as_str);
 
     let resolved = if input.pin_type != PinType::Fixed
         && let Ok(source) = expanded.parse::<Source>()
@@ -394,7 +399,8 @@ pub(super) fn look(
             source::localize_path_url_with_warning(&shorturls.expand(&input.url), project.dir());
         let old = lock
             .get(&input.name)
-            .and_then(LockedNode::rev)
+            .and_then(LockedNode::resolved_identity)
+            .map(LockIdentity::as_str)
             .map(str::to_owned);
         let (outcome, log) =
             classify_look(input, &localized.url, old.as_deref(), verbose, &session);

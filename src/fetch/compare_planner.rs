@@ -265,7 +265,7 @@ impl CompareJob {
         if SourceId::from_locked(head).as_ref() != Some(&id) {
             return None;
         }
-        Self::from_source_id(&id, base.rev()?, head.rev()?)
+        Self::from_source_id(&id, base.forge_rev()?, head.forge_rev()?)
     }
 }
 
