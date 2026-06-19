@@ -97,11 +97,12 @@ impl Spinner {
     }
 }
 
-struct UpdateProgress<'a> {
+struct SpinnerProgress<'a, O> {
     spinner: &'a Spinner,
+    status:  fn(&O) -> PinStatus,
 }
 
-impl core::Progress<UpdateOutcome> for UpdateProgress<'_> {
+impl<O> core::Progress<O> for SpinnerProgress<'_, O> {
     fn begin(&self, names: &[String]) {
         self.spinner.begin(names);
     }
@@ -110,26 +111,8 @@ impl core::Progress<UpdateOutcome> for UpdateProgress<'_> {
         self.spinner.step(index, PinStatus::Fetching { frame: 0 });
     }
 
-    fn finished(&self, index: usize, outcome: &UpdateOutcome) {
-        self.spinner.step(index, update_status(outcome));
-    }
-}
-
-struct LookProgress<'a> {
-    spinner: &'a Spinner,
-}
-
-impl core::Progress<LookOutcome> for LookProgress<'_> {
-    fn begin(&self, names: &[String]) {
-        self.spinner.begin(names);
-    }
-
-    fn fetching(&self, index: usize) {
-        self.spinner.step(index, PinStatus::Fetching { frame: 0 });
-    }
-
-    fn finished(&self, index: usize, outcome: &LookOutcome) {
-        self.spinner.step(index, look_status(outcome));
+    fn finished(&self, index: usize, outcome: &O) {
+        self.spinner.step(index, (self.status)(outcome));
     }
 }
 
@@ -139,26 +122,16 @@ pub fn update(project: &Project, names: &[String], accept: bool) -> Result<Updat
 
 pub fn update_cli(project: &Project, names: &[String], accept: bool) -> Result<()> {
     let spinner = Spinner::new();
-    let report = core::update(project, names, accept, &UpdateProgress {
+    let report = core::update(project, names, accept, &SpinnerProgress {
         spinner: &spinner,
+        status:  update_status,
     })?;
     if let Some(display) = spinner.into_display() {
         display.finish();
     }
     print_warnings(&report.warnings);
-    let failed = report
-        .pins
-        .iter()
-        .filter(|pin| matches!(pin.outcome, UpdateOutcome::Failed(_)))
-        .count();
-    if failed > 0 {
-        user_bail!("{failed} pin(s) failed to update");
-    }
-    if report.drift > 0 {
-        user_bail!(
-            "upstream content differs from lock (drifted pins kept; investigate, then re-run with \
-             --accept to relock)"
-        );
+    if let Some(message) = report.user_error() {
+        user_bail!("{message}");
     }
     Ok(())
 }
@@ -169,7 +142,10 @@ pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<LookRe
 
 pub fn look_cli(project: &Project, names: &[String], verbose: bool) -> Result<()> {
     let spinner = Spinner::new();
-    let report = core::look(project, names, verbose, &LookProgress { spinner: &spinner })?;
+    let report = core::look(project, names, verbose, &SpinnerProgress {
+        spinner: &spinner,
+        status:  look_status,
+    })?;
     if let Some(display) = spinner.into_display() {
         if verbose {
             let logs = report

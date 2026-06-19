@@ -43,6 +43,24 @@ pub struct UpdateReport {
     pub warnings: Vec<String>,
 }
 
+impl UpdateReport {
+    pub fn user_error(&self) -> Option<String> {
+        let failed = self
+            .pins
+            .iter()
+            .filter(|pin| matches!(pin.outcome, UpdateOutcome::Failed(_)))
+            .count();
+        if failed > 0 {
+            return Some(format!("{failed} pin(s) failed to update"));
+        }
+        (self.drift > 0).then(|| {
+            "upstream content differs from lock (drifted pins kept; investigate, then re-run with \
+             --accept to relock)"
+                .to_owned()
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum LookOutcome {
     Unchanged,
