@@ -38,6 +38,7 @@ use ureq::{
     Body,
     Error as UreqError,
     RequestBuilder,
+    ResponseExt as _,
     http::{
         HeaderMap,
         Response,
@@ -64,16 +65,36 @@ pub(super) fn boxed(parsed_url: gix::Url) -> Box<dyn BlockingTransport + Send> {
     Box::new(connect(parsed_url))
 }
 
-#[derive(Clone, Copy)]
 pub(super) struct UreqHttp {
-    agent: &'static Agent,
+    agent:               &'static Agent,
+    redirected_base_url: Option<String>,
 }
 
 impl Default for UreqHttp {
     fn default() -> Self {
         Self {
-            agent: http::agent(),
+            agent:               http::agent(),
+            redirected_base_url: None,
         }
+    }
+}
+
+impl UreqHttp {
+    fn redirected_url(&self, url: &str, base_url: &str) -> String {
+        self.redirected_base_url.as_deref().map_or_else(
+            || url.to_owned(),
+            |effective_base| replace_base_url(url, base_url, effective_base),
+        )
+    }
+
+    fn remember_redirect(&mut self, url: &str, base_url: &str, effective_url: Option<&str>) {
+        let Some(actual_url) = effective_url else {
+            return;
+        };
+        if actual_url == url {
+            return;
+        }
+        self.redirected_base_url = redirected_base_url(actual_url, base_url, url);
     }
 }
 
@@ -85,10 +106,11 @@ impl Http for UreqHttp {
     fn get(
         &mut self,
         url: &str,
-        _base_url: &str,
+        base_url: &str,
         headers: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<GetResponse<Self::Headers, Self::ResponseBody>, HttpError> {
         let response = send_ureq(self.agent, Method::Get, url, headers, &[])?;
+        self.remember_redirect(url, base_url, response.effective_url.as_deref());
         Ok(GetResponse {
             headers: LazyHeaders::ready(response.headers),
             body:    LazyResponseBody::ready(response.body),
@@ -98,17 +120,22 @@ impl Http for UreqHttp {
     fn post(
         &mut self,
         url: &str,
-        _base_url: &str,
+        base_url: &str,
         headers: impl IntoIterator<Item = impl AsRef<str>>,
         _body: PostBodyDataKind,
     ) -> Result<PostResponse<Self::Headers, Self::ResponseBody, Self::PostBody>, HttpError> {
+        let effective_url = self.redirected_url(url, base_url);
+        let mut header_lines = headers
+            .into_iter()
+            .map(|header| header.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        if effective_url != url && !same_request_authority(url, &effective_url) {
+            header_lines.retain(|header| !is_authorization_header(header));
+        }
         let state = Arc::new(Mutex::new(PendingPost {
             agent:        self.agent,
-            url:          url.to_owned(),
-            headers:      headers
-                .into_iter()
-                .map(|header| header.as_ref().to_owned())
-                .collect(),
+            url:          effective_url,
+            headers:      header_lines,
             request_body: Vec::new(),
             response:     None,
         }));
@@ -145,8 +172,9 @@ impl Method {
 }
 
 struct UreqResponse {
-    headers: Result<Vec<u8>, HttpFailure>,
-    body:    LazyBody,
+    headers:       Result<Vec<u8>, HttpFailure>,
+    body:          LazyBody,
+    effective_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -495,26 +523,33 @@ fn request_host(url: &str) -> Option<String> {
 }
 
 fn has_authorization(header_lines: &[String]) -> bool {
-    header_lines.iter().any(|header| {
-        header
-            .split_once(':')
-            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
-    })
+    header_lines
+        .iter()
+        .any(|header| is_authorization_header(header))
+}
+
+fn is_authorization_header(header: &str) -> bool {
+    header
+        .split_once(':')
+        .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
 }
 
 fn ok_response(response: Response<Body>) -> UreqResponse {
+    let effective_url = response.get_uri().to_string();
     let formatted_headers = format_headers(response.headers());
     let (_parts, response_body) = response.into_parts();
     UreqResponse {
-        headers: Ok(formatted_headers),
-        body:    LazyBody::Ready(Box::new(response_body.into_reader())),
+        headers:       Ok(formatted_headers),
+        body:          LazyBody::Ready(Box::new(response_body.into_reader())),
+        effective_url: Some(effective_url),
     }
 }
 
 fn failed_response(failure: HttpFailure) -> UreqResponse {
     UreqResponse {
-        headers: Err(failure.clone()),
-        body:    LazyBody::Error(Some(failure)),
+        headers:       Err(failure.clone()),
+        body:          LazyBody::Error(Some(failure)),
+        effective_url: None,
     }
 }
 
@@ -588,6 +623,40 @@ fn apply_headers<B>(mut request: RequestBuilder<B>, headers: &[String]) -> Reque
         }
     }
     request
+}
+
+fn redirected_base_url(actual_url: &str, base_url: &str, requested_url: &str) -> Option<String> {
+    let tail = requested_url.strip_prefix(base_url)?;
+    actual_url
+        .strip_suffix(tail)
+        .map(ToOwned::to_owned)
+        .filter(|base| !base.is_empty())
+}
+
+fn replace_base_url(url: &str, base_url: &str, effective_base: &str) -> String {
+    url.strip_prefix(base_url).map_or_else(
+        || url.to_owned(),
+        |tail| {
+            let mut redirected = effective_base.to_owned();
+            redirected.push_str(tail);
+            redirected
+        },
+    )
+}
+
+fn same_request_authority(left: &str, right: &str) -> bool {
+    request_authority(left)
+        .zip(request_authority(right))
+        .is_some_and(|(left_authority, right_authority)| left_authority == right_authority)
+}
+
+fn request_authority(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let raw_authority = rest.split('/').next().unwrap_or(rest);
+    let authority = raw_authority
+        .rsplit_once('@')
+        .map_or(raw_authority, |(_, host)| host);
+    Some(authority.to_ascii_lowercase())
 }
 
 fn format_headers(headers: &HeaderMap) -> Vec<u8> {
