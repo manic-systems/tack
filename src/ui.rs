@@ -202,18 +202,7 @@ impl<'a> CommitLogLines<'a> {
     }
 
     fn write_to(&self, out: &mut dyn io::Write) {
-        let mut fresh = self.log.fresh.iter();
-
-        if let Some(&(ref hash, ref subject)) = fresh.next() {
-            let _ = writeln!(
-                out,
-                "{}{}    {subject}",
-                self.indent,
-                CommitHash::new(hash).short()
-            );
-        }
-
-        for &(ref hash, ref subject) in fresh {
+        for &(ref hash, ref subject) in &self.log.fresh {
             let _ = writeln!(
                 out,
                 "{}{}    {subject}",
@@ -261,7 +250,7 @@ impl<'a> FrameRenderer<'a> {
 
     fn draw(&self) -> usize {
         let mut out = String::new();
-        let terminal_width = terminal_width();
+        let terminal_width = Self::terminal_width();
 
         if self.drawn_rows > 0 {
             let _ = write!(out, "\x1b[{}A", self.drawn_rows);
@@ -270,10 +259,10 @@ impl<'a> FrameRenderer<'a> {
         let mut rows = 0_usize;
         for (name, status) in self.names.iter().zip(self.states) {
             let line = StatusLine::new(name, status).tty_with_frame(self.frame);
-            for segment in terminal_segments(&line) {
+            for segment in Self::terminal_segments(&line) {
                 out.push_str("\x1b[2K");
                 let _ = writeln!(out, "{segment}");
-                rows += visual_rows(segment, terminal_width);
+                rows += Self::visual_rows(segment, terminal_width);
             }
         }
 
@@ -282,41 +271,41 @@ impl<'a> FrameRenderer<'a> {
         let _ = stdout.flush();
         rows
     }
-}
 
-fn terminal_width() -> usize {
-    terminal_size().map_or(80, |(Width(width), _)| usize::from(width).max(1))
-}
+    fn terminal_width() -> usize {
+        terminal_size().map_or(80, |(Width(width), _)| usize::from(width).max(1))
+    }
 
-fn terminal_segments(line: &str) -> impl Iterator<Item = &str> {
-    line.split('\n')
-        .map(|segment| segment.strip_suffix('\r').unwrap_or(segment))
-}
+    fn terminal_segments(line: &str) -> impl Iterator<Item = &str> {
+        line.split('\n')
+            .map(|segment| segment.strip_suffix('\r').unwrap_or(segment))
+    }
 
-fn visual_rows(line: &str, terminal_width: usize) -> usize {
-    visible_width(line).saturating_sub(1) / terminal_width + 1
-}
+    fn visual_rows(line: &str, terminal_width: usize) -> usize {
+        Self::visible_width(line).saturating_sub(1) / terminal_width + 1
+    }
 
-fn visible_width(line: &str) -> usize {
-    let mut width = 0_usize;
-    let mut chars = line.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            skip_ansi_escape(&mut chars);
-        } else {
-            width += ch.width().unwrap_or(0);
+    fn visible_width(line: &str) -> usize {
+        let mut width = 0_usize;
+        let mut chars = line.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                Self::skip_ansi_escape(&mut chars);
+            } else {
+                width += ch.width().unwrap_or(0);
+            }
         }
+        width
     }
-    width
-}
 
-fn skip_ansi_escape(chars: &mut impl Iterator<Item = char>) {
-    if chars.next() != Some('[') {
-        return;
-    }
-    for ch in chars {
-        if ('@'..='~').contains(&ch) {
-            break;
+    fn skip_ansi_escape(chars: &mut impl Iterator<Item = char>) {
+        if chars.next() != Some('[') {
+            return;
+        }
+        for ch in chars {
+            if ('@'..='~').contains(&ch) {
+                break;
+            }
         }
     }
 }

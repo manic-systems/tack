@@ -13,6 +13,7 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
     // resolver nag trails successful output
     let check_resolver = !matches!(cmd, Command::Init { .. });
 
+    let label = cmd.history_label();
     let res = match cmd {
         Command::Init {
             force,
@@ -20,18 +21,7 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
             flake,
             convert,
         } => {
-            let label = if resolver {
-                "init --resolver"
-            } else if convert {
-                "init --convert"
-            } else if flake {
-                "init --flake"
-            } else if force {
-                "init --force"
-            } else {
-                "init"
-            };
-            recorded(&project, label, || {
+            recorded(&project, &label, || {
                 commands::init(&project, commands::InitRequest {
                     force,
                     resolver,
@@ -45,11 +35,6 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
         Command::Undo { list } => commands::undo(&project, list),
         Command::Redo => commands::redo(&project),
         Command::Update { names, accept } => {
-            let label = if names.is_empty() {
-                "update".to_owned()
-            } else {
-                format!("update {}", names.join(" "))
-            };
             recorded(&project, &label, || {
                 commands::update_cli(&project, &names, accept)
             })
@@ -63,7 +48,6 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
             submodules,
             follows,
         } => {
-            let label = format!("add {name}");
             recorded(&project, &label, || {
                 commands::add(&project, commands::AddRequest {
                     name: &name,
@@ -76,16 +60,8 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
                 })
             })
         },
-        Command::Rm { name } => {
-            let label = format!("rm {name}");
-            recorded(&project, &label, || commands::rm(&project, &name))
-        },
+        Command::Rm { name } => recorded(&project, &label, || commands::rm(&project, &name)),
         Command::Alias { name, template, rm } => {
-            let label = if rm {
-                format!("alias --rm {name}")
-            } else {
-                format!("alias {name}")
-            };
             recorded(&project, &label, || {
                 commands::alias(&project, &name, template.as_deref(), rm)
             })

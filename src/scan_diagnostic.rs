@@ -34,7 +34,7 @@ impl ScanDiagnostic {
         self.file
     }
 
-    pub const fn kind(&self) -> &ScanDiagnosticKind {
+    pub(super) const fn kind(&self) -> &ScanDiagnosticKind {
         &self.kind
     }
 

@@ -21,7 +21,6 @@ mod ui;
 
 use std::process::ExitCode;
 
-// this is our public surface
 pub use api::{
     CommandOutcome,
     CommandResultSet,
@@ -33,15 +32,6 @@ use color_eyre::config::HookBuilder;
 pub use commands::{
     AddRequest,
     InitRequest,
-    add,
-    alias,
-    dedup,
-    init,
-    look,
-    redo,
-    rm,
-    undo,
-    update,
 };
 pub use fetch::{
     BranchComparison,
@@ -113,7 +103,6 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// exit code buckets config 3 fetch 4 else 1
 fn exit_code(report: &eyre::Report) -> ExitCode {
     for cause in report.chain() {
         if cause.downcast_ref::<ConfigError>().is_some() {
