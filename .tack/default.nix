@@ -66,7 +66,7 @@ let
         "indirect"
       ];
 
-      # relative path nodes live inside the source copy, so return directly
+      # path nodes are convenience pins, so return the live local path directly
       # because fetchTree rejects unlocked paths in pure eval
       fetchPin =
         name:
@@ -76,11 +76,12 @@ let
           let
             node = lock.${name};
           in
-          if (node.type or "") == "path" && substring 0 1 node.path != "/" then
+          if (node.type or "") == "path" then
             {
-              outPath = ./. + ("/" + node.path);
-              lastModified = 0;
+              outPath = if substring 0 1 node.path == "/" then node.path else ./. + ("/" + node.path);
+              lastModified = node.lastModified or 0;
             }
+            // (if node ? narHash then { inherit (node) narHash; } else { })
           else if !(elem (node.type or "") knownTypes) then
             throw "tack: unknown lock type '${node.type or "?"}' for pin '${name}'"
           else

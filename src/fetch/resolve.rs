@@ -4,6 +4,7 @@ use std::{
     borrow::Cow,
     fs,
     io::Read as _,
+    os::unix::fs::MetadataExt as _,
     path::{
         Path,
         PathBuf,
@@ -38,7 +39,10 @@ use super::{
 };
 use crate::{
     error::user_bail,
-    lock::LockedNode,
+    lock::{
+        LockedNode,
+        PathFingerprint,
+    },
     nar,
     pins::Unpack,
     source::{
@@ -329,17 +333,62 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
             Ok(FetchedPin::immutable_url(node, immutable_url))
         },
         Source::Path { ref path } => {
-            let nar_hash = Path::new(path)
+            let target = Path::new(path);
+            let Some(fingerprint) = target
                 .is_absolute()
-                .then(|| nar::hash_path(Path::new(path)))
+                .then(|| path_fingerprint(target))
                 .transpose()
-                .wrap_err_with(|| format!("hash path pin {path}"))?;
+                .wrap_err_with(|| format!("stat path pin {path}"))?
+            else {
+                return Ok(FetchedPin::path(
+                    LockedNode::new_path(path.clone(), None),
+                    path.clone(),
+                ));
+            };
+            let identity = path_fingerprint_identity(path, fingerprint);
             Ok(FetchedPin::path(
-                LockedNode::new_path(path.clone(), nar_hash),
-                path.clone(),
+                LockedNode::new_path_with_fingerprint(path.clone(), fingerprint),
+                identity,
             ))
         },
     }
+}
+
+fn path_fingerprint(root: &Path) -> Result<PathFingerprint> {
+    let mut fingerprint = PathFingerprint {
+        last_modified: 0,
+        mtime_nanos:   0,
+        tree_size:     0,
+        tree_entries:  0,
+    };
+    let mut pending = vec![root.to_path_buf()];
+
+    while let Some(path) = pending.pop() {
+        let meta = fs::symlink_metadata(&path)
+            .wrap_err_with(|| format!("stat path pin entry {}", path.display()))?;
+        fingerprint.tree_entries += 1;
+        fingerprint.tree_size = fingerprint.tree_size.saturating_add(meta.len());
+        let mtime_nanos = meta.mtime().saturating_mul(1_000_000_000) + meta.mtime_nsec();
+        fingerprint.mtime_nanos = fingerprint.mtime_nanos.max(mtime_nanos);
+        fingerprint.last_modified = fingerprint.last_modified.max(meta.mtime());
+
+        if meta.is_dir() {
+            for entry in fs::read_dir(&path)
+                .wrap_err_with(|| format!("read path pin dir {}", path.display()))?
+            {
+                pending.push(entry?.path());
+            }
+        }
+    }
+
+    Ok(fingerprint)
+}
+
+fn path_fingerprint_identity(path: &str, fingerprint: PathFingerprint) -> String {
+    format!(
+        "path:{path}:{}:{}:{}",
+        fingerprint.mtime_nanos, fingerprint.tree_size, fingerprint.tree_entries
+    )
 }
 
 /// forge archives cannot represent submodules
