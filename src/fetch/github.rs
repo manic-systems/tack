@@ -184,7 +184,6 @@ struct GithubCompareResponse {
     status:        Option<String>,
     #[serde(default)]
     commits:       Vec<GithubCompareCommit>,
-    #[serde(rename = "total_commits")]
     total_commits: Option<u64>,
     base_commit:   Option<GithubCompareCommit>,
 }
@@ -433,7 +432,7 @@ fn graphql_ref_compare_status(status: &str) -> Option<CompareStatus> {
     })
 }
 
-pub fn resolve_ref_compare(
+pub(super) fn resolve_ref_compare(
     owner: &str,
     repo: &str,
     reff: Option<&str>,
@@ -443,7 +442,7 @@ pub fn resolve_ref_compare(
     Ok((compare.rev, compare.status))
 }
 
-pub fn compare_ref_status(
+pub(super) fn compare_ref_status(
     owner: &str,
     repo: &str,
     reff: Option<&str>,
@@ -458,7 +457,7 @@ pub fn compare_ref_status(
     }
 }
 
-pub fn compare_status(
+pub(super) fn compare_status(
     owner: &str,
     repo: &str,
     base: &str,

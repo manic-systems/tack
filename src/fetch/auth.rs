@@ -134,15 +134,24 @@ fn scrape_access_tokens(path: &Path, tokens: &mut HashMap<String, String>, depth
     }
 }
 
+#[derive(Clone)]
 pub(super) struct HttpCredential {
-    username: String,
-    secret:   String,
+    username:      String,
+    authorization: String,
 }
 
 impl HttpCredential {
-    pub(super) fn authorization(&self) -> String {
-        let raw = format!("{}:{}", self.username, self.secret);
-        format!("Basic {}", data_encoding::BASE64.encode(raw.as_bytes()))
+    fn new(username: String, secret: &str) -> Self {
+        let raw = format!("{username}:{secret}");
+        let authorization = format!("Basic {}", data_encoding::BASE64.encode(raw.as_bytes()));
+        Self {
+            username,
+            authorization,
+        }
+    }
+
+    pub(super) fn authorization(&self) -> &str {
+        &self.authorization
     }
 }
 
@@ -151,16 +160,7 @@ impl fmt::Debug for HttpCredential {
         f.debug_struct("HttpCredential")
             .field("username", &self.username)
             .field("secret", &"<redacted>")
-            .finish()
-    }
-}
-
-impl Clone for HttpCredential {
-    fn clone(&self) -> Self {
-        Self {
-            username: self.username.clone(),
-            secret:   self.secret.clone(),
-        }
+            .finish_non_exhaustive()
     }
 }
 
@@ -187,12 +187,7 @@ fn ladder_credential(host: &str) -> Option<HttpCredential> {
         return Some(seeded);
     }
     token_for_host(host)
-        .map(|token| {
-            HttpCredential {
-                username: "oauth2".to_owned(),
-                secret:   token.to_owned(),
-            }
-        })
+        .map(|token| HttpCredential::new("oauth2".to_owned(), token))
         .or_else(|| netrc_credential(host))
         .or_else(|| git_helper_credential(host))
 }
@@ -217,10 +212,10 @@ pub(super) fn seed_resolvable_credential(host: &str, username: &str, secret: &st
     test_credentials()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .insert(host.to_owned(), HttpCredential {
-            username: username.to_owned(),
-            secret:   secret.to_owned(),
-        });
+        .insert(
+            host.to_owned(),
+            HttpCredential::new(username.to_owned(), secret),
+        );
 }
 
 pub(super) fn cached_http_credential(host: &str) -> Option<HttpCredential> {
@@ -257,10 +252,7 @@ fn parse_netrc(contents: &str, host: &str) -> Option<HttpCredential> {
             break;
         }
     }
-    Some(HttpCredential {
-        username: login?,
-        secret:   password?,
-    })
+    Some(HttpCredential::new(login?, &password?))
 }
 
 fn netrc_tokens(contents: &str) -> Vec<String> {
@@ -310,10 +302,7 @@ fn git_helper_credential(host: &str) -> Option<HttpCredential> {
             password = Some(value.to_owned());
         }
     }
-    Some(HttpCredential {
-        username: username?,
-        secret:   password?,
-    })
+    Some(HttpCredential::new(username?, &password?))
 }
 
 fn fetch_warnings() -> &'static Mutex<BTreeSet<String>> {

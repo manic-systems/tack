@@ -28,6 +28,7 @@ use super::{
         detect_tar_format,
         unpack_tar_stream,
     },
+    auth::record_fetch_warning,
     forge,
     git,
     github,
@@ -105,6 +106,12 @@ impl FetchIdentity {
     }
 }
 
+impl AsRef<str> for FetchIdentity {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl From<FetchIdentity> for String {
     fn from(identity: FetchIdentity) -> Self {
         match identity {
@@ -116,7 +123,7 @@ impl From<FetchIdentity> for String {
     }
 }
 
-pub fn current_rev(source: &Source) -> Result<String> {
+pub(super) fn current_rev(source: &Source) -> Result<String> {
     match *source {
         Source::Github {
             ref owner,
@@ -381,7 +388,13 @@ fn fetch_gitlab_archive_pin(
     let dir = tempfile::tempdir()?;
     let root = gitlab::download_archive(host, owner, repo, &rev, dir.path())?;
     let nar_hash = nar::hash_path(&root)?;
-    let last_modified = gitlab::commit_last_modified(host, owner, repo, &rev).unwrap_or(0);
+    let last_modified =
+        gitlab::commit_last_modified(host, owner, repo, &rev).unwrap_or_else(|| {
+            record_fetch_warning(format!(
+                "could not fetch lastModified for gitlab {host}/{owner}/{repo}@{rev}; using 0"
+            ));
+            0
+        });
     let node = LockedNode::new_gitlab(host, owner, repo, rev.clone(), nar_hash, last_modified);
     Ok(FetchedPin::rev(node, rev))
 }
@@ -391,13 +404,12 @@ fn git_pin_from_checkout(
     checkout: git::PinCheckout,
     submodules: bool,
 ) -> Result<FetchedPin> {
-    let rev = checkout.rev.clone();
     let node = match *source {
         Source::Git { ref url, .. } => {
             LockedNode::new_git(
                 url,
                 checkout.refname,
-                rev.clone(),
+                checkout.rev.clone(),
                 checkout.nar_hash,
                 checkout.last_modified,
                 submodules,
@@ -411,7 +423,7 @@ fn git_pin_from_checkout(
         },
     };
 
-    Ok(FetchedPin::rev(node, rev))
+    Ok(FetchedPin::rev(node, checkout.rev))
 }
 
 fn immutable_url_of(resp: &ureq_http::Response<Body>, fallback: &str) -> String {
@@ -432,13 +444,20 @@ fn immutable_url_of(resp: &ureq_http::Response<Body>, fallback: &str) -> String 
 fn parse_link_immutable(header: &str) -> Option<String> {
     for raw_part in header.split(',') {
         let part = raw_part.trim();
-        let (url_part, params) = part.split_once(';')?;
-        let url = url_part
+        let Some((url_part, params)) = part.split_once(';') else {
+            continue;
+        };
+        let Some(url) = url_part
             .trim()
             .strip_prefix('<')
-            .and_then(|inner| inner.strip_suffix('>'))?;
+            .and_then(|inner| inner.strip_suffix('>'))
+        else {
+            continue;
+        };
         for param in params.split(';') {
-            let (key, raw_value) = param.trim().split_once('=')?;
+            let Some((key, raw_value)) = param.trim().split_once('=') else {
+                continue;
+            };
             if key.trim().eq_ignore_ascii_case("rel") {
                 let rel = raw_value.trim().trim_matches('"');
                 if rel == "immutable" || rel == "immutable_link" {
