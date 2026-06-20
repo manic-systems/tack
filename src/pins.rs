@@ -10,7 +10,6 @@ use std::{
         Formatter,
         Result as FmtResult,
     },
-    fs,
     path::Path,
     str::FromStr,
 };
@@ -30,6 +29,7 @@ use toml_edit::{
 
 use crate::{
     error::user_bail,
+    project::write_atomic,
     shorturl::ShortUrls,
 };
 
@@ -218,10 +218,7 @@ impl PinsDoc {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let tmp = path.with_extension("toml.tmp");
-        fs::write(&tmp, self.doc.to_string())?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        write_atomic(path, &self.doc.to_string())
     }
 
     pub fn shorturls(&self) -> ShortUrls<'_> {
@@ -344,11 +341,13 @@ pub struct FollowAlias<'a> {
     raw: &'a str,
 }
 
-impl<'a> FollowAlias<'a> {
-    pub const fn new(raw: &'a str) -> Self {
+impl<'a> From<&'a str> for FollowAlias<'a> {
+    fn from(raw: &'a str) -> Self {
         Self { raw }
     }
+}
 
+impl<'a> FollowAlias<'a> {
     pub fn flake_side(self) -> Option<&'a str> {
         match self.raw.split_once(':') {
             Some(("flake", rest)) => Some(rest),

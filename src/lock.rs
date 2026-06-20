@@ -2,7 +2,6 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
     path::Path,
 };
 
@@ -14,9 +13,12 @@ use serde::{
 };
 use serde_json::Value;
 
-use crate::source::{
-    gitlab,
-    normalize_host,
+use crate::{
+    project::write_atomic,
+    source::{
+        gitlab,
+        normalize_host,
+    },
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,10 +52,7 @@ impl LockFile {
     pub fn save(&self, path: &Path) -> Result<()> {
         let mut json = serde_json::to_string_pretty(&self.merged())?;
         json.push('\n');
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, json)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        write_atomic(path, &json)
     }
 
     fn merged(&self) -> BTreeMap<&str, NodeRepr<'_>> {
@@ -93,6 +92,12 @@ impl LockFile {
 
     pub fn unknown_nodes(&self) -> impl Iterator<Item = &str> {
         self.passthrough.keys().map(String::as_str)
+    }
+
+    pub fn unknown_nodes_with_values(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.passthrough
+            .iter()
+            .map(|(name, value)| (name.as_str(), value))
     }
 }
 
@@ -251,6 +256,12 @@ impl<'a> LockIdentity<'a> {
             | Self::ImmutableUrl(value)
             | Self::SourceUrl(value) => value,
         }
+    }
+}
+
+impl AsRef<str> for LockIdentity<'_> {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -501,10 +512,6 @@ fn is_default_gitlab_host(host: &str) -> bool {
 )]
 const fn is_false(value: &bool) -> bool {
     !*value
-}
-
-pub fn parse(raw: &str) -> Result<LockFile, serde_json::Error> {
-    LockFile::parse(raw)
 }
 
 #[cfg(test)]

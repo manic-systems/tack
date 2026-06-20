@@ -169,10 +169,9 @@ impl HistoryStore {
         let snaps = self.snapshots_dir();
         let mut entries = Vec::with_capacity(stored_entries.len());
         for value in stored_entries {
-            let Some(entry) = value.resolve(&snaps) else {
-                return History::empty();
-            };
-            entries.push(entry);
+            if let Some(entry) = value.resolve(&snaps) {
+                entries.push(entry);
+            }
         }
 
         let clamped = cursor.min(entries.len().saturating_sub(1));
