@@ -22,7 +22,7 @@ fn follow_target(
     if path.is_empty() {
         return None;
     }
-    let scoped = format!("{}:{name}", side.as_str());
+    let scoped = format!("{side}:{name}");
     let excluded = top_input.is_some_and(|inp| inp.excludes.contains(name));
     if !excluded
         && let Some(target) = all_follow.get(name).or_else(|| all_follow.get(&scoped))

@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: EUPL-1.2
 
+use std::fmt;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Side {
     Flake,
     Tack,
 }
 
-impl Side {
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match *self {
             Self::Flake => "flake",
             Self::Tack => "tack",
-        }
+        })
     }
 }
 

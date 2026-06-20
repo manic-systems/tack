@@ -27,6 +27,7 @@ use crate::{
     pins::{
         self,
         PinType,
+        Unpack,
     },
     project::Project,
     render,
@@ -65,12 +66,17 @@ impl<O> Progress<O> for NoProgress {
     fn finished(&self, _index: usize, _outcome: &O) {}
 }
 
-fn fetch_input(input: &pins::Input, expanded: &str) -> Result<FetchedPin> {
-    match input.pin_type {
-        PinType::Fixed => fetch::fetch_fixed_pin(expanded, input.unpack),
+pub fn fetch_input(
+    pin_type: PinType,
+    unpack: Option<Unpack>,
+    submodules: bool,
+    expanded: &str,
+) -> Result<FetchedPin> {
+    match pin_type {
+        PinType::Fixed => fetch::fetch_fixed_pin(expanded, unpack),
         PinType::Flake | PinType::Fetch => {
             let source = expanded.parse::<Source>()?;
-            fetch::fetch_pin(&source, input.submodules)
+            fetch::fetch_pin(&source, submodules)
         },
     }
 }
@@ -94,10 +100,11 @@ fn classify(
         .and_then(LockedNode::resolved_identity)
         .map(LockIdentity::as_str);
 
+    let source = expanded.parse::<Source>().ok();
     let resolved = if input.pin_type != PinType::Fixed
-        && let Ok(source) = expanded.parse::<Source>()
+        && let Some(ref src) = source
     {
-        session.resolve_and_compare(&source, old_identity).ok()
+        session.resolve_and_compare(src, old_identity).ok()
     } else {
         None
     };
@@ -108,7 +115,7 @@ fn classify(
         return unchanged(warning);
     }
 
-    let fetched = match fetch_input(input, expanded) {
+    let fetched = match fetch_input(input.pin_type, input.unpack, input.submodules, expanded) {
         Ok(fetched) => fetched,
         Err(err) => {
             return PinResolution {
@@ -160,11 +167,10 @@ fn classify(
         .filter(|current| current.rev == new_identity)
         .map_or_else(
             || {
-                expanded
-                    .parse::<Source>()
-                    .ok()
-                    .map_or_else(BranchComparison::none, |source| {
-                        compare_with_planner(session, &source, old_identity, &new_identity)
+                source
+                    .as_ref()
+                    .map_or_else(BranchComparison::default, |src| {
+                        compare_with_planner(session, src, old_identity, &new_identity)
                     })
             },
             |current| current.comparison,
@@ -189,13 +195,13 @@ fn compare_with_planner(
     new_rev: &str,
 ) -> BranchComparison {
     let Some(previous_rev) = old_rev else {
-        return BranchComparison::none();
+        return BranchComparison::default();
     };
     if previous_rev == new_rev {
         return BranchComparison::verified(CompareStatus::Identical);
     }
     let Some(job) = CompareJob::from_source(source, previous_rev, new_rev) else {
-        return BranchComparison::none();
+        return BranchComparison::default();
     };
     session
         .compare(&job)

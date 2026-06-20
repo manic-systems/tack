@@ -61,7 +61,9 @@ impl AutoFollowAliases {
                 .filter(|&(_, target)| !input_names.contains(target.as_str()))
                 .filter_map(|(alias, target)| {
                     Some((
-                        pins::FollowAlias::new(alias).flake_side()?.to_owned(),
+                        pins::FollowAlias::from(alias.as_str())
+                            .flake_side()?
+                            .to_owned(),
                         target.clone(),
                     ))
                 })
@@ -88,20 +90,22 @@ struct LockObservation {
     node:          LockedNode,
 }
 
-impl LockObservation {
-    #[cfg(test)]
-    const fn new(last_modified: i64, node: LockedNode) -> Self {
+impl From<LockedNode> for LockObservation {
+    fn from(node: LockedNode) -> Self {
+        let last_modified = node
+            .last_modified()
+            .and_then(|lm| i64::try_from(lm).ok())
+            .unwrap_or(0);
         Self {
             last_modified,
             node,
         }
     }
+}
 
-    fn from_node(node: LockedNode) -> Self {
-        let last_modified = node
-            .last_modified()
-            .and_then(|lm| i64::try_from(lm).ok())
-            .unwrap_or(0);
+impl LockObservation {
+    #[cfg(test)]
+    const fn new(last_modified: i64, node: LockedNode) -> Self {
         Self {
             last_modified,
             node,
@@ -188,7 +192,7 @@ fn auto_dedup_inner(
 
     for (target, mut obs) in observations {
         if let Some(current) = lock.get(&target) {
-            obs.insert(0, LockObservation::from_node(current.clone()));
+            obs.insert(0, LockObservation::from(current.clone()));
         }
         restrict_to_seed_identity(&mut obs);
         if let Some(winner) = LockObservation::choose(obs, |base, head| {
@@ -258,7 +262,7 @@ fn scan_input(
         };
         batch
             .observations
-            .push((target.clone(), LockObservation::from_node(locked.clone())));
+            .push((target.clone(), LockObservation::from(locked.clone())));
     }
     Some(batch)
 }

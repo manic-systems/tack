@@ -57,13 +57,27 @@ fn compare_jobs_are_capped_before_network_work() {
 }
 
 #[test]
+fn comparator_prefers_top_level_pin_over_newer_transitive() {
+    // A declared pin (empty path) wins even when a transitive entry has a newer lm.
+    let declared = entry(&[], "nixpkgs", "rev-declared", Some(100));
+    let transitive = entry(&["dep"], "nixpkgs", "rev-transitive", Some(9999));
+    let entries = vec![declared, transitive];
+
+    let chosen = comparator(&entries).unwrap();
+    assert_eq!(chosen.rev, "rev-declared");
+}
+
+#[test]
 fn classify_prefers_branch_status_over_timestamps() {
     let id = source_id("github:o/r");
     let entries = vec![
         entry(&[], "base", "base", Some(500)),
         entry(&["dep"], "head", "head", Some(100)),
     ];
-    let compares = HashMap::from([((id.clone(), "head".to_owned()), CompareStatus::Ahead)]);
+    let compares = HashMap::from([(
+        id.clone(),
+        HashMap::from([("head".to_owned(), CompareStatus::Ahead)]),
+    )]);
 
     let mark = classify(
         &id,
