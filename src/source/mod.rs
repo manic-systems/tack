@@ -95,17 +95,20 @@ impl FromStr for Source {
         if let Some(body) = expanded.strip_prefix("github:") {
             let (path, raw_query) = split_query_fragment(body);
             let fields = parse_query_fields(raw_query);
-            let segs = path.split('/').collect::<Vec<&str>>();
-            if segs.len() < 2 {
+            let Some((owner_raw, rest)) = path.split_once('/') else {
+                user_bail!("malformed github url: {expanded}");
+            };
+            let (repo_raw, path_ref) = rest.split_once('/').unwrap_or((rest, ""));
+            if owner_raw.is_empty() || repo_raw.is_empty() {
                 user_bail!("malformed github url: {expanded}");
             }
             let reff = fields
                 .reff
                 .map(ToOwned::to_owned)
-                .or_else(|| (segs.len() > 2).then(|| segs[2..].join("/")));
+                .or_else(|| (!path_ref.is_empty()).then(|| path_ref.to_owned()));
             return Ok(Self::Github {
-                owner: segs[0].to_owned(),
-                repo: segs[1].to_owned(),
+                owner: decode_path_segment(owner_raw),
+                repo: decode_path_segment(repo_raw),
                 reff,
                 rev: fields.rev.map(ToOwned::to_owned),
             });
@@ -234,7 +237,7 @@ fn relative_from(base: &Path, target: &Path) -> String {
     rel.to_string_lossy().into_owned()
 }
 
-pub(in crate::source) fn split_query_fragment(value: &str) -> (&str, Option<&str>) {
+pub fn split_query_fragment(value: &str) -> (&str, Option<&str>) {
     let without_fragment = strip_fragment(value);
     without_fragment
         .split_once('?')

@@ -19,6 +19,23 @@ use crate::{
     },
 };
 
+// github has no subgroups; the contains('/') guard rejects nested paths
+fn github_parse_git_url(url: &str) -> Option<git_url::RepoRef> {
+    git_url::parse(url).filter(|repo| repo.host == "github.com" && !repo.owner.contains('/'))
+}
+
+fn classify_git_url(url: &str) -> SourceId {
+    if let Some(repo) = gitlab::parse_git_url(url) {
+        return SourceId::gitlab(&repo.host, &repo.owner, &repo.repo);
+    }
+    if let Some(repo) = github_parse_git_url(url) {
+        return SourceId::github(&repo.owner, &repo.repo);
+    }
+    SourceId::Git {
+        url: url.to_lowercase(),
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum SourceId {
     Github {
@@ -44,53 +61,31 @@ pub enum SourceId {
     },
 }
 
-/// github.com has no subgroups
-fn github_repo_from_git_url(url: &str) -> Option<(String, String)> {
-    let repo = git_url::parse(url)?;
-    (repo.host == "github.com" && !repo.owner.contains('/')).then_some((repo.owner, repo.repo))
-}
-
-impl SourceId {
-    pub fn from_url(expanded: &str) -> Option<Self> {
-        let source = expanded.parse::<Source>().ok()?;
-        Some(Self::from_source(&source))
-    }
-
-    fn from_source(source: &Source) -> Self {
-        match *source {
-            Source::Github {
-                ref owner,
-                ref repo,
-                ..
-            } => Self::github(owner, repo),
+impl From<Source> for SourceId {
+    fn from(source: Source) -> Self {
+        match source {
+            Source::Github { owner, repo, .. } => Self::github(&owner, &repo),
             Source::Gitlab {
-                ref host,
-                ref owner,
-                ref repo,
-                ..
-            } => Self::gitlab(host, owner, repo),
-            Source::Git { ref url, .. } => {
-                if let Some(repo) = gitlab::parse_git_url(url) {
-                    return Self::gitlab(&repo.host, &repo.owner, &repo.repo);
-                }
-                if let Some((owner, repo)) = github_repo_from_git_url(url) {
-                    return Self::github(&owner, &repo);
-                }
-                Self::Git {
-                    url: url.to_lowercase(),
-                }
-            },
-            Source::Tarball { ref url } => {
+                host, owner, repo, ..
+            } => Self::gitlab(&host, &owner, &repo),
+            Source::Git { url, .. } => classify_git_url(&url),
+            Source::Tarball { url } => {
                 Self::Tarball {
-                    url: strip_query_fragment(url).to_lowercase(),
+                    url: strip_query_fragment(&url).to_lowercase(),
                 }
             },
-            Source::Path { ref path } => {
+            Source::Path { path } => {
                 Self::Path {
                     path: path.to_lowercase(),
                 }
             },
         }
+    }
+}
+
+impl SourceId {
+    pub fn from_url(expanded: &str) -> Option<Self> {
+        expanded.parse::<Source>().ok().map(Self::from)
     }
 
     pub fn from_locked(node: &LockedNode) -> Option<Self> {
@@ -106,18 +101,7 @@ impl SourceId {
                 ref repo,
                 ..
             } => Some(Self::gitlab(host, owner, repo)),
-            LockedNode::Git { ref url, .. } => {
-                let cut = strip_query_fragment(url);
-                if let Some(repo) = gitlab::parse_git_url(cut) {
-                    return Some(Self::gitlab(&repo.host, &repo.owner, &repo.repo));
-                }
-                if let Some((owner, repo)) = github_repo_from_git_url(cut) {
-                    return Some(Self::github(&owner, &repo));
-                }
-                Some(Self::Git {
-                    url: cut.to_lowercase(),
-                })
-            },
+            LockedNode::Git { ref url, .. } => Some(classify_git_url(strip_query_fragment(url))),
             LockedNode::Tarball { ref url, .. } => {
                 Some(Self::Tarball {
                     url: strip_query_fragment(url).to_lowercase(),
