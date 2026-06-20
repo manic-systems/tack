@@ -139,6 +139,49 @@ pub fn parse() -> Command {
     Cli::parse().into()
 }
 
+impl Command {
+    pub fn history_label(&self) -> String {
+        match *self {
+            Self::Init {
+                resolver,
+                convert,
+                flake,
+                force,
+            } => {
+                if resolver {
+                    "init --resolver"
+                } else if convert {
+                    "init --convert"
+                } else if flake {
+                    "init --flake"
+                } else if force {
+                    "init --force"
+                } else {
+                    "init"
+                }
+                .to_owned()
+            },
+            Self::Update { ref names, .. } => {
+                if names.is_empty() {
+                    "update".to_owned()
+                } else {
+                    format!("update {}", names.join(" "))
+                }
+            },
+            Self::Add { ref name, .. } => format!("add {name}"),
+            Self::Rm { ref name } => format!("rm {name}"),
+            Self::Alias { ref name, rm, .. } => {
+                if rm {
+                    format!("alias --rm {name}")
+                } else {
+                    format!("alias {name}")
+                }
+            },
+            Self::Look { .. } | Self::Dedup | Self::Undo { .. } | Self::Redo => String::new(),
+        }
+    }
+}
+
 impl From<Cli> for Command {
     fn from(cli: Cli) -> Self {
         match cli {

@@ -72,15 +72,12 @@ impl<'a> Tack<'a> {
         self.project
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "thin dispatcher mirrors the CLI command surface"
-    )]
     pub fn run(&self, cmd: Command) -> Result<CommandResultSet> {
         let check_resolver = !matches!(cmd, Command::Init { .. });
         let mut captured_external = false;
         let mut history_error = None;
 
+        let label = cmd.history_label();
         let outcome = match cmd {
             Command::Init {
                 force,
@@ -88,18 +85,7 @@ impl<'a> Tack<'a> {
                 flake,
                 convert,
             } => {
-                let label = if resolver {
-                    "init --resolver"
-                } else if convert {
-                    "init --convert"
-                } else if flake {
-                    "init --flake"
-                } else if force {
-                    "init --force"
-                } else {
-                    "init"
-                };
-                let recorded = self.recorded(label, || {
+                let recorded = self.recorded(&label, || {
                     commands::init(self.project, commands::InitRequest {
                         force,
                         resolver,
@@ -112,11 +98,6 @@ impl<'a> Tack<'a> {
                 CommandOutcome::Init
             },
             Command::Update { names, accept } => {
-                let label = if names.is_empty() {
-                    "update".to_owned()
-                } else {
-                    format!("update {}", names.join(" "))
-                };
                 let recorded =
                     self.recorded(&label, || commands::update(self.project, &names, accept))?;
                 captured_external = recorded.captured_external;
@@ -135,7 +116,6 @@ impl<'a> Tack<'a> {
                 submodules,
                 follows,
             } => {
-                let label = format!("add {name}");
                 let recorded = self.recorded(&label, || {
                     commands::add(self.project, commands::AddRequest {
                         name: &name,
@@ -152,18 +132,12 @@ impl<'a> Tack<'a> {
                 CommandOutcome::Add
             },
             Command::Rm { name } => {
-                let label = format!("rm {name}");
                 let recorded = self.recorded(&label, || commands::rm(self.project, &name))?;
                 captured_external = recorded.captured_external;
                 history_error = recorded.history_error;
                 CommandOutcome::Rm
             },
             Command::Alias { name, template, rm } => {
-                let label = if rm {
-                    format!("alias --rm {name}")
-                } else {
-                    format!("alias {name}")
-                };
                 let recorded = self.recorded(&label, || {
                     commands::alias(self.project, &name, template.as_deref(), rm)
                 })?;
