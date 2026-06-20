@@ -19,7 +19,7 @@ fn node(value: serde_json::Value) -> LockedNode {
 }
 
 #[test]
-fn path_pin_locks_absolute_targets_with_a_nar_hash() {
+fn path_pin_locks_absolute_targets_with_a_metadata_fingerprint() {
     use std::fs;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -30,14 +30,11 @@ fn path_pin_locks_absolute_targets_with_a_nar_hash() {
     };
     let absolute_fetched = fetch_pin(&absolute, false).unwrap();
     let (absolute_locked, absolute_identity) = absolute_fetched.into_parts();
+    assert_eq!(absolute_locked.hash(), None);
     assert!(
-        absolute_locked
-            .hash()
-            .is_some_and(|hash| hash.starts_with("sha256-"))
-    );
-    assert_eq!(
-        absolute_identity,
-        FetchIdentity::Path(tmp.path().to_string_lossy().into_owned())
+        absolute_identity
+            .as_str()
+            .starts_with(&format!("path:{}:", tmp.path().display()))
     );
 
     let relative = Source::Path {
