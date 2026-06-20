@@ -22,7 +22,10 @@ pub(super) use self::auto::{
     auto_dedup_scoped,
 };
 use self::{
-    compare::ahead_behind,
+    compare::{
+        AheadBehindResult,
+        ahead_behind,
+    },
     follows::apply_follows,
     model::{
         Entry,
@@ -178,6 +181,21 @@ fn dedup_report_inner(project: &Project, emit_diagnostics: bool) -> Result<Dedup
 
     apply_follows(&mut groups, &by_name, &all_follow, &top_revs, &top_lms);
 
-    let compares = ahead_behind(&groups);
+    let AheadBehindResult {
+        compares,
+        surfaced_causes,
+        dropped,
+    } = ahead_behind(&groups);
+    if emit_diagnostics {
+        for cause in &surfaced_causes {
+            eprintln!("tack: {cause}");
+        }
+        if dropped > 0 {
+            eprintln!(
+                "tack: {dropped} branch comparison(s) unavailable or capped; falling back to \
+                 commit-date order"
+            );
+        }
+    }
     Ok(build_report(&groups, &all_follow, &compares))
 }

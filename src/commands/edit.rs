@@ -4,7 +4,10 @@ use std::path::Path;
 
 use eyre::Result;
 
-use super::AddRequest;
+use super::{
+    AddRequest,
+    update,
+};
 use crate::{
     error::user_bail,
     fetch,
@@ -14,10 +17,7 @@ use crate::{
     },
     project::Project,
     render,
-    source::{
-        self,
-        Source,
-    },
+    source,
 };
 
 pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
@@ -52,14 +52,7 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
         eprintln!("tack: {warning}");
     }
     let expanded = localized.url;
-    let fetched = match pin_type {
-        PinType::Fixed => fetch::fetch_fixed_pin(&expanded, unpack),
-        PinType::Flake | PinType::Fetch => {
-            expanded
-                .parse::<Source>()
-                .and_then(|source| fetch::fetch_pin(&source, submodules))
-        },
-    };
+    let fetched = update::fetch_input(pin_type, unpack, submodules, &expanded);
     match fetched {
         Ok(fetched_pin) => {
             let (node, identity) = fetched_pin.into_parts();
@@ -89,7 +82,7 @@ pub fn rm(project: &Project, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
+fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
     let project = Project::at(dir.to_owned());
     let mut doc = project.load_pins()?;
     let removed_pin = doc.remove_input(name);

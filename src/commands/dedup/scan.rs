@@ -322,7 +322,7 @@ impl ScanDocuments {
         let Some(raw_lock) = self.tack_lock.as_deref() else {
             return lock::LockFile::new();
         };
-        match lock::parse(raw_lock) {
+        match lock::LockFile::parse(raw_lock) {
             Ok(lock) => lock,
             Err(err) => {
                 diagnostics.push(ScanDiagnostic::parse(path, ScanFile::TackLock, err));
@@ -339,21 +339,21 @@ impl ScanDocuments {
         findings: &mut Vec<Finding>,
     ) {
         if let Some(id) = SourceId::from_url(expanded) {
+            let node = lock.get(&input.name);
             findings.push(Finding {
                 identity: id,
                 entry:    Entry {
                     path: path.to_vec(),
                     name: input.name.clone(),
                     side: Side::Tack,
-                    rev:  lock
-                        .get(&input.name)
+                    rev:  node
                         .and_then(|n| {
                             n.source_identity()
                                 .map(LockIdentity::as_str)
                                 .map(str::to_owned)
                         })
                         .unwrap_or_default(),
-                    lm:   lock.get(&input.name).and_then(LockedNode::last_modified),
+                    lm:   node.and_then(LockedNode::last_modified),
                 },
             });
         }

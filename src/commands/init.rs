@@ -136,7 +136,7 @@ fn flake_awareness(scaffold: bool, project: &Project) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn wires_overrides(flake: &str) -> bool {
+fn wires_overrides(flake: &str) -> bool {
     flake.lines().any(|line| {
         line.split_once('#')
             .map_or(line, |(code, _)| code)
