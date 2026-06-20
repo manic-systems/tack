@@ -229,9 +229,11 @@ impl HttpFailure {
             message: format!("git HTTP POST {url}: {error}"),
         }
     }
+}
 
-    fn into_error(self) -> io::Error {
-        io::Error::new(self.kind, self.message)
+impl From<HttpFailure> for io::Error {
+    fn from(failure: HttpFailure) -> Self {
+        Self::new(failure.kind, failure.message)
     }
 }
 
@@ -247,7 +249,7 @@ impl Read for LazyBody {
             Self::Error(ref mut failure) => {
                 Err(failure.take().map_or_else(
                     || io::Error::other("response body already failed"),
-                    HttpFailure::into_error,
+                    io::Error::from,
                 ))
             },
         }
@@ -383,7 +385,7 @@ impl LazyHeaders {
 
     fn cursor(&mut self) -> io::Result<&mut Cursor<Vec<u8>>> {
         if let Some(failure) = self.failure.take() {
-            return Err(failure.into_error());
+            return Err(io::Error::from(failure));
         }
         if self.cursor.is_none() {
             let state = self
@@ -393,7 +395,7 @@ impl LazyHeaders {
                 .map_err(io::Error::other)?;
             match pending_headers(&state)? {
                 Ok(headers) => self.cursor = Some(Cursor::new(headers)),
-                Err(failure) => return Err(failure.into_error()),
+                Err(failure) => return Err(io::Error::from(failure)),
             }
         }
         self.cursor
@@ -452,7 +454,7 @@ fn pending_headers(state: &Arc<Mutex<PendingPost>>) -> io::Result<Result<Vec<u8>
         .expect("response was just initialized")
         .as_ref()
         .map(|response| response.headers.clone())
-        .map_err(|err| err.clone().into_error())
+        .map_err(|err| io::Error::from(err.clone()))
 }
 
 fn take_pending_body(state: &Arc<Mutex<PendingPost>>) -> io::Result<LazyBody> {
@@ -465,7 +467,7 @@ fn take_pending_body(state: &Arc<Mutex<PendingPost>>) -> io::Result<LazyBody> {
         .as_mut()
         .expect("response was just initialized")
         .as_mut()
-        .map_err(|err| err.clone().into_error())?
+        .map_err(|err| io::Error::from(err.clone()))?
         .body
         .take()
         .context("post response body was already consumed")
@@ -563,7 +565,7 @@ fn send_ureq(
     let mut header_lines = headers
         .into_iter()
         .map(|header| header.as_ref().to_owned())
-        .collect::<Vec<String>>();
+        .collect::<Vec<_>>();
     let host = request_host(url);
 
     let mut sent_auth = has_authorization(&header_lines);

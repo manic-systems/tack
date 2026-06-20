@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: EUPL-1.2
 
+use std::borrow::Cow;
+
 mod archive;
 mod auth;
 pub mod compare_planner;
 mod error;
-pub mod forge;
+mod forge;
 mod git;
 mod git_http;
 pub mod github;
-pub mod gitlab;
+mod gitlab;
 mod http;
 mod resolve;
 mod time;
@@ -38,3 +40,7 @@ const PERCENT_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_A
     .remove(b'.')
     .remove(b'_')
     .remove(b'~');
+
+pub fn percent_encode(value: &str) -> Cow<'_, str> {
+    percent_encoding::percent_encode(value.as_bytes(), PERCENT_ENCODE_SET).into()
+}

@@ -46,13 +46,6 @@ pub struct BranchComparison {
 }
 
 impl BranchComparison {
-    pub const fn none() -> Self {
-        Self {
-            status:   None,
-            expected: false,
-        }
-    }
-
     pub const fn verified(status: CompareStatus) -> Self {
         Self {
             status:   Some(status),

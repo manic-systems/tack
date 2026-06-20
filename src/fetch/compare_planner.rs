@@ -202,7 +202,7 @@ impl CompareSession {
         }
 
         let rev = resolve::current_rev(source)?;
-        let comparison = base.map_or_else(BranchComparison::none, |previous| {
+        let comparison = base.map_or_else(BranchComparison::default, |previous| {
             self.compare_resolved(source, previous, &rev)
         });
         Ok(CurrentRev { rev, comparison })
@@ -212,11 +212,14 @@ impl CompareSession {
         if previous == rev {
             return BranchComparison::verified(CompareStatus::Identical);
         }
-        CompareJob::from_source(source, previous, rev).map_or_else(BranchComparison::none, |job| {
-            self.compare(&job)
-                .status
-                .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
-        })
+        CompareJob::from_source(source, previous, rev).map_or_else(
+            BranchComparison::default,
+            |job| {
+                self.compare(&job)
+                    .status
+                    .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
+            },
+        )
     }
 
     pub fn into_surfaced(self) -> BTreeSet<String> {
@@ -415,16 +418,17 @@ fn compare_github(
     base: &str,
     head: &str,
 ) -> FetchResult<Option<CompareStatus>> {
-    if let Some(status) = ref_hint.and_then(|hint| {
+    if let Some(hint) = ref_hint {
         let reff = match *hint {
             GithubRef::DefaultBranch => None,
             GithubRef::Named(ref reff) => Some(reff.as_str()),
         };
-        github::compare_ref_status(owner, repo, reff, base, head)
-            .ok()
-            .flatten()
-    }) {
-        return Ok(Some(status));
+        match github::compare_ref_status(owner, repo, reff, base, head) {
+            Ok(Some(status)) => return Ok(Some(status)),
+            // ref absent or rev moved, so REST remains a valid fallback
+            Ok(None) | Err(FetchError::NotFound { .. }) => {},
+            Err(err) => return Err(err),
+        }
     }
     github::compare_status(owner, repo, base, head)
 }

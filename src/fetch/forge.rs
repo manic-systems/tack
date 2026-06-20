@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    borrow::Cow,
     collections::HashMap,
     io::Read as _,
     panic,
@@ -26,6 +25,7 @@ use super::{
     FetchResult,
     gitlab,
     http::HttpClient,
+    percent_encode,
 };
 use crate::source::git_url;
 
@@ -34,7 +34,7 @@ const COMPARE_TIMEOUT: Duration = Duration::from_secs(5);
 const APPLICATION_JSON: &str = "application/json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ForgeKind {
+pub(super) enum ForgeKind {
     Gitlab,
     Forgejo,
     Gitea,
@@ -43,14 +43,14 @@ pub enum ForgeKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HostedRepo {
+pub(super) struct HostedRepo {
     pub kind:  ForgeKind,
     pub host:  String,
     pub owner: String,
     pub repo:  String,
 }
 
-pub fn detect_git_url(url: &str) -> Option<HostedRepo> {
+pub(super) fn detect_git_url(url: &str) -> Option<HostedRepo> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return None;
     }
@@ -64,7 +64,7 @@ pub fn detect_git_url(url: &str) -> Option<HostedRepo> {
     })
 }
 
-pub fn compare_status(
+pub(super) fn compare_status(
     kind: ForgeKind,
     host: &str,
     owner: &str,
@@ -75,7 +75,7 @@ pub fn compare_status(
     compare_detected(kind, host, owner, repo, base, head)
 }
 
-pub fn resolve_ref(
+pub(super) fn resolve_ref(
     kind: ForgeKind,
     host: &str,
     owner: &str,
@@ -308,10 +308,6 @@ fn get_text(url: &str, timeout: Duration, limit: u64) -> FetchResult<ProbeRespon
         headers,
         body,
     })
-}
-
-fn percent_encode(value: &str) -> Cow<'_, str> {
-    percent_encoding::percent_encode(value.as_bytes(), super::PERCENT_ENCODE_SET).into()
 }
 
 struct ProbeResponse {

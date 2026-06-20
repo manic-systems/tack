@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    borrow::Cow,
     path::{
         Path,
         PathBuf,
@@ -28,6 +27,7 @@ use super::{
     },
     error::FetchError,
     http::HttpClient,
+    percent_encode,
     time::epoch_from_iso,
 };
 
@@ -88,8 +88,7 @@ impl GitlabClient {
     }
 
     fn commit_last_modified(self, host: &str, owner: &str, repo: &str, rev: &str) -> Option<i64> {
-        let raw_project = format!("{owner}/{repo}");
-        let project = percent_encode(&raw_project);
+        let project = encoded_project(owner, repo);
         let url = format!("https://{host}/api/v4/projects/{project}/repository/commits/{rev}");
         let commit = self
             .http
@@ -113,9 +112,12 @@ pub(super) fn commit_last_modified(host: &str, owner: &str, repo: &str, rev: &st
     GitlabClient::global().commit_last_modified(host, owner, repo, rev)
 }
 
+fn encoded_project(owner: &str, repo: &str) -> String {
+    percent_encode(&format!("{owner}/{repo}")).into_owned()
+}
+
 fn archive_url(host: &str, owner: &str, repo: &str, rev: &str) -> String {
-    let raw_project = format!("{owner}/{repo}");
-    let project = percent_encode(&raw_project);
+    let project = encoded_project(owner, repo);
     let sha = percent_encode(rev);
     format!("https://{host}/api/v4/projects/{project}/repository/archive.tar.gz?sha={sha}")
 }
@@ -155,7 +157,7 @@ fn offset_seconds(input: &str) -> Result<i64> {
     Ok(sign * (hours * 3_600 + mins * 60))
 }
 
-pub fn compare_status(
+pub(super) fn compare_status(
     host: &str,
     owner: &str,
     repo: &str,
@@ -166,8 +168,7 @@ pub fn compare_status(
 }
 
 fn merge_base_url(host: &str, owner: &str, repo: &str, old: &str, new: &str) -> String {
-    let raw_project = format!("{owner}/{repo}");
-    let project = percent_encode(&raw_project);
+    let project = encoded_project(owner, repo);
     let (old_ref, new_ref) = (percent_encode(old), percent_encode(new));
     format!(
         "https://{host}/api/v4/projects/{project}/repository/merge_base?refs[]={old_ref}&refs[]=\
@@ -183,10 +184,6 @@ fn classify(merge_base: &str, old: &str, new: &str) -> CompareStatus {
     } else {
         CompareStatus::Diverged
     }
-}
-
-fn percent_encode(value: &str) -> Cow<'_, str> {
-    percent_encoding::percent_encode(value.as_bytes(), super::PERCENT_ENCODE_SET).into()
 }
 
 #[derive(Deserialize)]
