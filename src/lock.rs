@@ -232,29 +232,49 @@ pub enum LockedNode {
     },
     #[serde(rename = "path")]
     Path {
-        path:     String,
+        path:          String,
         #[serde(rename = "narHash", skip_serializing_if = "Option::is_none")]
-        nar_hash: Option<String>,
+        nar_hash:      Option<String>,
+        #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
+        last_modified: Option<i64>,
+        #[serde(rename = "mtimeNanos", skip_serializing_if = "Option::is_none")]
+        mtime_nanos:   Option<i64>,
+        #[serde(rename = "treeSize", skip_serializing_if = "Option::is_none")]
+        tree_size:     Option<u64>,
+        #[serde(rename = "treeEntries", skip_serializing_if = "Option::is_none")]
+        tree_entries:  Option<u64>,
         #[serde(flatten)]
-        extra:    ExtraFields,
+        extra:         ExtraFields,
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LockIdentity<'a> {
     Rev(&'a str),
     ContentHash(&'a str),
     ImmutableUrl(&'a str),
     SourceUrl(&'a str),
+    PathFingerprint(String),
 }
 
-impl<'a> LockIdentity<'a> {
-    pub const fn as_str(self) -> &'a str {
-        match self {
+impl LockIdentity<'_> {
+    pub const fn as_str(&self) -> &str {
+        match *self {
             Self::Rev(value)
             | Self::ContentHash(value)
             | Self::ImmutableUrl(value)
             | Self::SourceUrl(value) => value,
+            Self::PathFingerprint(ref value) => value.as_str(),
+        }
+    }
+
+    pub fn into_string(self) -> String {
+        match self {
+            Self::Rev(value)
+            | Self::ContentHash(value)
+            | Self::ImmutableUrl(value)
+            | Self::SourceUrl(value) => value.to_owned(),
+            Self::PathFingerprint(value) => value,
         }
     }
 }
@@ -387,7 +407,26 @@ impl LockedNode {
         Self::Path {
             path: path.into(),
             nar_hash,
+            last_modified: None,
+            mtime_nanos: None,
+            tree_size: None,
+            tree_entries: None,
             extra: BTreeMap::new(),
+        }
+    }
+
+    pub fn new_path_with_fingerprint<P>(path: P, fingerprint: PathFingerprint) -> Self
+    where
+        P: Into<String>,
+    {
+        Self::Path {
+            path:          path.into(),
+            nar_hash:      None,
+            last_modified: Some(fingerprint.last_modified),
+            mtime_nanos:   Some(fingerprint.mtime_nanos),
+            tree_size:     Some(fingerprint.tree_size),
+            tree_entries:  Some(fingerprint.tree_entries),
+            extra:         BTreeMap::new(),
         }
     }
 
@@ -424,6 +463,17 @@ impl LockedNode {
             Self::Github { rev, .. } | Self::Gitlab { rev, .. } | Self::Git { rev, .. } => {
                 rev.as_deref().map(LockIdentity::Rev)
             },
+            Self::Path {
+                path,
+                mtime_nanos: Some(mtime_nanos),
+                tree_size: Some(tree_size),
+                tree_entries: Some(tree_entries),
+                ..
+            } => {
+                let fingerprint =
+                    path_fingerprint_identity(path, *mtime_nanos, *tree_size, *tree_entries);
+                Some(LockIdentity::PathFingerprint(fingerprint))
+            },
             Self::Indirect { .. } | Self::Path { .. } => None,
         }
     }
@@ -438,6 +488,17 @@ impl LockedNode {
                 url.as_deref()
                     .map(LockIdentity::SourceUrl)
                     .or_else(|| sha256.as_deref().map(LockIdentity::ContentHash))
+            },
+            Self::Path {
+                path,
+                mtime_nanos: Some(mtime_nanos),
+                tree_size: Some(tree_size),
+                tree_entries: Some(tree_entries),
+                ..
+            } => {
+                let fingerprint =
+                    path_fingerprint_identity(path, *mtime_nanos, *tree_size, *tree_entries);
+                Some(LockIdentity::PathFingerprint(fingerprint))
             },
             Self::Indirect { .. } | Self::Path { .. } => None,
         }
@@ -472,11 +533,29 @@ impl LockedNode {
             Self::Github { last_modified, .. }
             | Self::Gitlab { last_modified, .. }
             | Self::Git { last_modified, .. }
-            | Self::Tarball { last_modified, .. } => *last_modified,
-            Self::Fixed { .. } | Self::Indirect { .. } | Self::Path { .. } => None,
+            | Self::Tarball { last_modified, .. }
+            | Self::Path { last_modified, .. } => *last_modified,
+            Self::Fixed { .. } | Self::Indirect { .. } => None,
         }?;
         u64::try_from(value).ok()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathFingerprint {
+    pub last_modified: i64,
+    pub mtime_nanos:   i64,
+    pub tree_size:     u64,
+    pub tree_entries:  u64,
+}
+
+fn path_fingerprint_identity(
+    path: &str,
+    mtime_nanos: i64,
+    tree_size: u64,
+    tree_entries: u64,
+) -> String {
+    format!("path:{path}:{mtime_nanos}:{tree_size}:{tree_entries}")
 }
 
 fn default_gitlab_host() -> String {
