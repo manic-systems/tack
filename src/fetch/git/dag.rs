@@ -79,7 +79,7 @@ pub(super) fn resolve_tip(url: &str, reff: Option<&str>) -> FetchResult<String> 
     let repo = gix::init_bare(dir.path())
         .map_err(|err| FetchError::Transport(format!("init ref probe repo: {err}")))?;
     let remote_refs = list_refs(&repo, url, Some(ref_prefixes(reff)))?;
-    for candidate in ref_candidates(reff) {
+    for candidate in str_ref_candidates(reff) {
         if let Some(object) = remote_refs
             .iter()
             .find_map(|reference| object_for_ref(reference, &candidate))
@@ -293,22 +293,20 @@ fn filtered_commit_fetch(
 
 fn ref_prefixes(reff: Option<&str>) -> RefPrefixes {
     let mut prefixes = RefPrefixes::new();
-    prefixes.extend(ref_candidates(reff).into_iter().map(Into::into));
+    prefixes.extend(
+        super::ref_candidates(reff)
+            .into_iter()
+            .map(|candidate| candidate.unwrap_or_else(|| "HEAD".to_owned()))
+            .map(Into::into),
+    );
     prefixes
 }
 
-fn ref_candidates(reff: Option<&str>) -> Vec<String> {
-    match reff {
-        None => vec!["HEAD".to_owned()],
-        Some(target) if target.starts_with("refs/") => vec![target.to_owned()],
-        Some(target) => {
-            vec![
-                format!("refs/heads/{target}"),
-                format!("refs/tags/{target}"),
-                target.to_owned(),
-            ]
-        },
-    }
+fn str_ref_candidates(reff: Option<&str>) -> Vec<String> {
+    super::ref_candidates(reff)
+        .into_iter()
+        .map(|candidate| candidate.unwrap_or_else(|| "HEAD".to_owned()))
+        .collect::<Vec<_>>()
 }
 
 fn object_for_ref(reference: &handshake::Ref, candidate: &str) -> Option<gix::ObjectId> {
@@ -341,7 +339,7 @@ fn resolve_local_tip(path: &Path, reff: Option<&str>) -> FetchResult<String> {
             path.display()
         ))
     })?;
-    for candidate in ref_candidates(reff) {
+    for candidate in str_ref_candidates(reff) {
         if let Some(object) = local_ref_object(&repo, &candidate)? {
             return Ok(object.to_string());
         }
@@ -468,7 +466,7 @@ fn deepen_depths() -> FetchResult<impl Iterator<Item = usize>> {
 
 fn configured_rounds() -> FetchResult<usize> {
     match env::var(DEEPEN_ROUNDS_ENV) {
-        Ok(raw) => parse_rounds(Some(raw.as_str())),
+        Ok(raw) => parse_rounds(raw.as_str()),
         Err(env::VarError::NotPresent) => Ok(DEFAULT_DEEPEN_ROUNDS),
         Err(env::VarError::NotUnicode(_)) => {
             Err(FetchError::Transport(format!(
@@ -478,11 +476,8 @@ fn configured_rounds() -> FetchResult<usize> {
     }
 }
 
-fn parse_rounds(raw_value: Option<&str>) -> FetchResult<usize> {
-    let Some(raw) = raw_value else {
-        return Ok(DEFAULT_DEEPEN_ROUNDS);
-    };
-    let trimmed = raw.trim();
+fn parse_rounds(raw_value: &str) -> FetchResult<usize> {
+    let trimmed = raw_value.trim();
     if trimmed.is_empty() {
         return Ok(DEFAULT_DEEPEN_ROUNDS);
     }
