@@ -114,7 +114,7 @@ impl FollowMap {
         self.aliases.is_empty()
     }
 
-    pub fn insert(&mut self, alias: String, target: String) -> Option<String> {
+    pub(crate) fn insert(&mut self, alias: String, target: String) -> Option<String> {
         self.aliases.insert(alias, target)
     }
 
