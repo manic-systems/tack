@@ -8,7 +8,12 @@ use std::{
         Path,
         PathBuf,
     },
+    process,
     result::Result as StdResult,
+    time::{
+        SystemTime,
+        UNIX_EPOCH,
+    },
 };
 
 use eyre::Result as EyreResult;
@@ -118,15 +123,24 @@ impl Project {
                 source,
             }
         })?;
-        let lock = lock::parse(&raw).map_err(|source| {
+        let lock = lock::LockFile::parse(&raw).map_err(|source| {
             ConfigError::ParseLock {
                 path: path.clone(),
                 source,
             }
         })?;
-        for name in lock.unknown_nodes() {
+        let known_types = [
+            "github", "gitlab", "git", "tarball", "fixed", "indirect", "path",
+        ];
+        for (name, value) in lock.unknown_nodes_with_values() {
+            let tag = value.get("type").and_then(|val| val.as_str());
+            let label = if tag.is_some_and(|kind| known_types.contains(&kind)) {
+                "malformed"
+            } else {
+                "unrecognized"
+            };
             eprintln!(
-                "tack: skipping unrecognized lock entry '{name}' in {} (kept as-is)",
+                "tack: skipping {label} lock entry '{name}' in {} (kept as-is)",
                 path.display()
             );
         }
@@ -139,8 +153,12 @@ impl Project {
 }
 
 pub fn write_atomic(path: &Path, contents: &str) -> EyreResult<()> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|dur| dur.as_nanos())
+        .unwrap_or_default();
     let mut tmp_str = path.as_os_str().to_owned();
-    tmp_str.push(".tmp");
+    tmp_str.push(format!(".{}.{}.tmp", process::id(), nanos));
     let tmp = PathBuf::from(tmp_str);
     fs::write(&tmp, contents)?;
     fs::rename(&tmp, path)?;
