@@ -102,12 +102,15 @@ impl SourceRef {
         match *self {
             Self::Locked(ref node) => {
                 // transitive deps can differ across revisions
-                let rev = node.source_identity().map_or("", LockIdentity::as_str);
+                let rev = node
+                    .source_identity()
+                    .map(LockIdentity::into_string)
+                    .unwrap_or_default();
                 SourceId::from_locked(node).map_or_else(
-                    || Self::tagged_key("locked", &[node.kind(), rev]),
+                    || Self::tagged_key("locked", &[node.kind(), rev.as_str()]),
                     |source_id| {
                         let identity = source_id.to_string();
-                        Self::tagged_key("locked", &[&identity, rev])
+                        Self::tagged_key("locked", &[&identity, rev.as_str()])
                     },
                 )
             },
@@ -271,8 +274,7 @@ impl ScanDocuments {
                         side: Side::Flake,
                         rev:  locked
                             .source_identity()
-                            .map(LockIdentity::as_str)
-                            .map(str::to_owned)
+                            .map(LockIdentity::into_string)
                             .unwrap_or_default(),
                         lm:   locked.last_modified(),
                     },
@@ -347,11 +349,7 @@ impl ScanDocuments {
                     name: input.name.clone(),
                     side: Side::Tack,
                     rev:  node
-                        .and_then(|n| {
-                            n.source_identity()
-                                .map(LockIdentity::as_str)
-                                .map(str::to_owned)
-                        })
+                        .and_then(|n| n.source_identity().map(LockIdentity::into_string))
                         .unwrap_or_default(),
                     lm:   node.and_then(LockedNode::last_modified),
                 },

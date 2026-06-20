@@ -98,19 +98,21 @@ fn classify(
 ) -> PinResolution {
     let old_identity = old
         .and_then(LockedNode::resolved_identity)
-        .map(LockIdentity::as_str);
+        .map(LockIdentity::into_string);
 
     let source = expanded.parse::<Source>().ok();
     let resolved = if input.pin_type != PinType::Fixed
         && let Some(ref src) = source
     {
-        session.resolve_and_compare(src, old_identity).ok()
+        session
+            .resolve_and_compare(src, old_identity.as_deref())
+            .ok()
     } else {
         None
     };
 
     if let Some(ref current) = resolved
-        && old_identity == Some(current.rev.as_str())
+        && old_identity.as_deref() == Some(current.rev.as_str())
     {
         return unchanged(warning);
     }
@@ -134,11 +136,11 @@ fn classify(
     }
     if input.pin_type == PinType::Fixed
         && old_identity.is_some()
-        && old_identity != Some(new_identity.as_str())
+        && old_identity.as_deref() != Some(new_identity.as_str())
     {
         return resolve_drift(
             UpdateOutcome::FixedDrift {
-                old:      old_identity.unwrap_or_default().to_owned(),
+                old:      old_identity.unwrap_or_default(),
                 new:      new_identity,
                 accepted: accept,
             },
@@ -147,7 +149,7 @@ fn classify(
             warning,
         );
     }
-    if old_identity == Some(new_identity.as_str()) {
+    if old_identity.as_deref() == Some(new_identity.as_str()) {
         return if hash_drifted(old, &node) {
             resolve_drift(
                 UpdateOutcome::Drift {
@@ -170,7 +172,7 @@ fn classify(
                 source
                     .as_ref()
                     .map_or_else(BranchComparison::default, |src| {
-                        compare_with_planner(session, src, old_identity, &new_identity)
+                        compare_with_planner(session, src, old_identity.as_deref(), &new_identity)
                     })
             },
             |current| current.comparison,
@@ -178,7 +180,7 @@ fn classify(
 
     PinResolution {
         outcome: UpdateOutcome::Updated {
-            old: old_identity.map(str::to_owned),
+            old: old_identity,
             new: new_identity,
             comparison,
         },
@@ -406,8 +408,7 @@ pub(super) fn look(
         let old = lock
             .get(&input.name)
             .and_then(LockedNode::resolved_identity)
-            .map(LockIdentity::as_str)
-            .map(str::to_owned);
+            .map(LockIdentity::into_string);
         let (outcome, log) =
             classify_look(input, &localized.url, old.as_deref(), verbose, &session);
         progress.finished(index, &outcome);

@@ -84,6 +84,9 @@ type = "fixed"
 - `github:owner/repo[/ref]` tarball via codeload
 - `git+https://...` / `git+ssh://...` any git remote; `?ref=<branch>` /
   `?rev=<sha>` to pin, `submodules = true` to recurse
+- `path:/absolute/local/tree` or `path:./relative/tree` local convenience pins;
+  tack tracks absolute paths with a fast metadata fingerprint instead of
+  content-hashing them on every update
 - `https://...` / `http://...` raw tarball, where the format is inferred
   from the extension (e.g. `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`).
 
