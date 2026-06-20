@@ -235,7 +235,7 @@ fn fetch_refspecs_into(
     shallow: bool,
 ) -> Result<()> {
     if let Some(source) = local_file_repo(url)? {
-        return fetch_local_refspecs_into(repo, &source, refspecs);
+        return fetch_local_refspecs_into(repo, &source, refspecs, shallow);
     }
 
     let mut remote = repo
@@ -275,9 +275,10 @@ fn fetch_local_refspecs_into(
     repo: &gix::Repository,
     source: &gix::Repository,
     refspecs: &[String],
+    shallow: bool,
 ) -> Result<()> {
     for refspec in refspecs {
-        fetch_local_refspec(repo, source, refspec)?;
+        fetch_local_refspec(repo, source, refspec, shallow)?;
     }
     Ok(())
 }
@@ -286,6 +287,7 @@ fn fetch_local_refspec(
     repo: &gix::Repository,
     source: &gix::Repository,
     refspec: &str,
+    shallow: bool,
 ) -> Result<()> {
     let spec = refspec.strip_prefix('+').unwrap_or(refspec);
     let (source_spec, dest_spec) = spec
@@ -294,12 +296,12 @@ fn fetch_local_refspec(
     if let (Some(source_prefix), Some(dest_prefix)) =
         (source_spec.strip_suffix('*'), dest_spec.strip_suffix('*'))
     {
-        return fetch_local_wildcard_refspec(repo, source, source_prefix, dest_prefix);
+        return fetch_local_wildcard_refspec(repo, source, source_prefix, dest_prefix, shallow);
     }
 
     let id = local_ref_id(source, source_spec)?;
     let mut seen = BTreeSet::new();
-    copy_reachable_object(source, repo, id, &mut seen)?;
+    copy_reachable_object(source, repo, id, &mut seen, !shallow)?;
     repo.reference(dest_spec, id, PreviousValue::Any, "local fetch")?;
     Ok(())
 }
@@ -309,6 +311,7 @@ fn fetch_local_wildcard_refspec(
     source: &gix::Repository,
     source_prefix: &str,
     dest_prefix: &str,
+    shallow: bool,
 ) -> Result<()> {
     let mut seen = BTreeSet::new();
     let reference_platform = source.references()?;
@@ -324,7 +327,7 @@ fn fetch_local_wildcard_refspec(
             .strip_prefix(source_prefix)
             .with_context(|| format!("reference {full_name} did not match {source_prefix}"))?
             .to_owned();
-        copy_reachable_object(source, repo, id, &mut seen)?;
+        copy_reachable_object(source, repo, id, &mut seen, !shallow)?;
         repo.reference(
             format!("{dest_prefix}{suffix}"),
             id,
@@ -354,6 +357,7 @@ fn copy_reachable_object(
     dest: &gix::Repository,
     id: gix::ObjectId,
     seen: &mut BTreeSet<gix::ObjectId>,
+    copy_parents: bool,
 ) -> Result<()> {
     if !seen.insert(id) {
         return Ok(());
@@ -372,9 +376,11 @@ fn copy_reachable_object(
             let commit = object
                 .try_into_commit()
                 .map_err(|_| eyre::eyre!("local git object {id} changed kind while copying"))?;
-            copy_reachable_object(source, dest, commit.tree_id()?.detach(), seen)?;
-            for parent in commit.parent_ids() {
-                copy_reachable_object(source, dest, parent.detach(), seen)?;
+            copy_reachable_object(source, dest, commit.tree_id()?.detach(), seen, copy_parents)?;
+            if copy_parents {
+                for parent in commit.parent_ids() {
+                    copy_reachable_object(source, dest, parent.detach(), seen, copy_parents)?;
+                }
             }
         },
         objs::Kind::Tree => {
@@ -384,7 +390,7 @@ fn copy_reachable_object(
             for entry_result in tree.iter() {
                 let entry = entry_result?;
                 if entry.kind() != EntryKind::Commit {
-                    copy_reachable_object(source, dest, entry.id().detach(), seen)?;
+                    copy_reachable_object(source, dest, entry.id().detach(), seen, copy_parents)?;
                 }
             }
         },
@@ -392,7 +398,7 @@ fn copy_reachable_object(
             let tag = object
                 .try_into_tag()
                 .map_err(|_| eyre::eyre!("local git object {id} changed kind while copying"))?;
-            copy_reachable_object(source, dest, tag.target_id()?.detach(), seen)?;
+            copy_reachable_object(source, dest, tag.target_id()?.detach(), seen, copy_parents)?;
         },
         objs::Kind::Blob => {},
     }
