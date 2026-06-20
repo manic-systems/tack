@@ -95,12 +95,16 @@ pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<Comp
     (jobs, capped)
 }
 
-pub(super) fn ahead_behind(
-    groups: &BTreeMap<SourceId, Vec<Entry>>,
-) -> HashMap<(SourceId, String), CompareStatus> {
+pub(super) struct AheadBehindResult {
+    pub compares:        HashMap<SourceId, HashMap<String, CompareStatus>>,
+    pub surfaced_causes: Vec<String>,
+    pub dropped:         usize,
+}
+
+pub(super) fn ahead_behind(groups: &BTreeMap<SourceId, Vec<Entry>>) -> AheadBehindResult {
     let (jobs, capped) = compare_jobs(groups);
     let attempted = jobs.len();
-    let mut compares = HashMap::<(SourceId, String), CompareStatus>::new();
+    let mut compares = HashMap::<SourceId, HashMap<String, CompareStatus>>::new();
     let session = CompareSession::new();
     let planner_jobs = jobs.iter().map(|work| work.job.clone()).collect::<Vec<_>>();
     let results = session.compare_batch(planner_jobs, MAX_LIVE_COMPARE_JOBS);
@@ -110,21 +114,21 @@ pub(super) fn ahead_behind(
             .and_then(|attempt| attempt.as_ref())
             .and_then(|attempt| attempt.status)
         {
-            compares.insert((work.id.clone(), work.head.clone()), status);
+            compares
+                .entry(work.id.clone())
+                .or_default()
+                .insert(work.head.clone(), status);
         }
     }
 
-    for cause in session.into_surfaced() {
-        eprintln!("tack: {cause}");
+    let surfaced_causes = session.into_surfaced().into_iter().collect::<Vec<_>>();
+    let succeeded = compares.values().map(HashMap::len).sum::<usize>();
+    let dropped = capped + attempted - succeeded;
+    AheadBehindResult {
+        compares,
+        surfaced_causes,
+        dropped,
     }
-    let dropped = capped + attempted - compares.len();
-    if dropped > 0 {
-        eprintln!(
-            "tack: {dropped} branch comparison(s) unavailable or capped; falling back to \
-             commit-date order"
-        );
-    }
-    compares
 }
 
 pub(super) fn rev_last_modified(entries: &[Entry]) -> BTreeMap<&str, u64> {
@@ -144,7 +148,7 @@ pub(super) fn classify(
     rev: &str,
     comparator: Option<&Entry>,
     lm_of: &BTreeMap<&str, u64>,
-    compares: &HashMap<(SourceId, String), CompareStatus>,
+    compares: &HashMap<SourceId, HashMap<String, CompareStatus>>,
 ) -> Mark {
     let Some(comp) = comparator else {
         return Mark::Unknown;
@@ -152,7 +156,7 @@ pub(super) fn classify(
     if rev == entry_compare_rev(comp) {
         return Mark::Base;
     }
-    if let Some(status) = compares.get(&(id.clone(), rev.to_owned())) {
+    if let Some(status) = compares.get(id).and_then(|revs| revs.get(rev)) {
         return match *status {
             CompareStatus::Ahead => Mark::Ahead,
             CompareStatus::Behind => Mark::Behind,

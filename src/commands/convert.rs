@@ -21,7 +21,7 @@ use crate::{
     project::Project,
 };
 
-pub fn convert(project: &Project, flake_path: &Path) -> Result<usize> {
+pub(super) fn convert(project: &Project, flake_path: &Path) -> Result<usize> {
     let inputs = eval_inputs(flake_path)?;
     if inputs.is_empty() {
         return Ok(0);

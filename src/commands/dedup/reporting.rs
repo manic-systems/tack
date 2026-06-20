@@ -45,7 +45,7 @@ fn group_sources_by_rev(entries: &[Entry]) -> SourcesByRev<'_> {
 pub(super) fn build_report(
     groups: &BTreeMap<SourceId, Vec<Entry>>,
     all_follow: &BTreeMap<String, String>,
-    compares: &HashMap<(SourceId, String), CompareStatus>,
+    compares: &HashMap<SourceId, HashMap<String, CompareStatus>>,
 ) -> DedupReport {
     let mut follows = FollowSuggestions::default();
     let mut report_groups = Vec::<DedupGroup>::new();

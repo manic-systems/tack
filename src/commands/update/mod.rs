@@ -6,6 +6,8 @@ use eyre::Result;
 
 mod core;
 
+pub use core::fetch_input;
+
 use crate::{
     error::user_bail,
     fetch::BranchComparison,
@@ -33,46 +35,58 @@ fn updated_status(old: Option<&str>, new: &str, comparison: BranchComparison) ->
     }
 }
 
-fn update_status(outcome: &UpdateOutcome) -> PinStatus {
-    match *outcome {
-        UpdateOutcome::Unchanged => PinStatus::NoChange,
-        UpdateOutcome::Updated {
-            ref old,
-            ref new,
-            comparison,
-        } => updated_status(old.as_deref(), new, comparison),
-        UpdateOutcome::Drift { ref rev, accepted } => {
-            PinStatus::Drift {
-                rev: render::short(rev),
+impl From<&UpdateOutcome> for PinStatus {
+    fn from(outcome: &UpdateOutcome) -> Self {
+        match *outcome {
+            UpdateOutcome::Unchanged => Self::NoChange,
+            UpdateOutcome::Updated {
+                ref old,
+                ref new,
+                comparison,
+            } => updated_status(old.as_deref(), new, comparison),
+            UpdateOutcome::Drift { ref rev, accepted } => {
+                Self::Drift {
+                    rev: render::short(rev),
+                    accepted,
+                }
+            },
+            UpdateOutcome::FixedDrift {
+                ref old,
+                ref new,
                 accepted,
-            }
-        },
-        UpdateOutcome::FixedDrift {
-            ref old,
-            ref new,
-            accepted,
-        } => {
-            PinStatus::FixedDrift {
-                old: render::short(old),
-                new: render::short(new),
-                accepted,
-            }
-        },
-        UpdateOutcome::Failed(ref msg) => PinStatus::Failed(msg.clone()),
+            } => {
+                Self::FixedDrift {
+                    old: render::short(old),
+                    new: render::short(new),
+                    accepted,
+                }
+            },
+            UpdateOutcome::Failed(ref msg) => Self::Failed(msg.clone()),
+        }
     }
 }
 
-fn look_status(outcome: &LookOutcome) -> PinStatus {
-    match *outcome {
-        LookOutcome::Unchanged => PinStatus::NoChange,
-        LookOutcome::Updated {
-            ref old,
-            ref new,
-            comparison,
-        } => updated_status(old.as_deref(), new, comparison),
-        LookOutcome::Skipped(ref note) => PinStatus::Skipped(note.clone()),
-        LookOutcome::Failed(ref msg) => PinStatus::Failed(msg.clone()),
+impl From<&LookOutcome> for PinStatus {
+    fn from(outcome: &LookOutcome) -> Self {
+        match *outcome {
+            LookOutcome::Unchanged => Self::NoChange,
+            LookOutcome::Updated {
+                ref old,
+                ref new,
+                comparison,
+            } => updated_status(old.as_deref(), new, comparison),
+            LookOutcome::Skipped(ref note) => Self::Skipped(note.clone()),
+            LookOutcome::Failed(ref msg) => Self::Failed(msg.clone()),
+        }
     }
+}
+
+fn update_status(outcome: &UpdateOutcome) -> PinStatus {
+    outcome.into()
+}
+
+fn look_status(outcome: &LookOutcome) -> PinStatus {
+    outcome.into()
 }
 
 struct Spinner(OnceLock<Display>);
