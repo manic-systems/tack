@@ -46,6 +46,29 @@ pub fn short(rev: &str) -> String {
     rev.chars().take(7).collect()
 }
 
+pub fn added_identity(identity: &str) -> String {
+    local_path_identity(identity).map_or_else(
+        || format!("NEW -> {}", short(identity)),
+        |path| format!("LOCAL -> {path}"),
+    )
+}
+
+pub fn display_identity(identity: &str) -> String {
+    local_path_identity(identity).map_or_else(|| short(identity), str::to_owned)
+}
+
+pub fn local_path_identity(identity: &str) -> Option<&str> {
+    if identity.starts_with('/') || identity.starts_with("./") || identity.starts_with("../") {
+        return Some(identity);
+    }
+    let rest = identity.strip_prefix("path:")?;
+    let (without_entries, entries) = rest.rsplit_once(':')?;
+    let (without_size, size) = without_entries.rsplit_once(':')?;
+    let (path, mtime) = without_size.rsplit_once(':')?;
+    (entries.parse::<u64>().is_ok() && size.parse::<u64>().is_ok() && mtime.parse::<i64>().is_ok())
+        .then_some(path)
+}
+
 pub fn source_label(path: &[String]) -> String {
     if path.is_empty() {
         "top".into()
