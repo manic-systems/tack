@@ -59,7 +59,10 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
             let mut lk = project.load_lock()?;
             lk.insert(name.to_owned(), node);
             project.save_lock(&lk)?;
-            println!("added {name}  NEW -> {}", render::short(identity.as_str()));
+            println!(
+                "added {name}  {}",
+                render::added_identity(identity.as_str())
+            );
         },
         Err(err) => {
             println!("added {name} to pins.toml, but locking failed: {err:#}");

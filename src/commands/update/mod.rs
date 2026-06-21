@@ -28,9 +28,16 @@ use crate::{
 const LOG_LIMIT: usize = 5;
 
 fn updated_status(old: Option<&str>, new: &str, comparison: BranchComparison) -> PinStatus {
+    if let Some(path) = render::local_path_identity(new) {
+        return PinStatus::Updated {
+            old: "LOCAL".to_owned(),
+            new: path.to_owned(),
+            comparison,
+        };
+    }
     PinStatus::Updated {
-        old: old.map_or_else(|| "NEW".to_owned(), render::short),
-        new: render::short(new),
+        old: old.map_or_else(|| "NEW".to_owned(), render::display_identity),
+        new: render::display_identity(new),
         comparison,
     }
 }
