@@ -104,6 +104,7 @@
           nightlyRustfmt = fenix.packages.${system}.latest.rustfmt;
         in
         {
+          inherit (self.packages.${system}) tack;
           default = pkgs.linkFarmFromDrvs "tack-checks" [
             self.checks.${system}.fmt
             self.checks.${system}.clippy
