@@ -185,6 +185,10 @@ struct GithubCompareResponse {
     #[serde(default)]
     commits:       Vec<GithubCompareCommit>,
     total_commits: Option<u64>,
+    #[serde(default)]
+    ahead_by:      u64,
+    #[serde(default)]
+    behind_by:     u64,
     base_commit:   Option<GithubCompareCommit>,
 }
 
@@ -212,7 +216,9 @@ impl GithubCompareResponse {
         CommitLog {
             fresh,
             base,
-            more: total > limit,
+            total,
+            ahead: self.ahead_by,
+            behind: self.behind_by,
         }
     }
 }
@@ -468,9 +474,11 @@ pub(super) fn compare_status(
 
 #[derive(Clone, Debug)]
 pub struct CommitLog {
-    pub fresh: Vec<(String, String)>,
-    pub base:  Option<(String, String)>,
-    pub more:  bool,
+    pub fresh:  Vec<(String, String)>,
+    pub base:   Option<(String, String)>,
+    pub total:  usize,
+    pub ahead:  u64,
+    pub behind: u64,
 }
 
 pub fn commits_between(
