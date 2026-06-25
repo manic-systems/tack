@@ -99,14 +99,13 @@ fn classify(
     let old_identity = old
         .and_then(LockedNode::resolved_identity)
         .map(LockIdentity::into_string);
+    let old_compare_rev = old.and_then(comparable_rev);
 
     let source = expanded.parse::<Source>().ok();
     let resolved = if input.pin_type != PinType::Fixed
         && let Some(ref src) = source
     {
-        session
-            .resolve_and_compare(src, old_identity.as_deref())
-            .ok()
+        session.resolve_and_compare(src, old_compare_rev).ok()
     } else {
         None
     };
@@ -172,7 +171,7 @@ fn classify(
                 source
                     .as_ref()
                     .map_or_else(BranchComparison::default, |src| {
-                        compare_with_planner(session, src, old_identity.as_deref(), &new_identity)
+                        compare_with_planner(session, src, old_compare_rev, &new_identity)
                     })
             },
             |current| current.comparison,
@@ -187,6 +186,27 @@ fn classify(
         node: Some(node),
         drift: false,
         warning,
+    }
+}
+
+fn comparable_rev(node: &LockedNode) -> Option<&str> {
+    match *node {
+        LockedNode::Github {
+            rev: Some(ref rev), ..
+        }
+        | LockedNode::Gitlab {
+            rev: Some(ref rev), ..
+        }
+        | LockedNode::Git {
+            rev: Some(ref rev), ..
+        } => Some(rev),
+        LockedNode::Github { rev: None, .. }
+        | LockedNode::Gitlab { rev: None, .. }
+        | LockedNode::Git { rev: None, .. }
+        | LockedNode::Tarball { .. }
+        | LockedNode::Fixed { .. }
+        | LockedNode::Indirect { .. }
+        | LockedNode::Path { .. } => None,
     }
 }
 
@@ -342,7 +362,8 @@ pub(super) fn update(
 fn classify_look(
     input: &pins::Input,
     expanded: &str,
-    old: Option<&str>,
+    old_identity: Option<&str>,
+    old_compare_rev: Option<&str>,
     verbose: bool,
     session: &CompareSession,
 ) -> (LookOutcome, Option<CommitLog>) {
@@ -359,10 +380,10 @@ fn classify_look(
     if matches!(source, Source::Path { .. }) {
         return (LookOutcome::Skipped("local path".to_owned()), None);
     }
-    match session.resolve_and_compare(&source, old) {
-        Ok(current) if old == Some(current.rev.as_str()) => (LookOutcome::Unchanged, None),
+    match session.resolve_and_compare(&source, old_compare_rev) {
+        Ok(current) if old_identity == Some(current.rev.as_str()) => (LookOutcome::Unchanged, None),
         Ok(current) => {
-            let log = match (verbose, old) {
+            let log = match (verbose, old_compare_rev) {
                 (true, Some(old_rev)) => {
                     fetch::github::commits_between(&source, old_rev, &current.rev, LOG_LIMIT)
                         .ok()
@@ -372,7 +393,7 @@ fn classify_look(
             };
             (
                 LookOutcome::Updated {
-                    old:        old.map(str::to_owned),
+                    old:        old_identity.map(str::to_owned),
                     new:        current.rev,
                     comparison: current.comparison,
                 },
@@ -409,8 +430,15 @@ pub(super) fn look(
             .get(&input.name)
             .and_then(LockedNode::resolved_identity)
             .map(LockIdentity::into_string);
-        let (outcome, log) =
-            classify_look(input, &localized.url, old.as_deref(), verbose, &session);
+        let old_compare_rev = lock.get(&input.name).and_then(comparable_rev);
+        let (outcome, log) = classify_look(
+            input,
+            &localized.url,
+            old.as_deref(),
+            old_compare_rev,
+            verbose,
+            &session,
+        );
         progress.finished(index, &outcome);
         (
             PinLook {
