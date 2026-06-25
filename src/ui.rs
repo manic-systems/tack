@@ -202,6 +202,13 @@ impl<'a> CommitLogLines<'a> {
     }
 
     fn write_to(&self, out: &mut dyn io::Write) {
+        let _ = writeln!(
+            out,
+            "{}{}",
+            self.indent,
+            CommitLogSummary::new(self.log).text()
+        );
+
         for &(ref hash, ref subject) in &self.log.fresh {
             let _ = writeln!(
                 out,
@@ -211,8 +218,9 @@ impl<'a> CommitLogLines<'a> {
             );
         }
 
-        if self.log.more {
-            let _ = writeln!(out, "{}...", self.indent);
+        let elided = self.log.total.saturating_sub(self.log.fresh.len());
+        if elided > 0 {
+            let _ = writeln!(out, "{}... {} elided", self.indent, elided);
         }
 
         if let Some((ref hash, ref subject)) = self.log.base {
@@ -222,6 +230,26 @@ impl<'a> CommitLogLines<'a> {
                 self.indent,
                 CommitHash::new(hash).short()
             );
+        }
+    }
+}
+
+struct CommitLogSummary<'a> {
+    log: &'a CommitLog,
+}
+
+impl<'a> CommitLogSummary<'a> {
+    const fn new(log: &'a CommitLog) -> Self {
+        Self { log }
+    }
+
+    fn text(&self) -> String {
+        match (self.log.ahead, self.log.behind) {
+            (ahead, 0) => format!("{ahead} ahead"),
+            (0, behind) => format!("{behind} behind"),
+            (ahead, behind) => {
+                format!("{ahead} ahead, {behind} behind")
+            },
         }
     }
 }
