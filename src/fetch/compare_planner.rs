@@ -386,6 +386,9 @@ fn execute(job: &CompareJob) -> CompareAttempt {
     match compare_api(job) {
         Ok(Some(status)) => CompareAttempt::verified(status),
         Ok(None) => fallback_dag(job, None),
+        Err(err) if is_missing_remote_commit(job, &err) => {
+            CompareAttempt::unavailable(Some(err.to_string()))
+        },
         Err(err) => fallback_dag(job, Some(err)),
     }
 }
@@ -464,6 +467,28 @@ fn dag_fallback_cause(api_error: Option<FetchError>, dag_err: &FetchError) -> St
         || dag_err.to_string(),
         |api| format!("{api}; dag fallback: {dag_err}"),
     )
+}
+
+fn is_missing_remote_commit(job: &CompareJob, err: &FetchError) -> bool {
+    if !matches!(job.source, CompareSource::Github { .. }) {
+        return false;
+    }
+    match *err {
+        FetchError::NotFound { .. } => true,
+        FetchError::Github(ref message) => {
+            let lower = message.to_ascii_lowercase();
+            lower.contains("no commit found")
+                || lower.contains("could not resolve to a commit")
+                || lower.contains("does not exist")
+                || lower.contains("not a commit")
+        },
+        FetchError::Auth { .. }
+        | FetchError::RateLimited { .. }
+        | FetchError::Transport(_)
+        | FetchError::Decode { .. }
+        | FetchError::Gitlab(_)
+        | FetchError::Forge(_) => false,
+    }
 }
 
 #[cfg(test)]
