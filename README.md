@@ -1,6 +1,6 @@
 # tack
 
-flake-like toml nix pins, lazily fetched and transformed
+flake-like toml nix pins
 
 maintains `pins.toml` (what you want), `pins.lock.json` (what's fetched),
 and a vendored `default.nix` resolver to consume locked inputs without
@@ -150,6 +150,39 @@ just one side:
 [inputs.bar]
 follows = { "flake:systems" = "systems", "tack:nixpkgs" = "nixpkgs" }
 ```
+
+## laziness
+
+unlike a flake.nix, inputs defined in `tack.toml` will be fetched lazily. if you
+have two inputs:
+
+```toml
+[inputs.nixpkgs]
+url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz"
+
+# nightly rust for the `fmt` devshell only.
+[inputs.fenix]
+url = "github:nix-community/fenix"
+```
+
+and you don't access the fenix input in your primary code path, it will never be
+fetched.
+
+however, flake inputs _of_ your used tack inputs will be fetched eagerly. if you
+have an `crate2nix` input used in your primary code path:
+
+```toml
+[inputs.nixpkgs]
+url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz"
+
+[inputs.crate2nix]
+url = "github:nix-community/crate2nix"
+follows = { nixpkgs = "nixpkgs" }
+```
+
+then the transitive inputs (`flake-compat`, `devshell`, `nix-test-runner`,
+`cachix`, and `pre-commit-hooks`) will be fetched, even though they're never
+used.
 
 ## publishing
 
