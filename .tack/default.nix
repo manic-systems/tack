@@ -382,7 +382,6 @@ let
         { name, pin }:
         let
           pinType = pin.type or (if pin.flake or true then "flake" else "fetch");
-          subdir = if pin ? dir then "/" + pin.dir else "";
         in
         if pinType == "fixed" then
           fetchFixed {
@@ -392,6 +391,7 @@ let
         else
           let
             sourceInfo = fetchPin name;
+            subdir = if pin ? dir then "/" + pin.dir else "";
           in
           if pinType == "flake" then
             evalTopFlake { inherit sourceInfo pin; }
