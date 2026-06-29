@@ -9,7 +9,6 @@ let
     elem
     elemAt
     filter
-    foldl'
     fromJSON
     head
     intersectAttrs
@@ -35,27 +34,34 @@ let
       all_follow_raw = pins.all_follow or { };
 
       # flatten `target = [aliases]` rows alongside `alias = "target"` rows
-      all_follow = foldl' (
-        acc: key:
-        let
-          val = all_follow_raw.${key};
-        in
-        if isList val then
-          acc
-          // {
-            ${key} = key;
-          }
-          // listToAttrs (
-            map (a: {
+      all_follow = listToAttrs (
+        concatMap (
+          key:
+          let
+            val = all_follow_raw.${key};
+          in
+          if isList val then
+            [
+              {
+                name = key;
+                value = key;
+              }
+            ]
+            ++ map (a: {
               name = a;
               value = key;
             }) val
-          )
-        else if isString val then
-          acc // { ${key} = val; }
-        else
-          acc
-      ) { } (attrNames all_follow_raw);
+          else if isString val then
+            [
+              {
+                name = key;
+                value = val;
+              }
+            ]
+          else
+            [ ]
+        ) (attrNames all_follow_raw)
+      );
 
       knownTypes = [
         "github"
