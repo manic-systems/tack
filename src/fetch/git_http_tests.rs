@@ -48,7 +48,7 @@ fn write_response(stream: &mut TcpStream, head: &str, body: &str) {
 
 #[test]
 fn unauthorized_request_resolves_credential_and_retries_with_authorization() {
-    let host = "127.0.0.2";
+    let host = "127.0.0.1";
     auth::seed_resolvable_credential(host, "atagen", "s3cr3t");
     let listener = TcpListener::bind((host, 0)).unwrap();
     let url = format!(
