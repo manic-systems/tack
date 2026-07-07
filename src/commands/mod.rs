@@ -90,16 +90,23 @@ pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool
     edit::alias(project, name, template, remove)
 }
 
-pub fn update(project: &Project, names: &[String], accept: bool) -> Result<UpdateReport> {
-    update::update(project, names, accept)
+#[derive(Clone, Copy)]
+pub struct UpdateRequest<'a> {
+    pub names:    &'a [String],
+    pub accept:   bool,
+    pub resolver: bool,
+}
+
+pub fn update(project: &Project, request: UpdateRequest<'_>) -> Result<UpdateReport> {
+    update::update(project, request)
 }
 
 pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<LookReport> {
     update::look(project, names, verbose)
 }
 
-pub fn update_cli(project: &Project, names: &[String], accept: bool) -> Result<()> {
-    update::update_cli(project, names, accept)
+pub fn update_cli(project: &Project, request: UpdateRequest<'_>) -> Result<()> {
+    update::update_cli(project, request)
 }
 
 pub fn look_cli(project: &Project, names: &[String], verbose: bool) -> Result<()> {

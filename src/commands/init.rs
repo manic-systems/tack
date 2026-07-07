@@ -82,6 +82,10 @@ pub fn init(project: &Project, request: InitRequest) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn refresh_resolver(project: &Project) -> Result<()> {
+    write_resolver(project.dir(), &project.resolver_path(), false)
+}
+
 fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     if let Ok(current) = fs::read_to_string(path) {
         if current == RESOLVER_NIX {

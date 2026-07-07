@@ -9,6 +9,7 @@ mod core;
 pub use core::fetch_input;
 
 use crate::{
+    commands::UpdateRequest,
     error::user_bail,
     fetch::BranchComparison,
     project::Project,
@@ -137,13 +138,13 @@ impl<O> core::Progress<O> for SpinnerProgress<'_, O> {
     }
 }
 
-pub fn update(project: &Project, names: &[String], accept: bool) -> Result<UpdateReport> {
-    core::update(project, names, accept, &core::NoProgress)
+pub fn update(project: &Project, request: UpdateRequest<'_>) -> Result<UpdateReport> {
+    core::update(project, request, &core::NoProgress)
 }
 
-pub fn update_cli(project: &Project, names: &[String], accept: bool) -> Result<()> {
+pub fn update_cli(project: &Project, request: UpdateRequest<'_>) -> Result<()> {
     let spinner = Spinner::new();
-    let report = core::update(project, names, accept, &SpinnerProgress {
+    let report = core::update(project, request, &SpinnerProgress {
         spinner: &spinner,
         status:  update_status,
     })?;

@@ -48,7 +48,8 @@ legacy `./inputs.nix` at repo root is detected and preserved as-is.
 tack init [--force] [--resolver] [--flake]
                                       scaffold .tack/ (--resolver writes only default.nix,
                                       --flake also a wired flake.nix)
-tack update [names...] [--accept]    fetch latest, rewrite lock
+tack update [names...] [--accept] [--resolver]
+                                      fetch latest, rewrite lock (--resolver also refreshes default.nix)
 tack look [names...] [--verbose|-v]  report pins with newer upstream revs
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                       [--dir <d>] [--submodules] [--follows c=p]...

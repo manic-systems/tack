@@ -17,8 +17,9 @@ pub enum Command {
         convert:  bool,
     },
     Update {
-        names:  Vec<String>,
-        accept: bool,
+        names:    Vec<String>,
+        accept:   bool,
+        resolver: bool,
     },
     Look {
         names:   Vec<String>,
@@ -71,9 +72,11 @@ enum Cli {
     Update {
         /// relock drifted pins instead of failing
         #[pound(long)]
-        accept: bool,
+        accept:   bool,
         /// pins to update (default: all)
-        names:  Vec<String>,
+        names:    Vec<String>,
+        /// refresh the resolver if it has drifted
+        resolver: bool,
     },
     /// show upstream drift without writing the lock
     Look {
@@ -161,12 +164,21 @@ impl Command {
                 }
                 .to_owned()
             },
-            Self::Update { ref names, .. } => {
-                if names.is_empty() {
+            Self::Update {
+                ref names,
+                resolver,
+                ..
+            } => {
+                let mut label = if names.is_empty() {
                     "update".to_owned()
                 } else {
                     format!("update {}", names.join(" "))
+                };
+
+                if resolver {
+                    label.push_str("--resolver");
                 }
+                label
             },
             Self::Add { ref name, .. } => format!("add {name}"),
             Self::Rm { ref name } => format!("rm {name}"),
@@ -198,7 +210,17 @@ impl From<Cli> for Command {
                     convert,
                 }
             },
-            Cli::Update { accept, names } => Self::Update { names, accept },
+            Cli::Update {
+                accept,
+                names,
+                resolver,
+            } => {
+                Self::Update {
+                    names,
+                    accept,
+                    resolver,
+                }
+            },
             Cli::Look { verbose, names } => Self::Look { names, verbose },
             Cli::Add {
                 name,
