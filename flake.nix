@@ -105,9 +105,12 @@
         in
         {
           default = pkgs.linkFarmFromDrvs "tack-checks" [
+            self.checks.${system}.tack
             self.checks.${system}.fmt
             self.checks.${system}.clippy
           ];
+
+          inherit (self.packages.${system}) tack;
           fmt =
             pkgs.runCommand "tack-fmt-check"
               {
