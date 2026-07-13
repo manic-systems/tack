@@ -276,6 +276,7 @@ fn pin_names(selected: &[&pins::Input]) -> Vec<String> {
 
 pub(super) fn update(
     project: &Project,
+    exclude: &[String],
     names: &[String],
     accept: bool,
     progress: &impl Progress<UpdateOutcome>,
@@ -284,7 +285,7 @@ pub(super) fn update(
     let shorturls = doc.shorturls();
     let all = doc.inputs()?;
     let all_follow = doc.all_follows()?;
-    let selected = select(&all, names);
+    let selected = select(&all, exclude, names);
     if selected.is_empty() {
         return Ok(UpdateReport::default());
     }
@@ -413,7 +414,7 @@ pub(super) fn look(
     let doc = project.load_pins()?;
     let shorturls = doc.shorturls();
     let all = doc.inputs()?;
-    let selected = select(&all, names);
+    let selected = select(&all, &[], names);
     if selected.is_empty() {
         return Ok(LookReport::default());
     }

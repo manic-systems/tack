@@ -34,9 +34,13 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
         Command::Dedup => commands::dedup(&project),
         Command::Undo { list } => commands::undo(&project, list),
         Command::Redo => commands::redo(&project),
-        Command::Update { names, accept } => {
+        Command::Update {
+            exclude,
+            names,
+            accept,
+        } => {
             recorded(&project, &label, || {
-                commands::update_cli(&project, &names, accept)
+                commands::update_cli(&project, &exclude, &names, accept)
             })
         },
         Command::Add {

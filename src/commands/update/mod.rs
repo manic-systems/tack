@@ -137,13 +137,23 @@ impl<O> core::Progress<O> for SpinnerProgress<'_, O> {
     }
 }
 
-pub fn update(project: &Project, names: &[String], accept: bool) -> Result<UpdateReport> {
-    core::update(project, names, accept, &core::NoProgress)
+pub fn update(
+    project: &Project,
+    exclude: &[String],
+    names: &[String],
+    accept: bool,
+) -> Result<UpdateReport> {
+    core::update(project, exclude, names, accept, &core::NoProgress)
 }
 
-pub fn update_cli(project: &Project, names: &[String], accept: bool) -> Result<()> {
+pub fn update_cli(
+    project: &Project,
+    exclude: &[String],
+    names: &[String],
+    accept: bool,
+) -> Result<()> {
     let spinner = Spinner::new();
-    let report = core::update(project, names, accept, &SpinnerProgress {
+    let report = core::update(project, exclude, names, accept, &SpinnerProgress {
         spinner: &spinner,
         status:  update_status,
     })?;

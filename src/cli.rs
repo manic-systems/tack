@@ -17,8 +17,9 @@ pub enum Command {
         convert:  bool,
     },
     Update {
-        names:  Vec<String>,
-        accept: bool,
+        exclude: Vec<String>,
+        names:   Vec<String>,
+        accept:  bool,
     },
     Look {
         names:   Vec<String>,
@@ -71,9 +72,12 @@ enum Cli {
     Update {
         /// relock drifted pins instead of failing
         #[pound(long)]
-        accept: bool,
+        accept:  bool,
+        /// exclude pins from update (e.g. "nixpkgs, home-manager")
+        #[pound(long)]
+        exclude: Option<String>,
         /// pins to update (default: all)
-        names:  Vec<String>,
+        names:   Vec<String>,
     },
     /// show upstream drift without writing the lock
     Look {
@@ -198,7 +202,19 @@ impl From<Cli> for Command {
                     convert,
                 }
             },
-            Cli::Update { accept, names } => Self::Update { names, accept },
+            Cli::Update {
+                accept,
+                exclude,
+                names,
+            } => {
+                Self::Update {
+                    names,
+                    exclude: exclude
+                        .map(|name| name.split(',').map(|i| i.trim().to_owned()).collect())
+                        .unwrap_or_default(),
+                    accept,
+                }
+            },
             Cli::Look { verbose, names } => Self::Look { names, verbose },
             Cli::Add {
                 name,
