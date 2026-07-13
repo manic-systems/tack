@@ -90,16 +90,26 @@ pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool
     edit::alias(project, name, template, remove)
 }
 
-pub fn update(project: &Project, names: &[String], accept: bool) -> Result<UpdateReport> {
-    update::update(project, names, accept)
+pub fn update(
+    project: &Project,
+    exclude: &[String],
+    names: &[String],
+    accept: bool,
+) -> Result<UpdateReport> {
+    update::update(project, exclude, names, accept)
 }
 
 pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<LookReport> {
     update::look(project, names, verbose)
 }
 
-pub fn update_cli(project: &Project, names: &[String], accept: bool) -> Result<()> {
-    update::update_cli(project, names, accept)
+pub fn update_cli(
+    project: &Project,
+    exclude: &[String],
+    names: &[String],
+    accept: bool,
+) -> Result<()> {
+    update::update_cli(project, exclude, names, accept)
 }
 
 pub fn look_cli(project: &Project, names: &[String], verbose: bool) -> Result<()> {
@@ -144,14 +154,24 @@ fn tolerate<T>(result: StdResult<T, FetchError>) -> (Option<T>, Option<String>) 
     }
 }
 
-fn select<'a>(inputs: &'a [pins::Input], names: &[String]) -> Vec<&'a pins::Input> {
+fn select<'a>(
+    inputs: &'a [pins::Input],
+    exclude: &[String],
+    names: &[String],
+) -> Vec<&'a pins::Input> {
+    let filtered: Vec<_> = inputs
+        .iter()
+        .filter(|i| !exclude.contains(&i.name))
+        .collect();
+
     if names.is_empty() {
-        return inputs.iter().collect();
+        return filtered;
     }
+
     let mut out = Vec::new();
     for n in names {
-        match inputs.iter().find(|i| &i.name == n) {
-            Some(i) => out.push(i),
+        match filtered.iter().find(|i| &i.name == n) {
+            Some(i) => out.push(*i),
             None => eprintln!("no input '{n}'"),
         }
     }
