@@ -16,28 +16,35 @@ use eyre::{
 };
 use flate2::read::GzDecoder;
 use xz2::read::XzDecoder;
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 #[derive(Clone, Copy)]
 pub(super) enum TarFormat {
     Gz,
     Xz,
+    Zstd,
     Plain,
 }
 
+const TAR_FORMAT_SUFFIXES: [(&str, TarFormat); 7] = [
+    (".tar.gz", TarFormat::Gz),
+    (".tgz", TarFormat::Gz),
+    (".tar.xz", TarFormat::Xz),
+    (".txz", TarFormat::Xz),
+    (".tar.zst", TarFormat::Zstd),
+    (".tzst", TarFormat::Zstd),
+    (".tar", TarFormat::Plain),
+];
+
 pub(super) fn detect_tar_format(url: &str) -> Result<TarFormat> {
-    let after_query = url.split('?').next().unwrap_or(url);
-    let path = after_query.split('#').next().unwrap_or(after_query);
-    if ends_with_ci(path, ".tar.xz") || ends_with_ci(path, ".txz") {
-        Ok(TarFormat::Xz)
-    } else if ends_with_ci(path, ".tar.gz") || ends_with_ci(path, ".tgz") {
-        Ok(TarFormat::Gz)
-    } else if ends_with_ci(path, ".tar") {
-        Ok(TarFormat::Plain)
-    } else {
-        Err(eyre!("unknown tar format for URL: {url}"))
-    }
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    TAR_FORMAT_SUFFIXES
+        .into_iter()
+        .find_map(|(suffix, format)| ends_with_ci(path, suffix).then_some(format))
+        .ok_or_else(|| eyre!("unknown tar format for URL: {url}"))
 }
 
+#[inline]
 fn ends_with_ci(path: &str, ext: &str) -> bool {
     let bytes = path.as_bytes();
     let suffix = ext.as_bytes();
@@ -51,6 +58,7 @@ where
     let boxed: Box<dyn Read> = match format {
         TarFormat::Gz => Box::new(GzDecoder::new(reader)),
         TarFormat::Xz => Box::new(XzDecoder::new(reader)),
+        TarFormat::Zstd => Box::new(ZstdDecoder::new(reader)?),
         TarFormat::Plain => Box::new(reader),
     };
     let mut ar = tar::Archive::new(boxed);

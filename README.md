@@ -88,7 +88,8 @@ type = "fixed"
   tack tracks absolute paths with a fast metadata fingerprint instead of
   content-hashing them on every update
 - `https://...` / `http://...` raw tarball, where the format is inferred
-  from the extension (e.g. `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`).
+  from the extension (e.g. `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`,
+  `.tar.zst`/`.tzst`).
 
 ## shorturls
 
