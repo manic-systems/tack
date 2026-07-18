@@ -52,6 +52,7 @@ toml_edit = "0.25.12"
 unicode-width = "0.2.2"
 ureq = { default-features = false, features = [ "rustls" ], version = "3.3.0" }
 xz2 = "0.1.7"
+zstd = { default-features = false, version = "0.13.3" }
 
 [profile.release]
 codegen-units = 1

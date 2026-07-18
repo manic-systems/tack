@@ -88,7 +88,8 @@ impl Unpack {
         let path = no_query.split('#').next().unwrap_or(no_query);
         let lower = path.to_ascii_lowercase();
         let tarballish = [
-            ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz",
+            ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz", ".tar.zst",
+            ".tzst",
         ];
         if tarballish.iter().any(|ending| lower.ends_with(ending)) {
             Self::Tarball
