@@ -6,6 +6,7 @@ let
     attrNames
     attrValues
     concatMap
+    any
     elem
     elemAt
     filter
@@ -33,6 +34,7 @@ let
       pins = fromTOML (readFile ./pins.toml);
       lock = fromJSON (readFile ./pins.lock.json);
       all_follow_raw = pins.all_follow or { };
+      all_omit_inputs = (pins.omit_inputs or { }).names or [ ];
 
       # flatten `target = [aliases]` rows alongside `alias = "target"` rows
       all_follow = foldl' (
@@ -157,6 +159,43 @@ let
           deep = rules;
         };
 
+      matchesInput =
+        {
+          rules,
+          side,
+          name,
+        }:
+        any (rule: rule == "*" || rule == name || rule == "${side}:*" || rule == "${side}:${name}") rules;
+
+      omitsFor =
+        pin:
+        let
+          f = followsFor pin;
+        in
+        {
+          omitted = all_omit_inputs ++ (pin.omit_inputs or [ ]);
+          kept = (pin.keep_inputs or [ ]) ++ (attrNames f.level);
+        };
+
+      shouldOmit =
+        {
+          omit,
+          side,
+          name,
+        }:
+        matchesInput {
+          rules = omit.omitted;
+          inherit side name;
+        }
+        && !(matchesInput {
+          rules = omit.kept;
+          inherit side name;
+        });
+
+      omittedInput =
+        { side, name }:
+        throw "tack: ${side} input '${name}' was omitted by omit_inputs";
+
       resolveFollows = mapAttrs (
         _: target: self.${target} or (throw "tack: follows target '${target}' is not a pin")
       );
@@ -197,6 +236,7 @@ let
           rawInputs,
           levelFollows,
           deepFollows,
+          omit,
         }:
         let
           resolved = resolveFollows levelFollows;
@@ -204,7 +244,18 @@ let
         mapAttrs (
           n: _decl:
           resolved.${n} or (
-            if upLock != null then
+            if
+              shouldOmit {
+                inherit omit;
+                side = "flake";
+                name = n;
+              }
+            then
+              omittedInput {
+                side = "flake";
+                name = n;
+              }
+            else if upLock != null then
               let
                 ref =
                   (upLock.nodes.${nodeName}.inputs or { }).${n}
@@ -222,6 +273,7 @@ let
                   nodeName = childName;
                   sourceInfo = childSrc;
                   follows = deepFollows;
+                  inherit omit;
                 }
               else
                 childSrc
@@ -254,6 +306,7 @@ let
           nodeName,
           levelFollows,
           deepFollows,
+          omit,
         }:
         let
           raw = import (flakeDir + "/flake.nix");
@@ -274,10 +327,35 @@ let
             side = "flake";
             follows = levelFollows;
           });
+          tackOmitOverrides = listToAttrs (
+            map
+              (name: {
+                inherit name;
+                value = omittedInput {
+                  side = "tack";
+                  inherit name;
+                };
+              })
+              (
+                filter (
+                  name:
+                  shouldOmit {
+                    inherit omit;
+                    side = "tack";
+                    inherit name;
+                  }
+                ) (attrNames (upPins.inputs or { }))
+              )
+          );
 
           # deep follows pass down raw, so each descendant re-projects per side
           callerInputs = mkCallerInputs {
-            inherit upLock nodeName deepFollows;
+            inherit
+              upLock
+              nodeName
+              deepFollows
+              omit
+              ;
             rawInputs = raw.inputs or { };
             levelFollows = flakeLevel;
           };
@@ -286,7 +364,12 @@ let
           # would throw on the extra kwarg, so forward only when declared
           supportsOverrides = (upPins.tack or { }).recomposable or false;
 
-          extraArgs = if supportsOverrides && tackOverrides != { } then { inherit tackOverrides; } else { };
+          effectiveTackOverrides = tackOmitOverrides // tackOverrides;
+          extraArgs =
+            if supportsOverrides && effectiveTackOverrides != { } then
+              { tackOverrides = effectiveTackOverrides; }
+            else
+              { };
 
           outputs = raw.outputs (callerInputs // extraArgs // { self = result; });
 
@@ -301,7 +384,7 @@ let
                   ;
               };
             in
-            if hasTack && tackOverrides != { } && !supportsOverrides then
+            if hasTack && effectiveTackOverrides != { } && !supportsOverrides then
               trace "tack: ${flakeDir}: not marked recomposable (set [tack] recomposable = true); overrides will not reach upstream" base
             else
               base;
@@ -314,9 +397,15 @@ let
           nodeName,
           sourceInfo,
           follows,
+          omit,
         }:
         evalFlake {
-          inherit upLock nodeName sourceInfo;
+          inherit
+            upLock
+            nodeName
+            sourceInfo
+            omit
+            ;
           flakeDir = sourceInfo.outPath;
           levelFollows = follows;
           deepFollows = follows;
@@ -336,6 +425,7 @@ let
           nodeName = rootNode;
           levelFollows = f.level;
           deepFollows = f.deep;
+          omit = omitsFor pin;
         };
 
       evalFetch =
@@ -357,15 +447,38 @@ let
               follows = f.level;
             })
           );
+          omit = omitsFor pin;
+          tackOmitOverrides = listToAttrs (
+            map
+              (name: {
+                inherit name;
+                value = omittedInput {
+                  side = "tack";
+                  inherit name;
+                };
+              })
+              (
+                filter (
+                  name:
+                  shouldOmit {
+                    inherit omit;
+                    side = "tack";
+                    inherit name;
+                  }
+                ) (attrNames (upPins.inputs or { }))
+              )
+          );
+          effectiveTackOverrides = tackOmitOverrides // tackOverrides;
         in
-        # only override tack files within a `fetch`, since there's no flake.lock
-        if hasTack && tackOverrides != { } then
+        # a fetch pin is a source tree (path)
+        # hand back resolved inputs only when there are overrides to push into the upstream's .tack
+        if hasTack && effectiveTackOverrides != { } then
           let
             upstream = import (path + "/.tack");
           in
           # old resolvers return a plain attrset, not a callable functor
           if upstream ? __functor then
-            (upstream { overrides = tackOverrides; }) // { outPath = path; }
+            (upstream { overrides = effectiveTackOverrides; }) // { outPath = path; }
           else
             trace "tack: ${path}: upstream .tack predates override support; overrides will not reach it" path
         else

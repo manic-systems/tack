@@ -33,6 +33,7 @@ use self::{
     },
     reporting::build_report,
     scan::{
+        OmitPolicy,
         ScanTarget,
         SourceRef,
     },
@@ -96,6 +97,7 @@ fn dedup_report_inner(project: &Project, emit_diagnostics: bool) -> Result<Dedup
     let inputs = doc.inputs()?;
     let shorturls = doc.shorturls();
     let all_follow = doc.all_follows()?;
+    let omit_inputs = doc.omit_inputs()?;
     let by_name = inputs
         .iter()
         .map(|inp| (inp.name.as_str(), inp))
@@ -134,6 +136,7 @@ fn dedup_report_inner(project: &Project, emit_diagnostics: bool) -> Result<Dedup
                 path:       vec![inp.name.clone()],
                 source:     SourceRef::Locked(node.clone()),
                 submodules: inp.submodules,
+                omit:       OmitPolicy::for_input(&omit_inputs, inp, &all_follow),
             })
         })
         .collect::<Vec<ScanTarget>>();
