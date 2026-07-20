@@ -34,7 +34,8 @@ pub enum Command {
         follows:    Vec<(String, String)>,
     },
     Rm {
-        name: String,
+        name:  Option<String>,
+        prune: bool,
     },
     Alias {
         name:     String,
@@ -110,8 +111,11 @@ enum Cli {
     },
     /// remove a pin
     Rm {
-        /// input name
-        name: String,
+        /// input name (omit with --prune)
+        name:  Option<String>,
+        /// remove lock entries for inputs no longer in pins.toml
+        #[pound(long)]
+        prune: bool,
     },
     /// define or remove a shorturl alias
     Alias {
@@ -169,7 +173,22 @@ impl Command {
                 }
             },
             Self::Add { ref name, .. } => format!("add {name}"),
-            Self::Rm { ref name } => format!("rm {name}"),
+            Self::Rm {
+                name: Some(ref name),
+                prune: false,
+            } => format!("rm {name}"),
+            Self::Rm {
+                name: Some(ref name),
+                prune: true,
+            } => format!("rm --prune {name}"),
+            Self::Rm {
+                name: None,
+                prune: true,
+            } => "rm --prune".to_owned(),
+            Self::Rm {
+                name: None,
+                prune: false,
+            } => String::new(),
             Self::Alias { ref name, rm, .. } => {
                 if rm {
                     format!("alias --rm {name}")
@@ -227,7 +246,7 @@ impl From<Cli> for Command {
                     follows: follows.iter().map(|rule| parse_follows(rule)).collect(),
                 }
             },
-            Cli::Rm { name } => Self::Rm { name },
+            Cli::Rm { name, prune } => Self::Rm { name, prune },
             Cli::Alias { name, template, rm } => Self::Alias { name, template, rm },
             Cli::Dedup => Self::Dedup,
             Cli::Undo { list } => Self::Undo { list },
@@ -240,5 +259,24 @@ fn parse_follows(rule: &str) -> (String, String) {
     match rule.split_once('=') {
         Some((child, parent)) => (child.to_owned(), parent.to_owned()),
         None => (rule.to_owned(), rule.to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pound::Parse;
+
+    use super::{
+        Cli,
+        Command,
+    };
+
+    #[test]
+    fn rm_prune_does_not_require_an_input_name() {
+        let command: Command = Cli::try_parse_from(["rm", "--prune"]).unwrap().into();
+        assert_eq!(command, Command::Rm {
+            name:  None,
+            prune: true,
+        });
     }
 }

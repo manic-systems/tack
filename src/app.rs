@@ -60,7 +60,11 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
                 })
             })
         },
-        Command::Rm { name } => recorded(&project, &label, || commands::rm(&project, &name)),
+        Command::Rm { name, prune } => {
+            recorded(&project, &label, || {
+                commands::rm(&project, name.as_deref(), prune)
+            })
+        },
         Command::Alias { name, template, rm } => {
             recorded(&project, &label, || {
                 commands::alias(&project, &name, template.as_deref(), rm)

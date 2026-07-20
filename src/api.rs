@@ -131,8 +131,10 @@ impl<'a> Tack<'a> {
                 history_error = recorded.history_error;
                 CommandOutcome::Add
             },
-            Command::Rm { name } => {
-                let recorded = self.recorded(&label, || commands::rm(self.project, &name))?;
+            Command::Rm { name, prune } => {
+                let recorded = self.recorded(&label, || {
+                    commands::rm(self.project, name.as_deref(), prune)
+                })?;
                 captured_external = recorded.captured_external;
                 history_error = recorded.history_error;
                 CommandOutcome::Rm

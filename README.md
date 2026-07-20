@@ -52,7 +52,8 @@ tack update [names...] [--accept]    fetch latest, rewrite lock
 tack look [names...] [--verbose|-v]  report pins with newer upstream revs
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                       [--dir <d>] [--submodules] [--follows c=p]...
-tack rm <name>
+tack rm <name>                        remove a pin and its lock entry
+tack rm --prune                       remove lock entries absent from pins.toml
 tack alias <name> <template>         define a shorturl scheme
 tack alias --rm <name>               remove one
 tack dedup                           report inputs reachable from multiple pins

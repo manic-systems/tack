@@ -82,8 +82,8 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
     edit::add(project, request)
 }
 
-pub fn rm(project: &Project, name: &str) -> Result<()> {
-    edit::rm(project, name)
+pub fn rm(project: &Project, name: Option<&str>, prune: bool) -> Result<()> {
+    edit::rm(project, name, prune)
 }
 
 pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool) -> Result<()> {

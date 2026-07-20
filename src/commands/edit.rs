@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::path::Path;
+use std::{
+    collections::HashSet,
+    path::Path,
+};
 
 use eyre::Result;
 
@@ -75,35 +78,64 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
     Ok(())
 }
 
-pub fn rm(project: &Project, name: &str) -> Result<()> {
-    let (removed_pin, removed_lock) = rm_in_dir(project.dir(), name)?;
-    if removed_pin {
-        println!("removed {name}");
-    } else if removed_lock {
-        println!("removed stale lock entry {name}");
+pub fn rm(project: &Project, name: Option<&str>, prune: bool) -> Result<()> {
+    if name.is_none() && !prune {
+        user_bail!("specify an input name or --prune");
+    }
+
+    let (removed_pin, removed_lock, stale) = rm_in_dir(project.dir(), name, prune)?;
+    if let Some(name) = name {
+        if removed_pin {
+            println!("removed {name}");
+        } else if removed_lock {
+            println!("removed stale lock entry {name}");
+        }
+    }
+    if !stale.is_empty() {
+        let noun = if stale.len() == 1 { "entry" } else { "entries" };
+        println!("pruned {} stale lock {noun}", stale.len());
     }
     Ok(())
 }
 
-fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
+fn rm_in_dir(dir: &Path, name: Option<&str>, prune: bool) -> Result<(bool, bool, Vec<String>)> {
     let project = Project::at(dir.to_owned());
     let mut doc = project.load_pins()?;
-    let removed_pin = doc.remove_input(name);
+    let removed_pin = name.is_some_and(|name| doc.remove_input(name));
 
     let mut lk = project.load_lock()?;
-    let removed_lock = lk.remove(name);
+    let removed_lock = name.is_some_and(|name| lk.remove(name));
 
-    if !removed_pin && !removed_lock {
-        user_bail!("no input '{name}'");
+    let stale = if prune {
+        let inputs = doc
+            .inputs()?
+            .into_iter()
+            .map(|input| input.name)
+            .collect::<HashSet<_>>();
+        let stale = lk
+            .keys()
+            .filter(|key| !inputs.contains(key.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in &stale {
+            lk.remove(key);
+        }
+        stale
+    } else {
+        Vec::new()
+    };
+
+    if name.is_some() && !removed_pin && !removed_lock {
+        user_bail!("no input '{}'", name.expect("checked above"));
     }
 
     if removed_pin {
         project.save_pins(&doc)?;
     }
-    if removed_lock {
+    if removed_lock || !stale.is_empty() {
         project.save_lock(&lk)?;
     }
-    Ok((removed_pin, removed_lock))
+    Ok((removed_pin, removed_lock, stale))
 }
 
 pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool) -> Result<()> {
@@ -124,4 +156,43 @@ pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool
         println!("alias {name} = {tpl}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::rm;
+    use crate::{
+        LockFile,
+        Project,
+    };
+
+    #[test]
+    fn prune_removes_stale_recognized_lock_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::at(dir.path().to_owned());
+        fs::write(
+            project.pins_path(),
+            "[inputs.keep]\nurl = \"github:owner/repo\"\n",
+        )
+        .unwrap();
+        fs::write(
+            project.lock_path(),
+            r#"{
+  "keep": {"type": "github", "owner": "owner", "repo": "repo"},
+  "stale": {"type": "github", "owner": "owner", "repo": "stale"},
+  "future": {"type": "mercurial", "url": "https://example.test/repo"}
+}
+"#,
+        )
+        .unwrap();
+
+        rm(&project, None, true).unwrap();
+
+        let lock = LockFile::parse(&fs::read_to_string(project.lock_path()).unwrap()).unwrap();
+        assert!(lock.get("keep").is_some());
+        assert!(lock.get("stale").is_none());
+        assert_eq!(lock.unknown_nodes().collect::<Vec<_>>(), vec!["future"]);
+    }
 }
