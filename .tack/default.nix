@@ -343,6 +343,7 @@ let
           sourceInfo,
           pin,
           subdir,
+          metadata,
         }:
         let
           path = sourceInfo.outPath + subdir;
@@ -369,7 +370,7 @@ let
           else
             trace "tack: ${path}: upstream .tack predates override support; overrides will not reach it" path
         else
-          path;
+          metadata // { outPath = path; };
 
       loadPin =
         { name, pin }:
@@ -389,7 +390,10 @@ let
           if pinType == "flake" then
             evalTopFlake { inherit sourceInfo pin; }
           else
-            evalFetch { inherit sourceInfo pin subdir; };
+            evalFetch {
+              inherit sourceInfo pin subdir;
+              metadata = lock.${name};
+            };
 
       declared = pins.inputs or { };
 
