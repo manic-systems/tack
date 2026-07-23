@@ -343,9 +343,7 @@ let
           rootNode = if upLock != null then upLock.root else null;
           f = followsFor pin;
         in
-        {
-          _meta = metadata;
-        }
+        metadata
         // (evalFlake {
           inherit sourceInfo flakeDir upLock;
           nodeName = rootNode;
@@ -438,7 +436,7 @@ let
             pin = { };
           }
         else
-          { _meta = metadata; } // sourceInfo;
+          metadata // sourceInfo;
 
       self =
         (mapAttrs (name: pin: loadPin { inherit name pin; }) declared)
