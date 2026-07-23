@@ -88,7 +88,11 @@ let
             fetchTree node;
 
       fetchFixed =
-        { name, entry }:
+        {
+          name,
+          entry,
+          metadata,
+        }:
         let
           raw = derivation {
             inherit name;
@@ -107,7 +111,11 @@ let
             channelName = name;
           };
         in
-        if (entry.unpack or "file") == "tarball" then unpacked.outPath + "/" + name else raw.outPath;
+        metadata
+        // {
+          outPath =
+            if (entry.unpack or "file") == "tarball" then unpacked.outPath + "/" + name else raw.outPath;
+        };
 
       resolveSpec =
         { upLock, spec }:
@@ -384,10 +392,11 @@ let
         let
           pinType = pin.type or (if pin.flake or true then "flake" else "fetch");
           subdir = if pin ? dir then "/" + pin.dir else "";
+          metadata = lock.${name};
         in
         if pinType == "fixed" then
           fetchFixed {
-            inherit name;
+            inherit name metadata;
             entry = lock.${name};
           }
         else
@@ -395,14 +404,15 @@ let
             sourceInfo = fetchPin name;
           in
           if pinType == "flake" then
-            evalTopFlake {
-              inherit sourceInfo pin;
-              metadata = lock.${name};
-            }
+            evalTopFlake { inherit sourceInfo pin metadata; }
           else
             evalFetch {
-              inherit sourceInfo pin subdir;
-              metadata = lock.${name};
+              inherit
+                sourceInfo
+                pin
+                subdir
+                metadata
+                ;
             };
 
       declared = pins.inputs or { };
