@@ -323,7 +323,11 @@ let
         };
 
       evalTopFlake =
-        { sourceInfo, pin }:
+        {
+          sourceInfo,
+          pin,
+          metadata,
+        }:
         let
           flakeDir = sourceInfo.outPath + (if pin ? dir then "/" + pin.dir else "");
           upLockPath = flakeDir + "/flake.lock";
@@ -331,12 +335,15 @@ let
           rootNode = if upLock != null then upLock.root else null;
           f = followsFor pin;
         in
-        evalFlake {
+        {
+          _meta = metadata;
+        }
+        // (evalFlake {
           inherit sourceInfo flakeDir upLock;
           nodeName = rootNode;
           levelFollows = f.level;
           deepFollows = f.deep;
-        };
+        });
 
       evalFetch =
         {
@@ -388,7 +395,10 @@ let
             sourceInfo = fetchPin name;
           in
           if pinType == "flake" then
-            evalTopFlake { inherit sourceInfo pin; }
+            evalTopFlake {
+              inherit sourceInfo pin;
+              metadata = lock.${name};
+            }
           else
             evalFetch {
               inherit sourceInfo pin subdir;
@@ -410,14 +420,15 @@ let
         name:
         let
           sourceInfo = fetchPin name;
+          metadata = lock.${name};
         in
         if pathExists (sourceInfo.outPath + "/flake.nix") then
           evalTopFlake {
-            inherit sourceInfo;
+            inherit sourceInfo metadata;
             pin = { };
           }
         else
-          sourceInfo;
+          { _meta = metadata; } // sourceInfo;
 
       self =
         (mapAttrs (name: pin: loadPin { inherit name pin; }) declared)
