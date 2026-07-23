@@ -110,12 +110,13 @@ let
             src = raw;
             channelName = name;
           };
+          sourceInfo =
+            if (entry.unpack or "file") == "tarball" then
+              unpacked // { outPath = unpacked.outPath + "/" + name; }
+            else
+              raw;
         in
-        metadata
-        // {
-          outPath =
-            if (entry.unpack or "file") == "tarball" then unpacked.outPath + "/" + name else raw.outPath;
-        };
+        metadata // sourceInfo;
 
       resolveSpec =
         { upLock, spec }:
@@ -344,6 +345,7 @@ let
           f = followsFor pin;
         in
         metadata
+        // sourceInfo
         // (evalFlake {
           inherit sourceInfo flakeDir upLock;
           nodeName = rootNode;
@@ -383,7 +385,7 @@ let
           else
             trace "tack: ${path}: upstream .tack predates override support; overrides will not reach it" path
         else
-          metadata // { outPath = path; };
+          metadata // sourceInfo // { outPath = path; };
 
       loadPin =
         { name, pin }:
