@@ -63,7 +63,7 @@ impl Project {
             return Ok(Self::at(PathBuf::from(dir)));
         }
         let cwd = env::current_dir().map_err(|source| ConfigError::CurrentDir { source })?;
-        if cwd.join("inputs.nix").exists() {
+        if cwd.join("pins.toml").exists() || cwd.join("inputs.nix").exists() {
             return Ok(Self::at(cwd));
         }
         Ok(Self::at(cwd.join(".tack")))
