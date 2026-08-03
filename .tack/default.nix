@@ -345,7 +345,7 @@ let
           f = followsFor pin;
         in
         metadata
-        // sourceInfo
+        # // sourceInfo # already included by mkFlakeResult
         // (evalFlake {
           inherit sourceInfo flakeDir upLock;
           nodeName = rootNode;
@@ -373,6 +373,7 @@ let
               follows = f.level;
             })
           );
+          base = metadata // sourceInfo;
         in
         # only override tack files within a `fetch`, since there's no flake.lock
         if hasTack && tackOverrides != { } then
@@ -381,11 +382,13 @@ let
           in
           # old resolvers return a plain attrset, not a callable functor
           if upstream ? __functor then
-            (upstream { overrides = tackOverrides; }) // { outPath = path; }
+            base // (upstream { overrides = tackOverrides; }) // { outPath = path; }
           else
-            trace "tack: ${path}: upstream .tack predates override support; overrides will not reach it" path
+            trace "tack: ${path}: upstream .tack predates override support; overrides will not reach it" (
+              base // { outPath = path; }
+            )
         else
-          metadata // sourceInfo // { outPath = path; };
+          base // { outPath = path; };
 
       loadPin =
         { name, pin }:
