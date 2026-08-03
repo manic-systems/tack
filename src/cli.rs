@@ -50,7 +50,7 @@ pub enum Command {
 
 /// flake-like toml nix pins, lazily fetched and transformed
 #[derive(Parse)]
-#[pound(name = "tack", version = "0.1.1")]
+#[pound(name = "tack")]
 enum Cli {
     /// scaffold a .tack dir (default.nix, pins.toml, pins.lock.json)
     Init {
