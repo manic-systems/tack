@@ -181,19 +181,7 @@ follows = { nixpkgs = "nixpkgs" }
 
 then the transitive inputs (`flake-compat`, `devshell`, `nix-test-runner`,
 `cachix`, and `pre-commit-hooks`) will be fetched, even though they're never
-used. to avoid fetching these, you can set their `follows` to `""`:
-
-```toml
-[inputs.crate2nix]
-url = "github:nix-community/crate2nix"
-follows = {
-  nixpkgs = "nixpkgs",
-  flake-compat = "",
-  nix-test-runner = "",
-  cachix = "",
-  pre-commit-hooks = ""
-}
-```
+used.
 
 ## publishing
 
