@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use super::ScanDocuments;
+use super::{
+    OmitPolicy,
+    ScanDocuments,
+};
 use crate::scan_diagnostic::ScanFile;
 
 #[test]
@@ -29,7 +32,7 @@ fn scan_records_gitlab_locked_nodes() {
         tack_pins:  None,
         tack_lock:  None,
     }
-    .scan(&path);
+    .scan(&path, &OmitPolicy::default());
 
     assert_eq!(result.findings.len(), 1);
     let finding = &result.findings[0];
@@ -55,9 +58,58 @@ fn scan_reports_tack_lock_parse_failure_and_continues() {
         ),
         tack_lock:  Some("{".to_owned()),
     }
-    .scan(&path);
+    .scan(&path, &OmitPolicy::default());
 
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.diagnostics.len(), 1);
     assert_eq!(result.diagnostics[0].file(), ScanFile::TackLock);
+}
+
+#[test]
+fn scan_skips_omitted_flake_inputs() {
+    let path = vec!["root".to_owned()];
+    let omit = OmitPolicy::for_input(
+        &["flake-compat".to_owned()].into_iter().collect(),
+        &crate::pins::PinsDoc::parse("[inputs.root]\nurl = \"github:o/root\"\n")
+            .unwrap()
+            .inputs()
+            .unwrap()
+            .pop()
+            .unwrap(),
+        &Default::default(),
+    );
+    let result = ScanDocuments {
+        flake_lock: Some(r#"{"root":"root","nodes":{"root":{},"flake-compat":{"locked":{"type":"github","owner":"o","repo":"compat","rev":"abc"}}}}"#.to_owned()),
+        tack_pins: None,
+        tack_lock: None,
+    }
+    .scan(&path, &omit);
+
+    assert!(result.findings.is_empty());
+}
+
+#[test]
+fn keep_inputs_overrides_global_omit() {
+    let path = vec!["root".to_owned()];
+    let input = crate::pins::PinsDoc::parse(
+        "[inputs.root]\nurl = \"github:o/root\"\nkeep_inputs = [\"flake-compat\"]\n",
+    )
+    .unwrap()
+    .inputs()
+    .unwrap()
+    .pop()
+    .unwrap();
+    let omit = OmitPolicy::for_input(
+        &["flake-compat".to_owned()].into_iter().collect(),
+        &input,
+        &Default::default(),
+    );
+    let result = ScanDocuments {
+        flake_lock: Some(r#"{"root":"root","nodes":{"root":{},"flake-compat":{"locked":{"type":"github","owner":"o","repo":"compat","rev":"abc"}}}}"#.to_owned()),
+        tack_pins: None,
+        tack_lock: None,
+    }
+    .scan(&path, &omit);
+
+    assert_eq!(result.findings.len(), 1);
 }

@@ -24,6 +24,7 @@ use toml_edit::{
     DocumentMut,
     Item,
     Table,
+    TableLike,
     value,
 };
 
@@ -32,6 +33,28 @@ use crate::{
     project::write_atomic,
     shorturl::ShortUrls,
 };
+
+fn string_array_field(
+    entry: &dyn TableLike,
+    field: &str,
+    context: &str,
+) -> Result<BTreeSet<String>> {
+    let Some(item) = entry.get(field) else {
+        return Ok(BTreeSet::new());
+    };
+    let arr = item
+        .as_array()
+        .with_context(|| format!("{context}: {field} must be an array of strings"))?;
+    arr.iter()
+        .enumerate()
+        .map(|(index, member)| {
+            member
+                .as_str()
+                .map(str::to_owned)
+                .with_context(|| format!("{context}: {field}[{index}] must be a string"))
+        })
+        .collect()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PinType {
@@ -119,13 +142,15 @@ impl FromStr for Unpack {
 
 #[derive(Debug)]
 pub struct Input {
-    pub name:       String,
-    pub url:        String,
-    pub submodules: bool,
-    pub pin_type:   PinType,
-    pub unpack:     Option<Unpack>,
-    pub follows:    BTreeMap<String, String>,
-    pub excludes:   BTreeSet<String>,
+    pub name:        String,
+    pub url:         String,
+    pub submodules:  bool,
+    pub pin_type:    PinType,
+    pub unpack:      Option<Unpack>,
+    pub follows:     BTreeMap<String, String>,
+    pub excludes:    BTreeSet<String>,
+    pub omit_inputs: BTreeSet<String>,
+    pub keep_inputs: BTreeSet<String>,
 }
 
 impl Input {
@@ -177,22 +202,9 @@ impl Input {
             },
             None => BTreeMap::new(),
         };
-        let excludes = match entry.get("exclude_follow") {
-            Some(exclude_item) => {
-                let arr = exclude_item.as_array().with_context(|| {
-                    format!("input '{name}': exclude_follow must be an array of strings")
-                })?;
-                let mut excludes = BTreeSet::new();
-                for (index, exclude_member) in arr.iter().enumerate() {
-                    let exclude = exclude_member.as_str().with_context(|| {
-                        format!("input '{name}': exclude_follow[{index}] must be a string")
-                    })?;
-                    excludes.insert(exclude.to_owned());
-                }
-                excludes
-            },
-            None => BTreeSet::new(),
-        };
+        let excludes = string_array_field(entry, "exclude_follow", &format!("input '{name}'"))?;
+        let omit_inputs = string_array_field(entry, "omit_inputs", &format!("input '{name}'"))?;
+        let keep_inputs = string_array_field(entry, "keep_inputs", &format!("input '{name}'"))?;
         Ok(Self {
             name: name.to_owned(),
             url: url.to_owned(),
@@ -204,6 +216,8 @@ impl Input {
             unpack,
             follows,
             excludes,
+            omit_inputs,
+            keep_inputs,
         })
     }
 }
@@ -236,6 +250,16 @@ impl PinsDoc {
 
     pub fn all_follows(&self) -> Result<BTreeMap<String, String>> {
         AllFollowTable::from_doc(&self.doc).aliases()
+    }
+
+    pub fn omit_inputs(&self) -> Result<BTreeSet<String>> {
+        let Some(table) = self.doc.get("omit_inputs") else {
+            return Ok(BTreeSet::new());
+        };
+        let table = table
+            .as_table_like()
+            .with_context(|| "omit_inputs must be a table")?;
+        string_array_field(table, "names", "omit_inputs")
     }
 
     pub fn inputs(&self) -> Result<Vec<Input>> {
@@ -349,6 +373,10 @@ impl<'a> From<&'a str> for FollowAlias<'a> {
 }
 
 impl<'a> FollowAlias<'a> {
+    pub fn bare_name(self) -> &'a str {
+        self.raw.split_once(':').map_or(self.raw, |(_, rest)| rest)
+    }
+
     pub fn flake_side(self) -> Option<&'a str> {
         match self.raw.split_once(':') {
             Some(("flake", rest)) => Some(rest),

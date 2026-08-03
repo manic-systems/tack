@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    collections::BTreeSet,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     fs,
     path::{
         Path,
@@ -58,6 +61,49 @@ pub(super) struct ScanTarget {
     pub path:       Vec<String>,
     pub source:     SourceRef,
     pub submodules: bool,
+    pub omit:       OmitPolicy,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct OmitPolicy {
+    omitted: BTreeSet<String>,
+    kept:    BTreeSet<String>,
+}
+
+impl OmitPolicy {
+    pub(super) fn for_input(
+        global: &BTreeSet<String>,
+        input: &pins::Input,
+        all_follow: &BTreeMap<String, String>,
+    ) -> Self {
+        let omitted = global.union(&input.omit_inputs).cloned().collect();
+        let kept = input
+            .keep_inputs
+            .iter()
+            .chain(all_follow.keys().filter(|name| {
+                !input
+                    .excludes
+                    .contains(pins::FollowAlias::from(name.as_str()).bare_name())
+            }))
+            .chain(input.follows.keys())
+            .cloned()
+            .collect();
+        Self { omitted, kept }
+    }
+
+    pub(super) fn omits(&self, side: Side, name: &str) -> bool {
+        matches_rule(&self.omitted, side, name) && !matches_rule(&self.kept, side, name)
+    }
+}
+
+fn matches_rule(rules: &BTreeSet<String>, side: Side, name: &str) -> bool {
+    rules.iter().any(|rule| {
+        match rule.split_once(':') {
+            Some(("flake", input)) => side == Side::Flake && (input == "*" || input == name),
+            Some(("tack", input)) => side == Side::Tack && (input == "*" || input == name),
+            _ => rule == "*" || rule == name,
+        }
+    })
 }
 
 impl ScanTarget {
@@ -65,7 +111,7 @@ impl ScanTarget {
         let probe_diagnostics = if let SourceRef::Locked(ref node) = self.source {
             let (maybe_documents, diagnostics) = RawProbe::documents(node, &self.path).into_parts();
             if let Some(documents) = maybe_documents {
-                let mut result = documents.scan(&self.path);
+                let mut result = documents.scan(&self.path, &self.omit);
                 result.diagnostics.extend(diagnostics);
                 return Ok(result);
             }
@@ -76,7 +122,7 @@ impl ScanTarget {
 
         let tmp = tempfile::tempdir()?;
         let root = self.fetch_tree(tmp.path())?;
-        let mut result = ScanDocuments::from_tree(&root).scan(&self.path);
+        let mut result = ScanDocuments::from_tree(&root).scan(&self.path, &self.omit);
         result.diagnostics.extend(probe_diagnostics);
         Ok(result)
     }
@@ -233,13 +279,13 @@ impl ScanDocuments {
         }
     }
 
-    fn scan(&self, path: &[String]) -> ScanResult {
+    fn scan(&self, path: &[String], omit: &OmitPolicy) -> ScanResult {
         let mut findings = Vec::<Finding>::new();
         let mut transitive = Vec::<ScanTarget>::new();
         let mut diagnostics = Vec::<ScanDiagnostic>::new();
 
-        self.scan_flake_lock(path, &mut findings, &mut diagnostics);
-        self.scan_tack_inputs(path, &mut findings, &mut transitive, &mut diagnostics);
+        self.scan_flake_lock(path, omit, &mut findings, &mut diagnostics);
+        self.scan_tack_inputs(path, omit, &mut findings, &mut transitive, &mut diagnostics);
 
         ScanResult {
             findings,
@@ -251,6 +297,7 @@ impl ScanDocuments {
     fn scan_flake_lock(
         &self,
         path: &[String],
+        omit: &OmitPolicy,
         findings: &mut Vec<Finding>,
         diagnostics: &mut Vec<ScanDiagnostic>,
     ) {
@@ -265,6 +312,9 @@ impl ScanDocuments {
             },
         };
         for (key, locked) in doc.locked_nodes() {
+            if omit.omits(Side::Flake, strip_disambiguator(key)) {
+                continue;
+            }
             if let Some(id) = SourceId::from_locked(locked) {
                 findings.push(Finding {
                     identity: id,
@@ -286,6 +336,7 @@ impl ScanDocuments {
     fn scan_tack_inputs(
         &self,
         path: &[String],
+        omit: &OmitPolicy,
         findings: &mut Vec<Finding>,
         transitive: &mut Vec<ScanTarget>,
         diagnostics: &mut Vec<ScanDiagnostic>,
@@ -310,9 +361,12 @@ impl ScanDocuments {
         let tlock = self.parse_tack_lock(path, diagnostics);
         let tshort = doc.shorturls();
         for tinp in &tinputs {
+            if omit.omits(Side::Tack, &tinp.name) {
+                continue;
+            }
             let expanded = tshort.expand(&tinp.url);
             Self::record_tack_finding(path, tinp, &expanded, &tlock, findings);
-            Self::queue_tack_transitive(path, tinp, expanded, &tlock, transitive);
+            Self::queue_tack_transitive(path, tinp, expanded, &tlock, omit, transitive);
         }
     }
 
@@ -362,6 +416,7 @@ impl ScanDocuments {
         input: &pins::Input,
         expanded: String,
         lock: &lock::LockFile,
+        omit: &OmitPolicy,
         transitive: &mut Vec<ScanTarget>,
     ) {
         if input.pin_type == PinType::Fixed {
@@ -377,6 +432,7 @@ impl ScanDocuments {
             path: next,
             source,
             submodules: input.submodules,
+            omit: omit.clone(),
         });
     }
 }

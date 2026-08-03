@@ -14,12 +14,18 @@
 # nixpkgs = "nixpkgs"
 # nixpkgs = ["nixpkgs-stable", "nixpkgs-unstable"]
 
+# omit selected transitive inputs for every top-level pin
+[omit_inputs]
+# names = ["flake-compat", "tack:cachix"]
+
 # inputs.<name> fields
 #   url             required, shorturl ok, ?rev=<sha> pins an exact commit
 #   type            flake (default), fetch, or fixed
 #   flake           legacy false means type = "fetch"
 #   follows         { child = "pin" } override map
 #   exclude_follow  all_follow names to skip
+#   omit_inputs     transitive input names to skip for this pin
+#   keep_inputs     omitted input names to allow for this pin
 #   dir             subdir holding flake.nix
 #   submodules      fetch git submodules
 #   unpack          fixed-only tarball or file

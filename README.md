@@ -151,6 +151,31 @@ just one side:
 follows = { "flake:systems" = "systems", "tack:nixpkgs" = "nixpkgs" }
 ```
 
+## omit inputs
+
+omit selected upstream inputs from resolution and `tack dedup`. a global rule
+applies to every top-level pin:
+
+```toml
+[omit_inputs]
+names = ["flake-compat", "cachix"]
+```
+
+add `omit_inputs` to a pin for a local rule. `keep_inputs` removes a global or
+local rule for that pin:
+
+```toml
+[inputs.crate2nix]
+url = "github:nix-community/crate2nix"
+omit_inputs = ["nix-test-runner", "pre-commit-hooks"]
+keep_inputs = ["nixpkgs", "cachix"]
+```
+
+names match both flake and tack inputs. prefix one with `flake:` or `tack:` to
+select a side. `*` matches every input; `flake:*` and `tack:*` match one side.
+follows take precedence over omission. omission is lazy: an unused input is
+never fetched, while evaluating one reports that it was omitted.
+
 ## publishing
 
 if third parties consume your project as a tack pin, wire your flake so

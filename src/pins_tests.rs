@@ -56,3 +56,29 @@ flake = false
     assert_eq!(by_name["archive"].unpack, Some(Unpack::Tarball));
     assert_eq!(by_name["legacy"].pin_type, PinType::Fetch);
 }
+
+#[test]
+fn omit_inputs_read_global_and_per_input_sets() {
+    let doc = doc(r#"
+[omit_inputs]
+names = ["flake-compat", "tack:cachix"]
+
+[inputs.foo]
+url = "github:o/foo"
+omit_inputs = ["nix-test-runner"]
+keep_inputs = ["nixpkgs"]
+"#);
+
+    let input = doc.inputs().unwrap().pop().unwrap();
+    assert!(doc.omit_inputs().unwrap().contains("flake-compat"));
+    assert!(input.omit_inputs.contains("nix-test-runner"));
+    assert!(input.keep_inputs.contains("nixpkgs"));
+}
+
+#[test]
+fn omit_inputs_accepts_wildcard_and_scoped_names() {
+    let doc = doc("[omit_inputs]\nnames = [\"*\", \"flake:systems\"]\n");
+    let omit = doc.omit_inputs().unwrap();
+    assert!(omit.contains("*"));
+    assert!(omit.contains("flake:systems"));
+}
