@@ -88,7 +88,11 @@ let
             fetchTree node;
 
       fetchFixed =
-        { name, entry }:
+        {
+          name,
+          entry,
+          metadata,
+        }:
         let
           raw = derivation {
             inherit name;
@@ -106,8 +110,13 @@ let
             src = raw;
             channelName = name;
           };
+          sourceInfo =
+            if (entry.unpack or "file") == "tarball" then
+              unpacked // { outPath = unpacked.outPath + "/" + name; }
+            else
+              raw;
         in
-        if (entry.unpack or "file") == "tarball" then unpacked.outPath + "/" + name else raw.outPath;
+        metadata // sourceInfo;
 
       resolveSpec =
         { upLock, spec }:
@@ -323,7 +332,11 @@ let
         };
 
       evalTopFlake =
-        { sourceInfo, pin }:
+        {
+          sourceInfo,
+          pin,
+          metadata,
+        }:
         let
           flakeDir = sourceInfo.outPath + (if pin ? dir then "/" + pin.dir else "");
           upLockPath = flakeDir + "/flake.lock";
@@ -331,18 +344,21 @@ let
           rootNode = if upLock != null then upLock.root else null;
           f = followsFor pin;
         in
-        evalFlake {
+        metadata
+        # // sourceInfo # already included by mkFlakeResult
+        // (evalFlake {
           inherit sourceInfo flakeDir upLock;
           nodeName = rootNode;
           levelFollows = f.level;
           deepFollows = f.deep;
-        };
+        });
 
       evalFetch =
         {
           sourceInfo,
           pin,
           subdir,
+          metadata,
         }:
         let
           path = sourceInfo.outPath + subdir;
@@ -357,6 +373,7 @@ let
               follows = f.level;
             })
           );
+          base = metadata // sourceInfo;
         in
         # only override tack files within a `fetch`, since there's no flake.lock
         if hasTack && tackOverrides != { } then
@@ -365,21 +382,24 @@ let
           in
           # old resolvers return a plain attrset, not a callable functor
           if upstream ? __functor then
-            (upstream { overrides = tackOverrides; }) // { outPath = path; }
+            base // (upstream { overrides = tackOverrides; }) // { outPath = path; }
           else
-            trace "tack: ${path}: upstream .tack predates override support; overrides will not reach it" path
+            trace "tack: ${path}: upstream .tack predates override support; overrides will not reach it" (
+              base // { outPath = path; }
+            )
         else
-          path;
+          base // { outPath = path; };
 
       loadPin =
         { name, pin }:
         let
           pinType = pin.type or (if pin.flake or true then "flake" else "fetch");
           subdir = if pin ? dir then "/" + pin.dir else "";
+          metadata = lock.${name};
         in
         if pinType == "fixed" then
           fetchFixed {
-            inherit name;
+            inherit name metadata;
             entry = lock.${name};
           }
         else
@@ -387,9 +407,16 @@ let
             sourceInfo = fetchPin name;
           in
           if pinType == "flake" then
-            evalTopFlake { inherit sourceInfo pin; }
+            evalTopFlake { inherit sourceInfo pin metadata; }
           else
-            evalFetch { inherit sourceInfo pin subdir; };
+            evalFetch {
+              inherit
+                sourceInfo
+                pin
+                subdir
+                metadata
+                ;
+            };
 
       declared = pins.inputs or { };
 
@@ -406,14 +433,15 @@ let
         name:
         let
           sourceInfo = fetchPin name;
+          metadata = lock.${name};
         in
         if pathExists (sourceInfo.outPath + "/flake.nix") then
           evalTopFlake {
-            inherit sourceInfo;
+            inherit sourceInfo metadata;
             pin = { };
           }
         else
-          sourceInfo;
+          metadata // sourceInfo;
 
       self =
         (mapAttrs (name: pin: loadPin { inherit name pin; }) declared)
