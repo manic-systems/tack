@@ -22,6 +22,7 @@ pub enum Command {
         accept:  bool,
     },
     Look {
+        exclude: Vec<String>,
         names:   Vec<String>,
         verbose: bool,
     },
@@ -73,9 +74,9 @@ enum Cli {
         /// relock drifted pins instead of failing
         #[pound(long)]
         accept:  bool,
-        /// exclude pins from update (e.g. "nixpkgs, home-manager")
+        /// pins to leave alone (repeatable, or comma-separated)
         #[pound(long)]
-        exclude: Option<String>,
+        exclude: Vec<String>,
         /// pins to update (default: all)
         names:   Vec<String>,
     },
@@ -84,6 +85,9 @@ enum Cli {
         /// list the freshest commits for each changed pin
         #[pound(short, long)]
         verbose: bool,
+        /// pins to leave alone (repeatable, or comma-separated)
+        #[pound(long)]
+        exclude: Vec<String>,
         /// pins to inspect (default: all)
         names:   Vec<String>,
     },
@@ -165,12 +169,17 @@ impl Command {
                 }
                 .to_owned()
             },
-            Self::Update { ref names, .. } => {
-                if names.is_empty() {
-                    "update".to_owned()
-                } else {
-                    format!("update {}", names.join(" "))
+            Self::Update {
+                ref exclude,
+                ref names,
+                ..
+            } => {
+                let mut parts = vec!["update".to_owned()];
+                parts.extend(names.iter().cloned());
+                if !exclude.is_empty() {
+                    parts.push(format!("--exclude {}", exclude.join(",")));
                 }
+                parts.join(" ")
             },
             Self::Add { ref name, .. } => format!("add {name}"),
             Self::Rm { ref name } => format!("rm {name}"),
@@ -209,13 +218,21 @@ impl From<Cli> for Command {
             } => {
                 Self::Update {
                     names,
-                    exclude: exclude
-                        .map(|name| name.split(',').map(|i| i.trim().to_owned()).collect())
-                        .unwrap_or_default(),
+                    exclude: split_list(&exclude),
                     accept,
                 }
             },
-            Cli::Look { verbose, names } => Self::Look { names, verbose },
+            Cli::Look {
+                verbose,
+                exclude,
+                names,
+            } => {
+                Self::Look {
+                    names,
+                    exclude: split_list(&exclude),
+                    verbose,
+                }
+            },
             Cli::Add {
                 name,
                 url,
@@ -250,6 +267,17 @@ impl From<Cli> for Command {
             Cli::Redo => Self::Redo,
         }
     }
+}
+
+/// flatten repeated occurrences of a comma-separated option into one list
+fn split_list(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn parse_follows(rule: &str) -> (String, String) {

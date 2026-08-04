@@ -90,30 +90,20 @@ pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool
     edit::alias(project, name, template, remove)
 }
 
-pub fn update(
-    project: &Project,
-    exclude: &[String],
-    names: &[String],
-    accept: bool,
-) -> Result<UpdateReport> {
-    update::update(project, exclude, names, accept)
+pub fn update(project: &Project, selection: Selection<'_>, accept: bool) -> Result<UpdateReport> {
+    update::update(project, selection, accept)
 }
 
-pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<LookReport> {
-    update::look(project, names, verbose)
+pub fn look(project: &Project, selection: Selection<'_>, verbose: bool) -> Result<LookReport> {
+    update::look(project, selection, verbose)
 }
 
-pub fn update_cli(
-    project: &Project,
-    exclude: &[String],
-    names: &[String],
-    accept: bool,
-) -> Result<()> {
-    update::update_cli(project, exclude, names, accept)
+pub fn update_cli(project: &Project, selection: Selection<'_>, accept: bool) -> Result<()> {
+    update::update_cli(project, selection, accept)
 }
 
-pub fn look_cli(project: &Project, names: &[String], verbose: bool) -> Result<()> {
-    update::look_cli(project, names, verbose)
+pub fn look_cli(project: &Project, selection: Selection<'_>, verbose: bool) -> Result<()> {
+    update::look_cli(project, selection, verbose)
 }
 
 pub fn dedup(project: &Project) -> Result<()> {
@@ -154,26 +144,111 @@ fn tolerate<T>(result: StdResult<T, FetchError>) -> (Option<T>, Option<String>) 
     }
 }
 
-fn select<'a>(
-    inputs: &'a [pins::Input],
-    exclude: &[String],
-    names: &[String],
-) -> Vec<&'a pins::Input> {
-    let filtered: Vec<_> = inputs
-        .iter()
-        .filter(|i| !exclude.contains(&i.name))
-        .collect();
+/// which pins a command should act on, before resolving against pins.toml
+#[derive(Clone, Copy)]
+pub struct Selection<'a> {
+    pub names:   &'a [String],
+    pub exclude: &'a [String],
+}
+
+impl Selection<'_> {
+    /// true when the command asked for every pin, so an empty result means an
+    /// empty project
+    pub const fn is_everything(&self) -> bool {
+        self.names.is_empty() && self.exclude.is_empty()
+    }
+}
+
+fn select<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pins::Input> {
+    let Selection { names, exclude } = selection;
+    let known = |name: &String| inputs.iter().any(|input| input.name == *name);
+
+    for name in exclude.iter().filter(|name| !known(name)) {
+        eprintln!("tack: no input '{name}' to exclude");
+    }
 
     if names.is_empty() {
-        return filtered;
+        return inputs
+            .iter()
+            .filter(|input| !exclude.contains(&input.name))
+            .collect();
     }
 
     let mut out = Vec::new();
-    for n in names {
-        match filtered.iter().find(|i| &i.name == n) {
-            Some(i) => out.push(*i),
-            None => eprintln!("no input '{n}'"),
+    for name in names {
+        if !known(name) {
+            eprintln!("tack: no input '{name}'");
+        } else if exclude.contains(name) {
+            eprintln!("tack: input '{name}' is both named and excluded, leaving it alone");
+        } else {
+            out.extend(inputs.iter().find(|input| input.name == *name));
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{
+        BTreeMap,
+        BTreeSet,
+    };
+
+    use super::*;
+
+    fn inputs(names: &[&str]) -> Vec<pins::Input> {
+        names
+            .iter()
+            .map(|name| {
+                pins::Input {
+                    name:       (*name).to_owned(),
+                    url:        format!("github:owner/{name}"),
+                    submodules: false,
+                    pin_type:   PinType::Flake,
+                    unpack:     None,
+                    follows:    BTreeMap::new(),
+                    excludes:   BTreeSet::new(),
+                }
+            })
+            .collect()
+    }
+
+    fn selected(inputs: &[pins::Input], pick: &[&str], skip: &[&str]) -> Vec<String> {
+        let names = pick.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        let exclude = skip.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        select(inputs, Selection {
+            names:   &names,
+            exclude: &exclude,
+        })
+        .iter()
+        .map(|input| input.name.clone())
+        .collect()
+    }
+
+    #[test]
+    fn exclude_drops_pins_from_an_unnamed_update() {
+        let all = inputs(&["nixpkgs", "home-manager", "nixvim"]);
+        assert_eq!(selected(&all, &[], &["home-manager"]), [
+            "nixpkgs", "nixvim"
+        ]);
+    }
+
+    #[test]
+    fn an_unknown_exclude_leaves_every_pin_selected() {
+        let all = inputs(&["nixpkgs", "home-manager"]);
+        assert_eq!(selected(&all, &[], &["nixpgks"]), [
+            "nixpkgs",
+            "home-manager"
+        ]);
+    }
+
+    #[test]
+    fn exclude_outranks_a_pin_named_on_the_same_run() {
+        let all = inputs(&["nixpkgs", "home-manager"]);
+        assert!(selected(&all, &["nixpkgs"], &["nixpkgs"]).is_empty());
+        assert_eq!(
+            selected(&all, &["nixpkgs", "home-manager"], &["nixpkgs"]),
+            ["home-manager"]
+        );
+    }
 }

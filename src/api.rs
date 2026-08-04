@@ -63,6 +63,16 @@ struct Recorded<T> {
     history_error:     Option<String>,
 }
 
+/// a read-only command touches neither pins.toml nor the lock, so there is
+/// nothing to record
+const fn unrecorded(value: CommandOutcome) -> Recorded<CommandOutcome> {
+    Recorded {
+        value,
+        captured_external: false,
+        history_error: None,
+    }
+}
+
 impl<'a> Tack<'a> {
     pub const fn new(project: &'a Project) -> Self {
         Self { project }
@@ -74,44 +84,64 @@ impl<'a> Tack<'a> {
 
     pub fn run(&self, cmd: Command) -> Result<CommandResultSet> {
         let check_resolver = !matches!(cmd, Command::Init { .. });
-        let mut captured_external = false;
-        let mut history_error = None;
-
         let label = cmd.history_label();
-        let outcome = match cmd {
+        let recorded = self.dispatch(cmd, &label)?;
+
+        let status = status_for(&recorded.value);
+        let stale_resolver =
+            check_resolver && status.is_success() && commands::stale_resolver(self.project);
+
+        Ok(CommandResultSet {
+            outcome: recorded.value,
+            status,
+            captured_external: recorded.captured_external,
+            history_error: recorded.history_error,
+            stale_resolver,
+        })
+    }
+
+    fn dispatch(&self, cmd: Command, label: &str) -> Result<Recorded<CommandOutcome>> {
+        match cmd {
             Command::Init {
                 force,
                 resolver,
                 flake,
                 convert,
             } => {
-                let recorded = self.recorded(&label, || {
+                self.recorded(label, || {
                     commands::init(self.project, commands::InitRequest {
                         force,
                         resolver,
                         flake,
                         convert,
                     })
-                })?;
-                captured_external = recorded.captured_external;
-                history_error = recorded.history_error;
-                CommandOutcome::Init
+                    .map(|()| CommandOutcome::Init)
+                })
             },
             Command::Update {
                 exclude,
                 names,
                 accept,
-                ..
             } => {
-                let recorded = self.recorded(&label, || {
-                    commands::update(self.project, &exclude, &names, accept)
-                })?;
-                captured_external = recorded.captured_external;
-                history_error = recorded.history_error;
-                CommandOutcome::Update(recorded.value)
+                let selection = commands::Selection {
+                    names:   &names,
+                    exclude: &exclude,
+                };
+                self.recorded(label, || {
+                    commands::update(self.project, selection, accept).map(CommandOutcome::Update)
+                })
             },
-            Command::Look { names, verbose } => {
-                CommandOutcome::Look(commands::look(self.project, &names, verbose)?)
+            Command::Look {
+                exclude,
+                names,
+                verbose,
+            } => {
+                let selection = commands::Selection {
+                    names:   &names,
+                    exclude: &exclude,
+                };
+                let report = commands::look(self.project, selection, verbose)?;
+                Ok(unrecorded(CommandOutcome::Look(report)))
             },
             Command::Add {
                 name,
@@ -122,7 +152,7 @@ impl<'a> Tack<'a> {
                 submodules,
                 follows,
             } => {
-                let recorded = self.recorded(&label, || {
+                self.recorded(label, || {
                     commands::add(self.project, commands::AddRequest {
                         name: &name,
                         url: &url,
@@ -132,47 +162,37 @@ impl<'a> Tack<'a> {
                         submodules,
                         follows: &follows,
                     })
-                })?;
-                captured_external = recorded.captured_external;
-                history_error = recorded.history_error;
-                CommandOutcome::Add
+                    .map(|()| CommandOutcome::Add)
+                })
             },
             Command::Rm { name } => {
-                let recorded = self.recorded(&label, || commands::rm(self.project, &name))?;
-                captured_external = recorded.captured_external;
-                history_error = recorded.history_error;
-                CommandOutcome::Rm
+                self.recorded(label, || {
+                    commands::rm(self.project, &name).map(|()| CommandOutcome::Rm)
+                })
             },
             Command::Alias { name, template, rm } => {
-                let recorded = self.recorded(&label, || {
+                self.recorded(label, || {
                     commands::alias(self.project, &name, template.as_deref(), rm)
-                })?;
-                captured_external = recorded.captured_external;
-                history_error = recorded.history_error;
-                CommandOutcome::Alias
+                        .map(|()| CommandOutcome::Alias)
+                })
             },
-            Command::Dedup => CommandOutcome::Dedup(commands::dedup_report(self.project)?),
+            Command::Dedup => {
+                let report = commands::dedup_report(self.project)?;
+                Ok(unrecorded(CommandOutcome::Dedup(report)))
+            },
             Command::Undo { list } => {
-                if list {
+                let outcome = if list {
                     CommandOutcome::History(commands::history(self.project))
                 } else {
                     CommandOutcome::Undo(commands::undo_view(self.project)?)
-                }
+                };
+                Ok(unrecorded(outcome))
             },
-            Command::Redo => CommandOutcome::Redo(commands::redo_view(self.project)?),
-        };
-
-        let status = status_for(&outcome);
-        let stale_resolver =
-            check_resolver && status.is_success() && commands::stale_resolver(self.project);
-
-        Ok(CommandResultSet {
-            outcome,
-            status,
-            captured_external,
-            history_error,
-            stale_resolver,
-        })
+            Command::Redo => {
+                let view = commands::redo_view(self.project)?;
+                Ok(unrecorded(CommandOutcome::Redo(view)))
+            },
+        }
     }
 
     fn recorded<T>(&self, label: &str, run: impl FnOnce() -> Result<T>) -> Result<Recorded<T>> {

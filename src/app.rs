@@ -8,10 +8,15 @@ use crate::{
 };
 
 pub fn run(cmd: Command) -> eyre::Result<()> {
-    let project = Project::discover()?;
+    let scaffolding = matches!(cmd, Command::Init { .. });
+    let project = if scaffolding {
+        Project::here()?
+    } else {
+        Project::discover()?
+    };
 
     // resolver nag trails successful output
-    let check_resolver = !matches!(cmd, Command::Init { .. });
+    let check_resolver = !scaffolding;
 
     let label = cmd.history_label();
     let res = match cmd {
@@ -30,7 +35,20 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
                 })
             })
         },
-        Command::Look { names, verbose } => commands::look_cli(&project, &names, verbose),
+        Command::Look {
+            exclude,
+            names,
+            verbose,
+        } => {
+            commands::look_cli(
+                &project,
+                commands::Selection {
+                    names:   &names,
+                    exclude: &exclude,
+                },
+                verbose,
+            )
+        },
         Command::Dedup => commands::dedup(&project),
         Command::Undo { list } => commands::undo(&project, list),
         Command::Redo => commands::redo(&project),
@@ -40,7 +58,14 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
             accept,
         } => {
             recorded(&project, &label, || {
-                commands::update_cli(&project, &exclude, &names, accept)
+                commands::update_cli(
+                    &project,
+                    commands::Selection {
+                        names:   &names,
+                        exclude: &exclude,
+                    },
+                    accept,
+                )
             })
         },
         Command::Add {

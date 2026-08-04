@@ -9,6 +9,7 @@ mod core;
 pub use core::fetch_input;
 
 use crate::{
+    commands::Selection,
     error::user_bail,
     fetch::BranchComparison,
     project::Project,
@@ -137,28 +138,20 @@ impl<O> core::Progress<O> for SpinnerProgress<'_, O> {
     }
 }
 
-pub fn update(
-    project: &Project,
-    exclude: &[String],
-    names: &[String],
-    accept: bool,
-) -> Result<UpdateReport> {
-    core::update(project, exclude, names, accept, &core::NoProgress)
+pub fn update(project: &Project, selection: Selection<'_>, accept: bool) -> Result<UpdateReport> {
+    core::update(project, selection, accept, &core::NoProgress)
 }
 
-pub fn update_cli(
-    project: &Project,
-    exclude: &[String],
-    names: &[String],
-    accept: bool,
-) -> Result<()> {
+pub fn update_cli(project: &Project, selection: Selection<'_>, accept: bool) -> Result<()> {
     let spinner = Spinner::new();
-    let report = core::update(project, exclude, names, accept, &SpinnerProgress {
+    let report = core::update(project, selection, accept, &SpinnerProgress {
         spinner: &spinner,
         status:  update_status,
     })?;
     if let Some(display) = spinner.into_display() {
         display.finish();
+    } else {
+        print_empty_selection(project, selection);
     }
     print_warnings(&report.warnings);
     if let Some(message) = report.user_error() {
@@ -167,13 +160,13 @@ pub fn update_cli(
     Ok(())
 }
 
-pub fn look(project: &Project, names: &[String], verbose: bool) -> Result<LookReport> {
-    core::look(project, names, verbose, &core::NoProgress)
+pub fn look(project: &Project, selection: Selection<'_>, verbose: bool) -> Result<LookReport> {
+    core::look(project, selection, verbose, &core::NoProgress)
 }
 
-pub fn look_cli(project: &Project, names: &[String], verbose: bool) -> Result<()> {
+pub fn look_cli(project: &Project, selection: Selection<'_>, verbose: bool) -> Result<()> {
     let spinner = Spinner::new();
-    let report = core::look(project, names, verbose, &SpinnerProgress {
+    let report = core::look(project, selection, verbose, &SpinnerProgress {
         spinner: &spinner,
         status:  look_status,
     })?;
@@ -188,14 +181,23 @@ pub fn look_cli(project: &Project, names: &[String], verbose: bool) -> Result<()
         } else {
             display.finish();
         }
-    } else if names.is_empty() {
-        println!(
-            "no pins in {}; add one with `tack add <name> <url>`",
-            project.pins_path().display()
-        );
+    } else {
+        print_empty_selection(project, selection);
     }
     print_warnings(&report.warnings);
     Ok(())
+}
+
+/// nothing ran, so say whether the project is empty or the selection emptied it
+fn print_empty_selection(project: &Project, selection: Selection<'_>) {
+    if selection.is_everything() {
+        println!(
+            "no pins in {}, add one with `tack add <name> <url>`",
+            project.pins_path().display()
+        );
+    } else {
+        println!("no pins selected");
+    }
 }
 
 fn print_warnings(warnings: &[String]) {

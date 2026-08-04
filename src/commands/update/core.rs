@@ -5,6 +5,7 @@ use eyre::Result;
 use super::LOG_LIMIT;
 use crate::{
     commands::{
+        Selection,
         dedup,
         select,
     },
@@ -276,8 +277,7 @@ fn pin_names(selected: &[&pins::Input]) -> Vec<String> {
 
 pub(super) fn update(
     project: &Project,
-    exclude: &[String],
-    names: &[String],
+    selection: Selection<'_>,
     accept: bool,
     progress: &impl Progress<UpdateOutcome>,
 ) -> Result<UpdateReport> {
@@ -285,7 +285,7 @@ pub(super) fn update(
     let shorturls = doc.shorturls();
     let all = doc.inputs()?;
     let all_follow = doc.all_follows()?;
-    let selected = select(&all, exclude, names);
+    let selected = select(&all, selection);
     if selected.is_empty() {
         return Ok(UpdateReport::default());
     }
@@ -407,14 +407,14 @@ fn classify_look(
 
 pub(super) fn look(
     project: &Project,
-    names: &[String],
+    selection: Selection<'_>,
     verbose: bool,
     progress: &impl Progress<LookOutcome>,
 ) -> Result<LookReport> {
     let doc = project.load_pins()?;
     let shorturls = doc.shorturls();
     let all = doc.inputs()?;
-    let selected = select(&all, &[], names);
+    let selected = select(&all, selection);
     if selected.is_empty() {
         return Ok(LookReport::default());
     }
