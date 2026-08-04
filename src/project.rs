@@ -57,16 +57,47 @@ pub struct Project {
 }
 
 impl Project {
-    /// `$TACK_DIR` legacy cwd or `cwd/.tack`
+    /// `$TACK_DIR`, the nearest enclosing project, or `cwd/.tack` when there is
+    /// none
     pub fn discover() -> StdResult<Self, ConfigError> {
         if let Some(dir) = env::var_os("TACK_DIR") {
             return Ok(Self::at(PathBuf::from(dir)));
         }
-        let cwd = env::current_dir().map_err(|source| ConfigError::CurrentDir { source })?;
+        let cwd = Self::cwd()?;
+        Ok(cwd
+            .ancestors()
+            .find_map(Self::rooted_at)
+            .unwrap_or_else(|| Self::at(cwd.join(".tack"))))
+    }
+
+    /// `$TACK_DIR` legacy cwd or `cwd/.tack`, never an enclosing project
+    ///
+    /// `init` scaffolds where it was invoked, so searching upward would let it
+    /// overwrite the parent project of whatever subdirectory you happen to be
+    /// in.
+    pub fn here() -> StdResult<Self, ConfigError> {
+        if let Some(dir) = env::var_os("TACK_DIR") {
+            return Ok(Self::at(PathBuf::from(dir)));
+        }
+        let cwd = Self::cwd()?;
         if cwd.join("pins.toml").exists() || cwd.join("inputs.nix").exists() {
             return Ok(Self::at(cwd));
         }
         Ok(Self::at(cwd.join(".tack")))
+    }
+
+    fn cwd() -> StdResult<PathBuf, ConfigError> {
+        env::current_dir().map_err(|source| ConfigError::CurrentDir { source })
+    }
+
+    /// a directory roots a project when it holds the pins itself or carries a
+    /// `.tack`
+    fn rooted_at(dir: &Path) -> Option<Self> {
+        if dir.join("pins.toml").exists() || dir.join("inputs.nix").exists() {
+            return Some(Self::at(dir.to_owned()));
+        }
+        let nested = dir.join(".tack");
+        nested.is_dir().then(|| Self::at(nested))
     }
 
     pub const fn at(dir: PathBuf) -> Self {
