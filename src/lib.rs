@@ -90,10 +90,7 @@ pub fn run() -> ExitCode {
     match app::run(cmd) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            if err
-                .chain()
-                .any(|cause| cause.downcast_ref::<error::UserError>().is_some())
-            {
+            if expected(&err) {
                 eprintln!("tack: {err:#}");
             } else {
                 print_report(&err);
@@ -101,6 +98,15 @@ pub fn run() -> ExitCode {
             exit_code(&err)
         },
     }
+}
+
+/// an expected failure rather than a tack bug, so it prints as one line
+fn expected(report: &eyre::Report) -> bool {
+    report.chain().any(|cause| {
+        cause.downcast_ref::<error::UserError>().is_some()
+            || cause.downcast_ref::<ConfigError>().is_some()
+            || cause.downcast_ref::<fetch::FetchError>().is_some()
+    })
 }
 
 fn exit_code(report: &eyre::Report) -> ExitCode {
