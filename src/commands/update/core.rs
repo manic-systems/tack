@@ -5,7 +5,9 @@ use eyre::Result;
 use super::LOG_LIMIT;
 use crate::{
     commands::{
+        UpdateRequest,
         dedup,
+        init,
         select,
     },
     dispatcher,
@@ -276,15 +278,14 @@ fn pin_names(selected: &[&pins::Input]) -> Vec<String> {
 
 pub(super) fn update(
     project: &Project,
-    names: &[String],
-    accept: bool,
+    request: UpdateRequest<'_>,
     progress: &impl Progress<UpdateOutcome>,
 ) -> Result<UpdateReport> {
     let doc = project.load_pins()?;
     let shorturls = doc.shorturls();
     let all = doc.inputs()?;
     let all_follow = doc.all_follows()?;
-    let selected = select(&all, names);
+    let selected = select(&all, request.names);
     if selected.is_empty() {
         return Ok(UpdateReport::default());
     }
@@ -302,7 +303,7 @@ pub(super) fn update(
             input,
             &localized.url,
             old,
-            accept,
+            request.accept,
             localized.warning,
             &session,
         );
@@ -351,6 +352,10 @@ pub(super) fn update(
     warnings.extend(session.into_surfaced());
     warnings.extend(auto_dedup.surfaced_fetch_causes);
     warnings.extend(fetch::drain_fetch_warnings());
+
+    if request.resolver {
+        init::refresh_resolver(project)?;
+    }
 
     Ok(UpdateReport {
         pins,

@@ -97,9 +97,18 @@ impl<'a> Tack<'a> {
                 history_error = recorded.history_error;
                 CommandOutcome::Init
             },
-            Command::Update { names, accept } => {
-                let recorded =
-                    self.recorded(&label, || commands::update(self.project, &names, accept))?;
+            Command::Update {
+                names,
+                accept,
+                resolver,
+            } => {
+                let recorded = self.recorded(&label, || {
+                    commands::update(self.project, commands::UpdateRequest {
+                        names: &names,
+                        accept,
+                        resolver,
+                    })
+                })?;
                 captured_external = recorded.captured_external;
                 history_error = recorded.history_error;
                 CommandOutcome::Update(recorded.value)

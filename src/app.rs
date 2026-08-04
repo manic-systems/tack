@@ -11,7 +11,10 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
     let project = Project::discover()?;
 
     // resolver nag trails successful output
-    let check_resolver = !matches!(cmd, Command::Init { .. });
+    let check_resolver = !matches!(
+        cmd,
+        Command::Init { .. } | Command::Update { resolver: true, .. }
+    );
 
     let label = cmd.history_label();
     let res = match cmd {
@@ -34,9 +37,17 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
         Command::Dedup => commands::dedup(&project),
         Command::Undo { list } => commands::undo(&project, list),
         Command::Redo => commands::redo(&project),
-        Command::Update { names, accept } => {
+        Command::Update {
+            names,
+            accept,
+            resolver,
+        } => {
             recorded(&project, &label, || {
-                commands::update_cli(&project, &names, accept)
+                commands::update_cli(&project, commands::UpdateRequest {
+                    names: &names,
+                    accept,
+                    resolver,
+                })
             })
         },
         Command::Add {
