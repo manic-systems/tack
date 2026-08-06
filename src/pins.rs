@@ -423,10 +423,6 @@ pub fn is_global_follow_excluded(
     })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the follow-up graph traversal")
-)]
 pub fn global_follow_target<'a>(
     all_follow: &'a BTreeMap<String, String>,
     excludes: &BTreeSet<String>,

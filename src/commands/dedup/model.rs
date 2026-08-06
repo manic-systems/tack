@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Side {
     Flake,
     Tack,
@@ -17,6 +17,7 @@ impl fmt::Display for Side {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Entry {
     pub path: Vec<String>,
     pub name: String,

@@ -145,18 +145,10 @@ impl FlakeLock {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the follow-up graph traversal")
-    )]
     pub fn root_name(&self) -> &str {
         &self.root
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the follow-up graph traversal")
-    )]
     pub fn root(&self) -> Option<&FlakeNode> {
         self.node(&self.root)
     }
@@ -165,10 +157,6 @@ impl FlakeLock {
         self.nodes.get(name)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the follow-up graph traversal")
-    )]
     pub fn resolve_input_ref(
         &self,
         input_ref: &FlakeInputRef,
@@ -262,10 +250,6 @@ pub struct FlakeNode {
 }
 
 impl FlakeNode {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the follow-up graph traversal")
-    )]
     pub const fn locked(&self) -> Option<&LockedNode> {
         self.locked.as_ref()
     }
@@ -281,10 +265,6 @@ impl FlakeNode {
         self.inputs.get(name)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the follow-up graph traversal")
-    )]
     pub fn inputs(&self) -> impl Iterator<Item = (&str, &FlakeInputRef)> {
         self.inputs
             .iter()
