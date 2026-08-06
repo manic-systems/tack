@@ -275,19 +275,21 @@ mod tests {
             .iter()
             .map(|name| {
                 pins::Input {
-                    name:       (*name).to_owned(),
-                    url:        format!("github:owner/{name}"),
-                    submodules: false,
-                    pin_type:   PinType::Flake,
-                    unpack:     None,
-                    dir:        None,
-                    follows:    BTreeMap::new(),
-                    excludes:   BTreeSet::new(),
-                    signers:    Vec::new(),
-                    patches:    Vec::new(),
-                    tag:        None,
-                    group:      None,
-                    frozen:     false,
+                    name:        (*name).to_owned(),
+                    url:         format!("github:owner/{name}"),
+                    submodules:  false,
+                    pin_type:    PinType::Flake,
+                    unpack:      None,
+                    dir:         None,
+                    follows:     BTreeMap::new(),
+                    excludes:    BTreeSet::new(),
+                    omit_inputs: BTreeSet::new(),
+                    keep_inputs: BTreeSet::new(),
+                    signers:     Vec::new(),
+                    patches:     Vec::new(),
+                    tag:         None,
+                    group:       None,
+                    frozen:      false,
                 }
             })
             .collect()

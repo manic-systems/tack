@@ -56,3 +56,32 @@ flake = false
     assert_eq!(by_name["archive"].unpack, Some(Unpack::Tarball));
     assert_eq!(by_name["legacy"].pin_type, PinType::Fetch);
 }
+
+#[test]
+fn follow_tables_reject_bare_and_scoped_keys_for_one_name() {
+    let all_follow = doc("[all_follow]\nfoo = \"a\"\n\"flake:foo\" = \"b\"\n")
+        .all_follows()
+        .unwrap_err();
+    assert_eq!(
+        all_follow.to_string(),
+        "all_follow has both 'foo' and 'flake:foo', keep only one"
+    );
+
+    let array_form = doc("[all_follow]\nfoo = [\"tack:foo\"]\n")
+        .all_follows()
+        .unwrap_err();
+    assert!(array_form.to_string().contains("keep only one"));
+
+    let per_pin = doc(
+        "[inputs.top]\nurl = \"github:o/top\"\nfollows = { foo = \"a\", \"tack:foo\" = \"b\" }\n",
+    )
+    .inputs()
+    .unwrap_err();
+    assert_eq!(
+        per_pin.to_string(),
+        "inputs.top.follows has both 'foo' and 'tack:foo', keep only one"
+    );
+
+    let distinct_sides = doc("[all_follow]\n\"flake:foo\" = \"a\"\n\"tack:foo\" = \"b\"\n");
+    assert_eq!(distinct_sides.all_follows().unwrap().len(), 2);
+}

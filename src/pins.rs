@@ -132,19 +132,21 @@ impl FromStr for Unpack {
 
 #[derive(Debug)]
 pub struct Input {
-    pub name:       String,
-    pub url:        String,
-    pub submodules: bool,
-    pub pin_type:   PinType,
-    pub unpack:     Option<Unpack>,
-    pub dir:        Option<String>,
-    pub follows:    BTreeMap<String, String>,
-    pub excludes:   BTreeSet<String>,
-    pub signers:    Vec<SignerName>,
-    pub patches:    Vec<PatchSource>,
-    pub tag:        Option<TagTemplate>,
-    pub group:      Option<String>,
-    pub frozen:     bool,
+    pub name:        String,
+    pub url:         String,
+    pub submodules:  bool,
+    pub pin_type:    PinType,
+    pub unpack:      Option<Unpack>,
+    pub dir:         Option<String>,
+    pub follows:     BTreeMap<String, String>,
+    pub excludes:    BTreeSet<String>,
+    pub omit_inputs: BTreeSet<String>,
+    pub keep_inputs: BTreeSet<String>,
+    pub signers:     Vec<SignerName>,
+    pub patches:     Vec<PatchSource>,
+    pub tag:         Option<TagTemplate>,
+    pub group:       Option<String>,
+    pub frozen:      bool,
 }
 
 impl Input {
@@ -155,6 +157,7 @@ impl Input {
         let entry = input_item
             .as_table_like()
             .with_context(|| format!("input '{name}' is not a table"))?;
+        let context = format!("input '{name}'");
         let url = entry
             .get("url")
             .and_then(Item::as_str)
@@ -196,12 +199,20 @@ impl Input {
             user_bail!("input '{name}': unpack is only valid for type = \"fixed\"");
         }
         let follows = follows_table(name, entry.get("follows"))?;
-        let excludes = string_array(name, "exclude_follow", entry.get("exclude_follow"))?
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>();
+        reject_scoped_duplicates(&follows, &format!("inputs.{name}.follows"))?;
+        let name_set = |key: &str| {
+            string_array(&context, key, entry.get(key)).map(|names| {
+                names
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<BTreeSet<_>>()
+            })
+        };
+        let excludes = name_set("exclude_follow")?;
+        let omit_inputs = name_set("omit_inputs")?;
+        let keep_inputs = name_set("keep_inputs")?;
         let dir = str_field("dir")?;
-        let signers = string_array(name, "signers", entry.get("signers"))?
+        let signers = string_array(&context, "signers", entry.get("signers"))?
             .into_iter()
             .map(str::parse::<SignerName>)
             .collect::<Result<Vec<_>>>()
@@ -209,7 +220,7 @@ impl Input {
         if pin_type == PinType::Fixed && !signers.is_empty() {
             user_bail!("input '{name}': signers are not valid for type = \"fixed\"");
         }
-        let patches = string_array(name, "patches", entry.get("patches"))?
+        let patches = string_array(&context, "patches", entry.get("patches"))?
             .into_iter()
             .map(|raw| {
                 PatchSource::parse(raw, shorturls).with_context(|| format!("input '{name}'"))
@@ -231,6 +242,8 @@ impl Input {
             dir: dir.map(str::to_owned),
             follows,
             excludes,
+            omit_inputs,
+            keep_inputs,
             signers,
             patches,
             tag,
@@ -284,7 +297,7 @@ fn follows_table(name: &str, item: Option<&Item>) -> Result<BTreeMap<String, Str
 }
 
 fn string_array<'item>(
-    name: &str,
+    context: &str,
     key: &str,
     item: Option<&'item Item>,
 ) -> Result<Vec<&'item str>> {
@@ -293,13 +306,13 @@ fn string_array<'item>(
     };
     let arr = array_item
         .as_array()
-        .with_context(|| format!("input '{name}': {key} must be an array of strings"))?;
+        .with_context(|| format!("{context}: {key} must be an array of strings"))?;
     arr.iter()
         .enumerate()
         .map(|(index, member)| {
             member
                 .as_str()
-                .with_context(|| format!("input '{name}': {key}[{index}] must be a string"))
+                .with_context(|| format!("{context}: {key}[{index}] must be a string"))
         })
         .collect::<Result<Vec<_>>>()
 }
@@ -342,6 +355,32 @@ impl PinsDoc {
 
     pub fn all_follows(&self) -> Result<BTreeMap<String, String>> {
         AllFollowTable::from_doc(&self.doc).aliases()
+    }
+
+    pub fn is_recomposable(&self) -> Result<bool> {
+        let Some(item) = self
+            .doc
+            .get("tack")
+            .and_then(Item::as_table_like)
+            .and_then(|table| table.get("recomposable"))
+        else {
+            return Ok(false);
+        };
+        item.as_bool()
+            .with_context(|| "tack.recomposable must be a bool")
+    }
+
+    pub fn omit_inputs(&self) -> Result<BTreeSet<String>> {
+        let Some(item) = self.doc.get("omit_inputs") else {
+            return Ok(BTreeSet::new());
+        };
+        let table = item
+            .as_table_like()
+            .with_context(|| "omit_inputs must be a table")?;
+        Ok(string_array("omit_inputs", "names", table.get("names"))?
+            .into_iter()
+            .map(str::to_owned)
+            .collect())
     }
 
     pub fn inputs(&self) -> Result<Vec<Input>> {
@@ -622,8 +661,22 @@ impl<'a> AllFollowTable<'a> {
                 user_bail!("all_follow.{key} must be a string or array of strings");
             }
         }
+        reject_scoped_duplicates(&out, "all_follow")?;
         Ok(out)
     }
+}
+
+/// the resolver rejects the same pair, since lookup order would otherwise
+/// decide which rule wins
+fn reject_scoped_duplicates(follows: &BTreeMap<String, String>, location: &str) -> Result<()> {
+    for key in follows.keys() {
+        if let Some((side @ ("flake" | "tack"), name)) = key.split_once(':')
+            && follows.contains_key(name)
+        {
+            user_bail!("{location} has both '{name}' and '{side}:{name}', keep only one");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

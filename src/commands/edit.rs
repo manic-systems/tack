@@ -85,6 +85,8 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         follows,
         tag: template.as_ref(),
     });
+    // a load's own checks, so no flag combination saves an unloadable pins.toml
+    doc.inputs()?;
     project.save_pins(&doc)?;
 
     let localized = source::localize_path_url_with_warning(&expanded, project.dir());
