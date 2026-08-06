@@ -114,7 +114,8 @@ follows = { nixpkgs = "nixpkgs" }   # foo's nixpkgs -> your nixpkgs pin
 ```
 
 `all_follow` applies a rule to every pin that has a matching input. two value
-shapes are accepted:
+shapes are accepted. its rules apply recursively; a pin's `follows` apply only
+to that pin's immediate inputs:
 
 ```toml
 [all_follow]
@@ -129,6 +130,10 @@ nixpkgs = ["nixpkgs-stable", "nixpkgs-unstable"]
 url = "gh:owner/bar"
 exclude_follow = ["nixpkgs"]   # ...except bar's
 ```
+
+an unscoped `exclude_follow` name excludes both flake and tack inputs. prefix
+one with `flake:` or `tack:` to exclude only that side. `*`, `flake:*` and
+`tack:*` exclude everything, or everything on one side.
 
 when a target named in `[all_follow]` isn't itself a top-level `[inputs]` pin,
 `tack update` synthesises a lock entry for it by walking every top-level
@@ -183,6 +188,40 @@ follows = { nixpkgs = "nixpkgs" }
 then the transitive inputs (`flake-compat`, `devshell`, `nix-test-runner`,
 `cachix`, and `pre-commit-hooks`) will be fetched, even though they're never
 used.
+
+## omit inputs
+
+omit selected upstream inputs from the effective graph used by resolution and
+`tack dedup`. a global rule applies recursively to every top-level pin:
+
+```toml
+[omit_inputs]
+names = ["flake-compat", "cachix"]
+```
+
+add `omit_inputs` to a pin for another recursive rule. `keep_inputs` undoes a
+global or local omission throughout that pin's upstream graph:
+
+```toml
+[inputs.crate2nix]
+url = "github:nix-community/crate2nix"
+omit_inputs = ["nix-test-runner", "pre-commit-hooks"]
+keep_inputs = ["nixpkgs", "cachix"]
+```
+
+names match both flake and tack inputs. prefix one with `flake:` or `tack:` to
+select a side. `*` matches every input; `flake:*` and `tack:*` match one side.
+follows take precedence over omission. descendants reached only through an
+omitted input disappear too; shared descendants remain when another retained
+edge reaches them. omission is lazy: an unused input is never fetched, while
+evaluating one reports that it was omitted.
+
+recursive rules cross upstream tack pins under the same [publishing](#publishing)
+contract as follows. older resolvers still receive immediate overrides; tack
+traces where deeper policy propagation stops. `tack dedup` models the contract
+from each upstream's pins.toml — rules don't cross into a flake pin that isn't
+marked recomposable — but it cannot see an upstream's resolver version, so it
+assumes upstream resolvers are current.
 
 ## publishing
 

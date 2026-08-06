@@ -8,18 +8,24 @@
 [shorturls]
 # gh = "github:{path}"
 
-# all_follow maps input names to the top-level pin they follow
-# opt out per-input with exclude_follow
+# all_follow recursively maps input names to the top-level pin they follow
+# opt out per-input with exclude_follow; scope with flake: or tack:
 [all_follow]
 # nixpkgs = "nixpkgs"
 # nixpkgs = ["nixpkgs-stable", "nixpkgs-unstable"]
+
+# recursively omit selected upstream inputs from every top-level pin
+[omit_inputs]
+# names = ["flake-compat", "tack:cachix"]
 
 # inputs.<name> fields
 #   url             required, shorturl ok, ?rev=<sha> pins an exact commit
 #   type            flake (default), fetch, or fixed
 #   flake           legacy false means type = "fetch"
-#   follows         { child = "pin" } override map
-#   exclude_follow  all_follow names to skip
+#   follows         { child = "pin" } immediate-input override map
+#   exclude_follow  all_follow names to skip; flake:/tack: scopes and * wildcards
+#   omit_inputs     upstream input names to omit recursively for this pin
+#   keep_inputs     omitted input names to allow recursively for this pin
 #   dir             subdir holding flake.nix
 #   submodules      fetch git submodules
 #   unpack          fixed-only tarball or file
