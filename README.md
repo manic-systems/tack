@@ -199,8 +199,9 @@ url = "gh:hyprwm/hypridle"
 follows = { hyprlang = "hyprland/hyprlang", nixpkgs = "hyprland/nixpkgs" }
 ```
 
-`all_follow` applies a rule to every pin that has a matching input. two value
-shapes are accepted:
+`all_follow` applies a rule to every pin that has a matching input, at every
+depth, while a pin's `follows` only reach its own inputs. two value shapes are
+accepted:
 
 ```toml
 [all_follow]
@@ -215,6 +216,11 @@ nixpkgs = ["nixpkgs-stable", "nixpkgs-unstable"]
 url = "gh:owner/bar"
 exclude_follow = ["nixpkgs"]   # ...except bar's
 ```
+
+`exclude_follow` takes the `flake:` and `tack:` prefixes too, and `*` drops
+every rule. it only removes your own `all_follow` rules, never the follows a
+project consuming yours passes down. a consumer's follows beat a pin's
+`follows`, which beat `all_follow`.
 
 when a target named in `[all_follow]` isn't itself a top-level `[inputs]` pin,
 `tack update` synthesises a lock entry for it by walking every top-level
@@ -373,6 +379,35 @@ follows = { nixpkgs = "nixpkgs" }
 then the transitive inputs (`flake-compat`, `devshell`, `nix-test-runner`,
 `cachix`, and `pre-commit-hooks`) will be fetched, even though they're never
 used.
+
+## omit inputs
+
+an omitted upstream input is never fetched or scanned by `tack dedup`, and
+neither is anything reached only through it. `[omit_inputs]` names apply to
+every pin at every depth:
+
+```toml
+[omit_inputs]
+names = ["flake-compat", "cachix"]
+```
+
+a pin's own `omit_inputs` add to them, and its `keep_inputs` undo either:
+
+```toml
+[inputs.crate2nix]
+url = "github:nix-community/crate2nix"
+omit_inputs = ["nix-test-runner", "pre-commit-hooks"]
+keep_inputs = ["nixpkgs", "cachix"]
+```
+
+names take the `flake:` and `tack:` prefixes and `*` like `exclude_follow`
+does, and a follow wins over an omit. evaluating an omitted input throws, so
+frameworks that walk every input, like flake-parts modules or blueprint, can't
+use one.
+
+omits and follows reach an upstream's tack pins only when it is
+[recomposable](#publishing), and the consumer wins. your `keep_inputs` can undo
+an upstream's omit, but an upstream's can't undo yours.
 
 ## publishing
 
