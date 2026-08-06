@@ -1,25 +1,11 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::fmt;
+use crate::{
+    lock::LockIdentity,
+    pins::Side,
+};
 
-use crate::lock::LockIdentity;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Side {
-    Flake,
-    Tack,
-}
-
-impl fmt::Display for Side {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match *self {
-            Self::Flake => "flake",
-            Self::Tack => "tack",
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum IdentityKind {
     Rev,
     ContentHash,
@@ -28,7 +14,7 @@ pub(super) enum IdentityKind {
     PathFingerprint,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Identity {
     pub kind:  IdentityKind,
     pub value: String,
@@ -51,6 +37,7 @@ impl Identity {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Entry {
     pub path:     Vec<String>,
     pub name:     String,

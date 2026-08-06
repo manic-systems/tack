@@ -40,6 +40,10 @@ impl ScanDiagnostic {
         Self::new(path, file, ScanDiagnosticKind::Config(format!("{error:#}")))
     }
 
+    pub fn truncated(path: &[String], file: ScanFile, limit: String) -> Self {
+        Self::new(path, file, ScanDiagnosticKind::Truncated(limit))
+    }
+
     pub fn path(&self) -> &[String] {
         &self.path
     }
@@ -95,6 +99,8 @@ pub enum ScanDiagnosticKind {
     Fetch(String),
     Parse(String),
     Config(String),
+    /// a scan cut short by one of dedup's size limits
+    Truncated(String),
 }
 
 impl Display for ScanDiagnosticKind {
@@ -103,6 +109,7 @@ impl Display for ScanDiagnosticKind {
             Self::Fetch(ref error) => write!(f, "fetch failed: {error}"),
             Self::Parse(ref error) => write!(f, "parse failed: {error}"),
             Self::Config(ref error) => write!(f, "config invalid: {error}"),
+            Self::Truncated(ref limit) => write!(f, "truncated: {limit}"),
         }
     }
 }

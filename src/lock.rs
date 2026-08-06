@@ -292,16 +292,6 @@ impl FlakeLock {
         serde_json::from_str(raw)
     }
 
-    pub fn locked_nodes(&self) -> impl Iterator<Item = (&str, &LockedNode)> {
-        let root = self.root.as_str();
-        self.nodes.iter().filter_map(move |(name, node)| {
-            if name == root {
-                return None;
-            }
-            Some((name.as_str(), node.locked.known()?))
-        })
-    }
-
     pub fn root(&self) -> &str {
         &self.root
     }
@@ -324,19 +314,41 @@ impl FlakeLock {
             .flat_map(|flake_node| &flake_node.inputs)
             .map(|(name, input)| (name.as_str(), input))
     }
+
+    pub fn root_node(&self) -> Option<&FlakeNode> {
+        self.nodes.get(&self.root)
+    }
+
+    pub fn node(&self, name: &str) -> Option<(&str, &FlakeNode)> {
+        self.nodes
+            .get_key_value(name)
+            .map(|(stored, node)| (stored.as_str(), node))
+    }
 }
 
 #[derive(Debug, Deserialize)]
-struct FlakeNode {
+pub struct FlakeNode {
     #[serde(default, deserialize_with = "deserialize_locked_node")]
     locked: LockedEntry,
     #[serde(default)]
     inputs: BTreeMap<String, FlakeInputRef>,
 }
 
+impl FlakeNode {
+    pub const fn locked(&self) -> Option<&LockedNode> {
+        self.locked.known()
+    }
+
+    pub fn inputs(&self) -> impl Iterator<Item = (&str, &FlakeInputRef)> {
+        self.inputs
+            .iter()
+            .map(|(name, input_ref)| (name.as_str(), input_ref))
+    }
+}
+
 /// a lock node's input names either another node or, as a list, the input
 /// path it follows from the root
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum FlakeInputRef {
     Node(String),

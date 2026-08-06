@@ -121,12 +121,16 @@ pub fn source_label(path: &[String]) -> String {
     if path.is_empty() {
         "top".into()
     } else {
-        path.join(" > ")
+        printable(&path.join(" > "))
     }
 }
 
 pub fn scan_diagnostic(diagnostic: &ScanDiagnostic) -> String {
-    format!("scan {}: {}", source_label(diagnostic.path()), diagnostic)
+    scan_error(diagnostic.path(), &diagnostic.to_string())
+}
+
+pub fn scan_error(path: &[String], err: &str) -> String {
+    format!("scan {}: {}", source_label(path), printable(err))
 }
 
 pub fn render_window(view: &history::View) {
@@ -190,7 +194,11 @@ pub fn print_report(report: &DedupReport) {
                     } else {
                         blank.as_str()
                     };
-                    let name_cell = if idx == 0 { name.name.as_str() } else { "" };
+                    let name_cell = if idx == 0 {
+                        printable(&name.name)
+                    } else {
+                        String::new()
+                    };
                     let rendered_source = source_label(source_path);
                     println!("  {rev_cell:rw$} {mark_cell} {name_cell:nw$}  {rendered_source}");
                 }

@@ -679,25 +679,35 @@ fn reject_scoped_duplicates(follows: &BTreeMap<String, String>, location: &str) 
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-pub struct FollowAlias<'a> {
-    raw: &'a str,
+/// an upstream's flake.nix inputs or its tack pins
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Side {
+    Flake,
+    Tack,
 }
 
-impl<'a> From<&'a str> for FollowAlias<'a> {
-    fn from(raw: &'a str) -> Self {
-        Self { raw }
+impl Display for Side {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(match *self {
+            Self::Flake => "flake",
+            Self::Tack => "tack",
+        })
     }
 }
 
-impl<'a> FollowAlias<'a> {
-    pub fn flake_side(self) -> Option<&'a str> {
-        match self.raw.split_once(':') {
-            Some(("flake", rest)) => Some(rest),
-            Some(("tack", _)) => None,
-            _ => Some(self.raw),
-        }
+/// the name a `name`, `flake:name` or `tack:name` rule covers on `side`
+pub fn rule_name(rule: &str, side: Side) -> Option<&str> {
+    match rule.split_once(':') {
+        Some(("flake", name)) => (side == Side::Flake).then_some(name),
+        Some(("tack", name)) => (side == Side::Tack).then_some(name),
+        _ => Some(rule),
     }
+}
+
+pub fn rules_match(rules: &BTreeSet<String>, side: Side, name: &str) -> bool {
+    rules
+        .iter()
+        .any(|rule| rule_name(rule, side).is_some_and(|ruled| ruled == "*" || ruled == name))
 }
 
 pub struct AddInputOpts<'a> {

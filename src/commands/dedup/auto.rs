@@ -9,7 +9,12 @@ use std::{
     mem::discriminant,
 };
 
-use super::scan::strip_disambiguator;
+use super::scan::{
+    FlakeVisit,
+    FollowPolicy,
+    OmitPolicy,
+    walk_flake_lock,
+};
 use crate::{
     commands::tolerate,
     dispatcher,
@@ -64,9 +69,7 @@ impl AutoFollowAliases {
                 })
                 .filter_map(|(alias, target)| {
                     Some((
-                        pins::FollowAlias::from(alias.as_str())
-                            .flake_side()?
-                            .to_owned(),
+                        pins::rule_name(alias, pins::Side::Flake)?.to_owned(),
                         target.clone(),
                     ))
                 })
@@ -279,15 +282,33 @@ fn scan_input(
             return Some(batch);
         },
     };
-    for (key, locked) in parsed.locked_nodes() {
-        let stripped = strip_disambiguator(key);
-        let Some(target) = aliases.target_for(stripped) else {
-            continue;
-        };
-        batch
-            .observations
-            .push((target.clone(), LockObservation::from(locked.clone())));
-    }
+    let Some(root) = parsed.root_node() else {
+        batch.diagnostics.insert(ScanDiagnostic::parse(
+            &path,
+            ScanFile::FlakeLock,
+            format!("flake lock root node '{}' does not exist", parsed.root()),
+        ));
+        return Some(batch);
+    };
+    // an omitted input can still be a follow target the resolver needs locked
+    let (omit, follow) = (OmitPolicy::default(), FollowPolicy::default());
+    walk_flake_lock(&parsed, root, &path, &omit, &follow, |visit| {
+        match visit {
+            FlakeVisit::Locked { name, locked, .. } => {
+                if let Some(target) = aliases.target_for(name) {
+                    batch
+                        .observations
+                        .push((target.clone(), LockObservation::from(locked.clone())));
+                }
+            },
+            FlakeVisit::Unresolved(err) => {
+                batch
+                    .diagnostics
+                    .insert(ScanDiagnostic::parse(&path, ScanFile::FlakeLock, err));
+            },
+            FlakeVisit::Followed { .. } | FlakeVisit::TooDeep => {},
+        }
+    });
     Some(batch)
 }
 

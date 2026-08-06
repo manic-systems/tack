@@ -18,9 +18,9 @@ use crate::{
         Entry,
         Identity,
         IdentityKind,
-        Side,
     },
     fetch::CompareStatus,
+    pins::Side,
     report::Mark,
     source::id::SourceId,
 };
