@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: EUPL-1.2
+
+[inputs.dep]
+type = "fetch"
+url  = "path:../../original"
+
+[inputs.drop]
+type = "fetch"
+url  = "path:../../original"
+
+[inputs.keepme]
+type = "fetch"
+url  = "path:../../original"
+
+[inputs.scoped]
+type = "fetch"
+url  = "path:../../original"
+
+[inputs.immediate]
+type = "fetch"
+url  = "path:../../original"

@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: EUPL-1.2
+
+[inputs.value]
+type = "fetch"
+url  = "path:../../original"

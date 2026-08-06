@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: EUPL-1.2
+
+[inputs.mid]
+type = "fetch"
+url  = "path:../../level2"
+
+[inputs.immediate]
+type = "fetch"
+url  = "path:../../original"

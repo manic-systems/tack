@@ -1,0 +1,22 @@
+{
+  "replacement": {
+    "type": "path",
+    "path": "../replacement"
+  },
+  "top": {
+    "type": "path",
+    "path": "../level1"
+  },
+  "topflake": {
+    "type": "path",
+    "path": "../level-flake"
+  },
+  "legacy": {
+    "type": "path",
+    "path": "../legacy"
+  },
+  "badlocal": {
+    "type": "path",
+    "path": "../original"
+  }
+}

@@ -108,6 +108,7 @@
             self.checks.${system}.tack
             self.checks.${system}.fmt
             self.checks.${system}.clippy
+            self.checks.${system}.resolver
           ];
 
           inherit (self.packages.${system}) tack;
@@ -131,6 +132,11 @@
                 find . -name '*.nix' -exec nixfmt --check {} +
                 touch $out
               '';
+          resolver =
+            assert import ./tests/resolver;
+            pkgs.runCommand "tack-resolver-check" { } ''
+              touch $out
+            '';
           clippy = self.packages.${system}.tack.overrideAttrs (old: {
             pname = "tack-clippy";
             nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.clippy ];

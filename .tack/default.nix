@@ -21,15 +21,11 @@ let
     match
     pathExists
     readFile
+    removeAttrs
     substring
     tail
     trace
     ;
-
-  pins = fromTOML (readFile ./pins.toml);
-  lock = fromJSON (readFile ./pins.lock.json);
-  declared = pins.inputs or { };
-  all_follow_raw = pins.all_follow or { };
 
   validateInputNames =
     { value, location }:
@@ -37,47 +33,6 @@ let
       throw "tack: ${location} must be an array of strings"
     else
       value;
-
-  all_omit_inputs =
-    if !(pins ? omit_inputs) then
-      [ ]
-    else if !isAttrs pins.omit_inputs then
-      throw "tack: omit_inputs must be a table with a names array"
-    else
-      validateInputNames {
-        value = pins.omit_inputs.names or [ ];
-        location = "omit_inputs.names";
-      };
-
-  # flatten `target = [aliases]` rows alongside `alias = "target"` rows
-  all_follow = listToAttrs (
-    concatMap (
-      key:
-      let
-        val = all_follow_raw.${key};
-      in
-      if isList val then
-        [
-          {
-            name = key;
-            value = key;
-          }
-        ]
-        ++ map (a: {
-          name = a;
-          value = key;
-        }) val
-      else if isString val then
-        [
-          {
-            name = key;
-            value = val;
-          }
-        ]
-      else
-        [ ]
-    ) (attrNames all_follow_raw)
-  );
 
   knownTypes = [
     "github"
@@ -91,8 +46,64 @@ let
   call =
     {
       overrides ? { },
+      resolverDir ? ./.,
     }:
     let
+      pins = fromTOML (readFile (resolverDir + "/pins.toml"));
+      lock = fromJSON (readFile (resolverDir + "/pins.lock.json"));
+      declared = pins.inputs or { };
+      all_follow_raw = pins.all_follow or { };
+      # tackOverrides carries this reserved entry across nested resolver boundaries
+      inheritedPolicy = overrides.__tack_policy or { };
+      inheritedFollows = inheritedPolicy.follows or { };
+      inheritedOmit =
+        inheritedPolicy.omit or {
+          omitted = [ ];
+          kept = [ ];
+        };
+      pinOverrides = removeAttrs overrides [ "__tack_policy" ];
+
+      all_omit_inputs =
+        if !(pins ? omit_inputs) then
+          [ ]
+        else if !isAttrs pins.omit_inputs then
+          throw "tack: omit_inputs must be a table with a names array"
+        else
+          validateInputNames {
+            value = pins.omit_inputs.names or [ ];
+            location = "omit_inputs.names";
+          };
+
+      # flatten `target = [aliases]` rows alongside `alias = "target"` rows
+      all_follow = listToAttrs (
+        concatMap (
+          key:
+          let
+            val = all_follow_raw.${key};
+          in
+          if isList val then
+            [
+              {
+                name = key;
+                value = key;
+              }
+            ]
+            ++ map (a: {
+              name = a;
+              value = key;
+            }) val
+          else if isString val then
+            [
+              {
+                name = key;
+                value = val;
+              }
+            ]
+          else
+            [ ]
+        ) (attrNames all_follow_raw)
+      );
+
       # path nodes are convenience pins, so return the live local path directly
       # because fetchTree rejects unlocked paths in pure eval
       fetchPin =
@@ -105,7 +116,7 @@ let
           in
           if (node.type or "") == "path" then
             {
-              outPath = if substring 0 1 node.path == "/" then node.path else ./. + ("/" + node.path);
+              outPath = if substring 0 1 node.path == "/" then node.path else resolverDir + ("/" + node.path);
               lastModified = node.lastModified or 0;
             }
             // (if node ? narHash then { inherit (node) narHash; } else { })
@@ -181,11 +192,13 @@ let
             global = all_follow;
             local = pin.follows or { };
             excluded = pin.exclude_follow or [ ];
+            inherited = inheritedFollows;
           };
           deep = {
             global = all_follow;
             local = { };
             excluded = pin.exclude_follow or [ ];
+            inherited = inheritedFollows;
           };
         };
 
@@ -211,8 +224,8 @@ let
         in
         builtins.deepSeq localOmitted (
           builtins.deepSeq localKept {
-            omitted = all_omit_inputs ++ localOmitted;
-            kept = localKept;
+            omitted = (inheritedOmit.omitted or [ ]) ++ all_omit_inputs ++ localOmitted;
+            kept = (inheritedOmit.kept or [ ]) ++ localKept;
           }
         );
 
@@ -288,16 +301,53 @@ let
           ) (attrNames follows)
         );
 
-      followsForSide =
+      followOverridesForSide =
         { side, policy }:
-        projectFollows {
+        resolveFollows (projectFollows {
           inherit side;
           follows = policy.global;
           excluded = policy.excluded;
-        }
+        })
         // projectFollows {
           inherit side;
+          follows = policy.inherited;
+        }
+        // resolveFollows (projectFollows {
+          inherit side;
           follows = policy.local;
+        });
+
+      scopedFollowValues =
+        side: values:
+        listToAttrs (
+          map (name: {
+            name = "${side}:${name}";
+            value = values.${name};
+          }) (attrNames values)
+        );
+
+      propagatedPolicy =
+        { omit, follows }:
+        let
+          followValues =
+            scopedFollowValues "flake" (followOverridesForSide {
+              side = "flake";
+              policy = follows;
+            })
+            // scopedFollowValues "tack" (followOverridesForSide {
+              side = "tack";
+              policy = follows;
+            });
+          active = (omit.omitted or [ ]) != [ ] || (omit.kept or [ ]) != [ ] || attrNames followValues != [ ];
+        in
+        {
+          inherit active;
+          override = {
+            __tack_policy = {
+              inherit omit;
+              follows = followValues;
+            };
+          };
         };
 
       omitOverridesFor =
@@ -318,16 +368,13 @@ let
           upLock,
           nodeName,
           rawInputs,
-          levelFollows,
+          levelOverrides,
           deepFollows,
           omit,
         }:
-        let
-          resolved = resolveFollows levelFollows;
-        in
         mapAttrs (
           n: _decl:
-          resolved.${n} or (
+          levelOverrides.${n} or (
             if
               shouldOmit {
                 inherit omit;
@@ -401,13 +448,11 @@ let
 
           # project follows onto each side, keep only names that side has
           # bare follow reaches both; `flake:`/`tack:` reaches just one
-          tackOverrides = resolveFollows (
-            intersectAttrs (upPins.inputs or { }) (followsForSide {
-              side = "tack";
-              policy = levelFollows;
-            })
-          );
-          flakeLevel = intersectAttrs (raw.inputs or { }) (followsForSide {
+          tackOverrides = intersectAttrs (upPins.inputs or { }) (followOverridesForSide {
+            side = "tack";
+            policy = levelFollows;
+          });
+          flakeLevel = intersectAttrs (raw.inputs or { }) (followOverridesForSide {
             side = "flake";
             policy = levelFollows;
           });
@@ -426,19 +471,26 @@ let
               omit
               ;
             rawInputs = raw.inputs or { };
-            levelFollows = flakeLevel;
+            levelOverrides = flakeLevel;
           };
 
           # upstream declares its outputs forward tackOverrides; a closed `{ self }:`
           # would throw on the extra kwarg, so forward only when declared
           supportsOverrides = (upPins.tack or { }).recomposable or false;
+          tackResolver = if hasTack then import (flakeDir + "/.tack") else { };
+          supportsPolicy = (tackResolver.__tack_policy_version or 0) >= 1;
 
           effectiveTackOverrides = tackOmitOverrides // tackOverrides;
+          propagated = propagatedPolicy {
+            inherit omit;
+            follows = deepFollows;
+          };
+          tackCallOverrides = effectiveTackOverrides // (if supportsPolicy then propagated.override else { });
+          hasTackOverrides = effectiveTackOverrides != { };
+          hasTackPolicy = propagated.active;
+          needsTackCall = hasTackOverrides || (hasTackPolicy && supportsPolicy);
           extraArgs =
-            if supportsOverrides && effectiveTackOverrides != { } then
-              { tackOverrides = effectiveTackOverrides; }
-            else
-              { };
+            if supportsOverrides && needsTackCall then { tackOverrides = tackCallOverrides; } else { };
 
           outputs = raw.outputs (callerInputs // extraArgs // { self = result; });
 
@@ -453,8 +505,10 @@ let
                   ;
               };
             in
-            if hasTack && effectiveTackOverrides != { } && !supportsOverrides then
+            if hasTack && (hasTackOverrides || hasTackPolicy) && !supportsOverrides then
               trace "tack: ${flakeDir}: not marked recomposable (set [tack] recomposable = true); overrides will not reach upstream" base
+            else if hasTack && hasTackPolicy && !supportsPolicy then
+              trace "tack: ${flakeDir}: upstream .tack predates recursive policy support; recursive omit/follow rules will not reach it" base
             else
               base;
         in
@@ -519,31 +573,46 @@ let
           upPins = if hasTack then fromTOML (readFile tackPinsPath) else { };
           f = followsFor { inherit pin; };
           # a fetch drill-in is tack-only
-          tackOverrides = resolveFollows (
-            intersectAttrs (upPins.inputs or { }) (followsForSide {
-              side = "tack";
-              policy = f.level;
-            })
-          );
+          tackOverrides = intersectAttrs (upPins.inputs or { }) (followOverridesForSide {
+            side = "tack";
+            policy = f.level;
+          });
           tackOmitOverrides = omitOverridesFor {
             side = "tack";
             inputs = upPins.inputs or { };
             inherit omit;
           };
           effectiveTackOverrides = tackOmitOverrides // tackOverrides;
+          propagated = propagatedPolicy {
+            inherit omit;
+            follows = f.deep;
+          };
+          upstream = if hasTack then import (path + "/.tack") else { };
+          supportsPolicy = (upstream.__tack_policy_version or 0) >= 1;
+          tackCallOverrides = effectiveTackOverrides // (if supportsPolicy then propagated.override else { });
+          hasTackOverrides = effectiveTackOverrides != { };
+          hasTackPolicy = propagated.active;
+          needsTackCall = hasTackOverrides || (hasTackPolicy && supportsPolicy);
         in
         # a fetch pin is a source tree (path)
-        # hand back resolved inputs only when there are overrides to push into the upstream's .tack
+        # hand back resolved inputs when overrides or recursive policy reach the upstream's .tack
         builtins.seq omit (
-          if hasTack && effectiveTackOverrides != { } then
-            let
-              upstream = import (path + "/.tack");
-            in
+          if hasTack && needsTackCall then
             # old resolvers return a plain attrset, not a callable functor
             if upstream ? __functor then
-              (upstream { overrides = effectiveTackOverrides; }) // { outPath = path; }
+              let
+                resolved = (upstream { overrides = tackCallOverrides; }) // {
+                  outPath = path;
+                };
+              in
+              if hasTackPolicy && !supportsPolicy then
+                trace "tack: ${path}: upstream .tack predates recursive policy support; recursive omit/follow rules will not reach it" resolved
+              else
+                resolved
             else
               trace "tack: ${path}: upstream .tack predates override support; overrides will not reach it" path
+          else if hasTack && hasTackPolicy && !supportsPolicy then
+            trace "tack: ${path}: upstream .tack predates recursive policy support; recursive omit/follow rules will not reach it" path
           else
             path
         );
@@ -615,8 +684,14 @@ let
             value = autoPin name;
           }) autoNames
         )
-        // overrides;
+        // pinOverrides;
     in
-    builtins.seq all_omit_inputs (self // { __functor = _: call; });
+    builtins.seq all_omit_inputs (
+      self
+      // {
+        __functor = _: call;
+        __tack_policy_version = 1;
+      }
+    );
 in
 call { }
