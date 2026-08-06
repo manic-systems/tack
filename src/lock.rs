@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
+    iter::once,
     path::Path,
 };
 
@@ -140,12 +144,222 @@ impl FlakeLock {
             Some((name.as_str(), node.locked.as_ref()?))
         })
     }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by the follow-up graph traversal")
+    )]
+    pub fn root_name(&self) -> &str {
+        &self.root
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by the follow-up graph traversal")
+    )]
+    pub fn root(&self) -> Option<&FlakeNode> {
+        self.node(&self.root)
+    }
+
+    pub fn node(&self, name: &str) -> Option<&FlakeNode> {
+        self.nodes.get(name)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by the follow-up graph traversal")
+    )]
+    pub fn resolve_input_ref(
+        &self,
+        input_ref: &FlakeInputRef,
+    ) -> Result<(&str, &FlakeNode), FlakeLockError> {
+        self.resolve_input_ref_inner(input_ref, &mut ResolutionState::default())
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "kept for graph API completeness; exercised in tests"
+        )
+    )]
+    pub fn resolve_follows_path(
+        &self,
+        path: &[String],
+    ) -> Result<(&str, &FlakeNode), FlakeLockError> {
+        self.resolve_follows_path_inner(path, &mut ResolutionState::default())
+    }
+
+    fn resolve_input_ref_inner(
+        &self,
+        input_ref: &FlakeInputRef,
+        state: &mut ResolutionState,
+    ) -> Result<(&str, &FlakeNode), FlakeLockError> {
+        match *input_ref {
+            FlakeInputRef::Node(ref target_name) => {
+                self.nodes
+                    .get_key_value(target_name)
+                    .map(|(stored_name, node)| (stored_name.as_str(), node))
+                    .ok_or_else(|| {
+                        FlakeLockError::MissingNode {
+                            name: target_name.clone(),
+                        }
+                    })
+            },
+            FlakeInputRef::Follows(ref path) => self.resolve_follows_path_inner(path, state),
+        }
+    }
+
+    fn resolve_follows_path_inner(
+        &self,
+        path: &[String],
+        state: &mut ResolutionState,
+    ) -> Result<(&str, &FlakeNode), FlakeLockError> {
+        if path.is_empty() {
+            return Err(FlakeLockError::EmptyFollowsPath);
+        }
+
+        let (mut node_name, mut node) = self
+            .nodes
+            .get_key_value(&self.root)
+            .map(|(name, node)| (name.as_str(), node))
+            .ok_or_else(|| {
+                FlakeLockError::MissingRoot {
+                    name: self.root.clone(),
+                }
+            })?;
+
+        for input_name in path {
+            let edge = InputEdge {
+                node:  node_name.to_owned(),
+                input: input_name.clone(),
+            };
+            state.enter(edge.clone())?;
+
+            let input_ref = node.inputs.get(input_name).ok_or_else(|| {
+                FlakeLockError::MissingInput {
+                    node:  node_name.to_owned(),
+                    input: input_name.clone(),
+                }
+            });
+            let resolved =
+                input_ref.and_then(|reference| self.resolve_input_ref_inner(reference, state));
+            state.leave(&edge);
+
+            (node_name, node) = resolved?;
+        }
+
+        Ok((node_name, node))
+    }
 }
 
 #[derive(Debug, Deserialize)]
-struct FlakeNode {
+pub struct FlakeNode {
     #[serde(default, deserialize_with = "deserialize_locked_node")]
     locked: Option<LockedNode>,
+    #[serde(default)]
+    inputs: BTreeMap<String, FlakeInputRef>,
+}
+
+impl FlakeNode {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by the follow-up graph traversal")
+    )]
+    pub const fn locked(&self) -> Option<&LockedNode> {
+        self.locked.as_ref()
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "kept for graph API completeness; exercised in tests"
+        )
+    )]
+    pub fn input(&self, name: &str) -> Option<&FlakeInputRef> {
+        self.inputs.get(name)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by the follow-up graph traversal")
+    )]
+    pub fn inputs(&self) -> impl Iterator<Item = (&str, &FlakeInputRef)> {
+        self.inputs
+            .iter()
+            .map(|(name, input_ref)| (name.as_str(), input_ref))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum FlakeInputRef {
+    Node(String),
+    Follows(Vec<String>),
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum FlakeLockError {
+    #[error("flake lock root node '{name}' does not exist")]
+    MissingRoot { name: String },
+    #[error("flake lock node '{name}' does not exist")]
+    MissingNode { name: String },
+    #[error("flake lock node '{node}' has no input '{input}'")]
+    MissingInput { node: String, input: String },
+    #[error("flake lock follows path cannot be empty")]
+    EmptyFollowsPath,
+    #[error("cycle while resolving flake lock follows: {path}")]
+    FollowsCycle { path: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct InputEdge {
+    node:  String,
+    input: String,
+}
+
+impl InputEdge {
+    fn display(&self) -> String {
+        format!("{}.{}", self.node, self.input)
+    }
+}
+
+#[derive(Default)]
+struct ResolutionState {
+    active: BTreeSet<InputEdge>,
+    stack:  Vec<InputEdge>,
+}
+
+impl ResolutionState {
+    fn enter(&mut self, edge: InputEdge) -> Result<(), FlakeLockError> {
+        if !self.active.insert(edge.clone()) {
+            let cycle_start = self
+                .stack
+                .iter()
+                .position(|active| active == &edge)
+                .unwrap_or(0);
+            let path = self.stack[cycle_start..]
+                .iter()
+                .chain(once(&edge))
+                .map(InputEdge::display)
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            return Err(FlakeLockError::FollowsCycle { path });
+        }
+        self.stack.push(edge);
+        Ok(())
+    }
+
+    fn leave(&mut self, edge: &InputEdge) {
+        let popped = self.stack.pop();
+        debug_assert_eq!(
+            popped.as_ref(),
+            Some(edge),
+            "follows resolution stack must unwind in order"
+        );
+        self.active.remove(edge);
+    }
 }
 
 type ExtraFields = BTreeMap<String, Value>;
