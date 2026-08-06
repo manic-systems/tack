@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: EUPL-1.2
+
+[tack]
+recomposable = true
+
+[omit_inputs]
+names = [ "scoped" ]
+
+[inputs.mid]
+follows     = { dep = "other" }
+keep_inputs = [ "drop" ]
+type        = "fetch"
+url         = "path:../../level2"
+
+[inputs.immediate]
+type = "fetch"
+url  = "path:../../original"
+
+[inputs.other]
+type = "fetch"
+url  = "path:../../original"
+
+[inputs.drop]
+type = "fetch"
+url  = "path:../../original"

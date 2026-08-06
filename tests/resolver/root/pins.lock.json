@@ -1,0 +1,26 @@
+{
+  "replacement": {
+    "type": "path",
+    "path": "../replacement"
+  },
+  "top": {
+    "type": "path",
+    "path": "../level1"
+  },
+  "topflake": {
+    "type": "path",
+    "path": "../level-flake"
+  },
+  "dupfollow": {
+    "type": "path",
+    "path": "../original"
+  },
+  "badexclude": {
+    "type": "path",
+    "path": "../original"
+  },
+  "badlocal": {
+    "type": "path",
+    "path": "../original"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "mid": {
+    "type": "path",
+    "path": "../../level2"
+  },
+  "drop": {
+    "type": "path",
+    "path": "../../original"
+  }
+}

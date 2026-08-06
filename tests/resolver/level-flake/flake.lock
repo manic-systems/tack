@@ -1,0 +1,10 @@
+{
+  "root": "root",
+  "nodes": {
+    "root": {
+      "inputs": {
+        "scoped": "missing"
+      }
+    }
+  }
+}

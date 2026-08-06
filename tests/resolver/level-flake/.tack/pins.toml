@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: EUPL-1.2
+
+[tack]
+recomposable = true
+
+[inputs.mid]
+type = "fetch"
+url  = "path:../../level2"
+
+[inputs.drop]
+type = "fetch"
+url  = "path:../../original"

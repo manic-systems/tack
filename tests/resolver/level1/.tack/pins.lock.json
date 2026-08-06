@@ -1,0 +1,18 @@
+{
+  "mid": {
+    "type": "path",
+    "path": "../../level2"
+  },
+  "immediate": {
+    "type": "path",
+    "path": "../../original"
+  },
+  "other": {
+    "type": "path",
+    "path": "../../original"
+  },
+  "drop": {
+    "type": "path",
+    "path": "../../original"
+  }
+}

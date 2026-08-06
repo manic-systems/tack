@@ -1,0 +1,22 @@
+{
+  "dep": {
+    "type": "path",
+    "path": "../../original"
+  },
+  "drop": {
+    "type": "path",
+    "path": "../../original"
+  },
+  "keepme": {
+    "type": "path",
+    "path": "../../original"
+  },
+  "scoped": {
+    "type": "path",
+    "path": "../../original"
+  },
+  "immediate": {
+    "type": "path",
+    "path": "../../original"
+  }
+}

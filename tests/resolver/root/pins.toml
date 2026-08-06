@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: EUPL-1.2
+
+[all_follow]
+dep = "replacement"
+
+[omit_inputs]
+names = [ "drop", "dep", "keepme", "flake:scoped" ]
+
+[inputs.replacement]
+type = "fetch"
+url  = "path:../replacement"
+
+[inputs.top]
+follows     = { immediate = "replacement" }
+keep_inputs = [ "keepme", "scoped" ]
+type        = "fetch"
+url         = "path:../level1"
+
+[inputs.topflake]
+url = "path:../level-flake"
+
+[inputs.badlocal]
+omit_inputs = "drop"
+type        = "fetch"
+url         = "path:../original"
+
+[inputs.dupfollow]
+follows = { "flake:value" = "replacement", value = "replacement" }
+type    = "fetch"
+url     = "path:../original"
+
+[inputs.badexclude]
+exclude_follow = "dep"
+type           = "fetch"
+url            = "path:../original"
