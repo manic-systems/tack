@@ -310,7 +310,13 @@ impl ScanDocuments {
         let tlock = self.parse_tack_lock(path, diagnostics);
         let tshort = doc.shorturls();
         for tinp in &tinputs {
-            let expanded = tshort.expand(&tinp.url);
+            let expanded = match tshort.expand(&tinp.url) {
+                Ok(expanded) => expanded,
+                Err(err) => {
+                    diagnostics.push(ScanDiagnostic::config(path, ScanFile::TackPins, err));
+                    continue;
+                },
+            };
             Self::record_tack_finding(path, tinp, &expanded, &tlock, findings);
             Self::queue_tack_transitive(path, tinp, expanded, &tlock, transitive);
         }

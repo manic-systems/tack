@@ -109,7 +109,7 @@ fn dedup_report_inner(project: &Project, emit_diagnostics: bool) -> Result<Dedup
     let mut groups = BTreeMap::<SourceId, Vec<Entry>>::new();
 
     for inp in &inputs {
-        let expanded = shorturls.expand(&inp.url);
+        let expanded = shorturls.expand(&inp.url)?;
         if let Some(id) = SourceId::from_url(&expanded) {
             let rev = top_revs.get(&inp.name).cloned().unwrap_or_default();
             let lm = lock.get(&inp.name).and_then(LockedNode::last_modified);

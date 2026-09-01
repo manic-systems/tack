@@ -96,13 +96,18 @@ type = "fixed"
 ## shorturls
 
 `scheme:rest` expands by substituting `rest` into the template `{path}`
+and repeats until the scheme has no alias. cycles are rejected.
 
 ```toml
 [shorturls]
 gh = "github:{path}"
+manic = "gh:manic-systems/{path}"
 
 [inputs.coolproject]
 url = "gh:owner/coolproject"
+
+[inputs.tack]
+url = "manic:tack"
 ```
 
 ## follows

@@ -289,15 +289,21 @@ pub(super) fn update(
     if selected.is_empty() {
         return Ok(UpdateReport::default());
     }
+    let jobs = selected
+        .iter()
+        .map(|input| {
+            shorturls
+                .expand(&input.url)
+                .map(|expanded| (*input, expanded))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut lock = project.load_lock()?;
     progress.begin(&pin_names(&selected));
 
     let session = CompareSession::new();
-    let resolution_jobs = selected.clone();
-    let resolutions = dispatcher::ordered(resolution_jobs, UPDATE_IN_FLIGHT, |index, input| {
+    let resolutions = dispatcher::ordered(jobs, UPDATE_IN_FLIGHT, |index, (input, url)| {
         progress.fetching(index);
-        let localized =
-            source::localize_path_url_with_warning(&shorturls.expand(&input.url), project.dir());
+        let localized = source::localize_path_url_with_warning(&url, project.dir());
         let old = lock.get(&input.name);
         let resolution = classify(
             input,
@@ -418,15 +424,21 @@ pub(super) fn look(
     if selected.is_empty() {
         return Ok(LookReport::default());
     }
+    let jobs = selected
+        .iter()
+        .map(|input| {
+            shorturls
+                .expand(&input.url)
+                .map(|expanded| (*input, expanded))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let lock = project.load_lock()?;
     progress.begin(&pin_names(&selected));
 
     let session = CompareSession::new();
-    let look_jobs = selected.clone();
-    let look_results = dispatcher::ordered(look_jobs, LOOK_IN_FLIGHT, |index, input| {
+    let look_results = dispatcher::ordered(jobs, LOOK_IN_FLIGHT, |index, (input, url)| {
         progress.fetching(index);
-        let localized =
-            source::localize_path_url_with_warning(&shorturls.expand(&input.url), project.dir());
+        let localized = source::localize_path_url_with_warning(&url, project.dir());
         let old = lock
             .get(&input.name)
             .and_then(LockedNode::resolved_identity)

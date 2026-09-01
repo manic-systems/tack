@@ -37,6 +37,7 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
     if doc.has_input(name) {
         user_bail!("input '{name}' already exists");
     }
+    let expanded = doc.shorturls().expand(url)?;
     doc.add_input(name, url, &pins::AddInputOpts {
         pin_type,
         unpack,
@@ -46,13 +47,11 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
     });
     project.save_pins(&doc)?;
 
-    let shorturls = doc.shorturls();
-    let localized = source::localize_path_url_with_warning(&shorturls.expand(url), project.dir());
+    let localized = source::localize_path_url_with_warning(&expanded, project.dir());
     if let Some(warning) = localized.warning {
         eprintln!("tack: {warning}");
     }
-    let expanded = localized.url;
-    let fetched = update::fetch_input(pin_type, unpack, submodules, &expanded);
+    let fetched = update::fetch_input(pin_type, unpack, submodules, &localized.url);
     match fetched {
         Ok(fetched_pin) => {
             let (node, identity) = fetched_pin.into_parts();
