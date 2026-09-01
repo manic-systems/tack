@@ -101,7 +101,7 @@ impl HttpClient {
         request.header(CONTENT_TYPE, APPLICATION_JSON)
     }
 
-    fn with_github_credential<B>(
+    pub(super) fn with_github_credential<B>(
         request: RequestBuilder<B>,
         credential: Credential,
     ) -> RequestBuilder<B> {

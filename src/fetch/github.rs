@@ -8,10 +8,7 @@ use std::{
     time::Duration,
 };
 
-use eyre::{
-    Result,
-    WrapErr as _,
-};
+use eyre::Result;
 use serde::{
     Deserialize,
     Serialize,
@@ -25,6 +22,7 @@ use super::{
         TarFormat,
         unpack_tar_stream,
     },
+    auth::with_credential_fallback,
     http::HttpClient,
     time::epoch_from_iso,
     topology::CompareStatus,
@@ -132,12 +130,18 @@ impl GithubClient {
 
     fn download_tarball(self, owner: &str, repo: &str, rev: &str, into: &Path) -> Result<PathBuf> {
         let url = format!("https://codeload.github.com/{owner}/{repo}/tar.gz/{rev}");
-        let mut resp = self
-            .http
-            .get(&url)
-            .call()
-            .wrap_err_with(|| format!("download {url}"))?;
-        unpack_tar_stream(resp.body_mut().as_reader(), TarFormat::Gz, into)
+        with_credential_fallback("github.com", true, |credential| {
+            let request = HttpClient::with_github_credential(self.http.get(&url), credential);
+            let mut resp = request
+                .call()
+                .map_err(|err| FetchError::from_ureq(err, &url))?;
+            if resp.status() != 200 {
+                return Err(FetchError::from_response(&mut resp, &url));
+            }
+            unpack_tar_stream(resp.body_mut().as_reader(), TarFormat::Gz, into)
+                .map_err(|err| FetchError::Transport(format!("download {url}: {err}")))
+        })
+        .map_err(|err| eyre::eyre!("download {url}: {err}"))
     }
 }
 
