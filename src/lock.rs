@@ -483,7 +483,11 @@ impl LockedNode {
             Self::Github { rev, .. } | Self::Gitlab { rev, .. } | Self::Git { rev, .. } => {
                 rev.as_deref().map(LockIdentity::Rev)
             },
-            Self::Tarball { url, .. } => Some(LockIdentity::ImmutableUrl(url)),
+            Self::Tarball { url, rev, .. } => {
+                rev.as_deref()
+                    .map(LockIdentity::Rev)
+                    .or(Some(LockIdentity::ImmutableUrl(url)))
+            },
             Self::Fixed { url, sha256, .. } => {
                 url.as_deref()
                     .map(LockIdentity::SourceUrl)
