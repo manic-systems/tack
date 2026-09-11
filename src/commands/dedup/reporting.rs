@@ -10,7 +10,7 @@ use super::{
     compare::{
         classify,
         comparator,
-        entry_compare_rev,
+        entry_value,
         group_diverges,
         rev_last_modified,
     },
@@ -33,7 +33,7 @@ type SourcesByRev<'a> = BTreeMap<&'a str, BTreeMap<&'a str, Vec<Vec<String>>>>;
 fn group_sources_by_rev(entries: &[Entry]) -> SourcesByRev<'_> {
     let mut by_rev = BTreeMap::<&str, BTreeMap<&str, Vec<Vec<String>>>>::new();
     for entry in entries {
-        let names = by_rev.entry(entry_compare_rev(entry)).or_default();
+        let names = by_rev.entry(entry_value(entry)).or_default();
         names
             .entry(entry.name.as_str())
             .or_default()

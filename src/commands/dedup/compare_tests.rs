@@ -10,11 +10,14 @@ use super::{
     classify,
     comparator,
     compare_jobs,
+    entry_value,
     rev_last_modified,
 };
 use crate::{
     commands::dedup::model::{
         Entry,
+        Identity,
+        IdentityKind,
         Side,
     },
     fetch::CompareStatus,
@@ -27,7 +30,10 @@ fn entry(path: &[&str], name: &str, rev: &str, lm: Option<u64>) -> Entry {
         path: path.iter().map(|item| (*item).to_owned()).collect(),
         name: name.to_owned(),
         side: Side::Flake,
-        rev: rev.to_owned(),
+        identity: Some(Identity {
+            kind:  IdentityKind::Rev,
+            value: rev.to_owned(),
+        }),
         lm,
     }
 }
@@ -64,7 +70,7 @@ fn comparator_prefers_top_level_pin_over_newer_transitive() {
     let entries = vec![declared, transitive];
 
     let chosen = comparator(&entries).unwrap();
-    assert_eq!(chosen.rev, "rev-declared");
+    assert_eq!(entry_value(chosen), "rev-declared");
 }
 
 #[test]

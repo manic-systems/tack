@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use super::model::{
     Entry,
+    Identity,
     Side,
 };
 use crate::{
@@ -17,7 +18,7 @@ fn follow_target(
     side: Side,
     top_input: Option<&pins::Input>,
     all_follow: &BTreeMap<String, String>,
-    top_revs: &BTreeMap<String, String>,
+    top_revs: &BTreeMap<String, Identity>,
 ) -> Option<String> {
     if path.is_empty() {
         return None;
@@ -44,7 +45,7 @@ pub(super) fn apply_follows(
     groups: &mut BTreeMap<SourceId, Vec<Entry>>,
     by_name: &BTreeMap<&str, &pins::Input>,
     all_follow: &BTreeMap<String, String>,
-    top_revs: &BTreeMap<String, String>,
+    top_revs: &BTreeMap<String, Identity>,
     top_lms: &BTreeMap<String, u64>,
 ) {
     for entry in groups.values_mut().flatten() {
@@ -62,8 +63,8 @@ pub(super) fn apply_follows(
         ) else {
             continue;
         };
-        if let Some(rev) = top_revs.get(&target) {
-            entry.rev.clone_from(rev);
+        if let Some(identity) = top_revs.get(&target) {
+            entry.identity = Some(identity.clone());
         }
         entry.lm = top_lms.get(&target).copied();
     }

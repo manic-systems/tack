@@ -9,7 +9,11 @@ use std::{
     },
 };
 
-use super::model::Entry;
+use super::model::{
+    Entry,
+    Identity,
+    IdentityKind,
+};
 use crate::{
     fetch::{
         CompareStatus,
@@ -48,14 +52,28 @@ pub(super) fn comparator(entries: &[Entry]) -> Option<&Entry> {
         .or_else(|| entries.iter().min_by_key(|entry| entry.name.as_str()))
 }
 
+/// only same-kind identities differ meaningfully, a tarball that recorded a rev
+/// and one that recorded only its url are one pin at two levels of detail
 pub(super) fn group_diverges(entries: &[Entry]) -> bool {
-    let mut revs = entries.iter().map(entry_compare_rev);
-    revs.next()
-        .is_some_and(|first| revs.any(|rev| rev != first))
+    let mut seen = HashMap::<IdentityKind, &str>::new();
+    entries
+        .iter()
+        .filter_map(|entry| entry.identity.as_ref())
+        .any(|identity| {
+            seen.insert(identity.kind, identity.value.as_str())
+                .is_some_and(|previous| previous != identity.value)
+        })
 }
 
-pub(super) const fn entry_compare_rev(entry: &Entry) -> &str {
-    entry.rev.as_str()
+pub(super) fn entry_value(entry: &Entry) -> &str {
+    entry
+        .identity
+        .as_ref()
+        .map_or("", |identity| identity.value.as_str())
+}
+
+fn entry_rev(entry: &Entry) -> Option<&str> {
+    entry.identity.as_ref().and_then(Identity::rev)
 }
 
 pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<CompareWork>, usize) {
@@ -64,22 +82,20 @@ pub(super) fn compare_jobs(groups: &BTreeMap<SourceId, Vec<Entry>>) -> (Vec<Comp
         .filter(|group| group_diverges(group.1))
         .filter_map(|(id, entries)| {
             let base = comparator(entries)?;
-            if base.rev.is_empty() || CompareSource::from_source_id(id).is_none() {
-                return None;
-            }
+            let base_rev = entry_rev(base)?;
+            CompareSource::from_source_id(id)?;
             let mut seen = HashSet::new();
             let heads = entries
                 .iter()
-                .filter(|entry| {
-                    entry.rev != base.rev
-                        && !entry.rev.is_empty()
-                        && seen.insert(entry.rev.as_str())
-                })
                 .filter_map(|entry| {
-                    PlannerCompareJob::from_source_id(id, &base.rev, &entry.rev).map(|job| {
+                    let head = entry_rev(entry)?;
+                    if head == base_rev || !seen.insert(head) {
+                        return None;
+                    }
+                    PlannerCompareJob::from_source_id(id, base_rev, head).map(|job| {
                         CompareWork {
                             id: id.clone(),
-                            head: entry.rev.clone(),
+                            head: head.to_owned(),
                             job,
                         }
                     })
@@ -137,7 +153,7 @@ pub(super) fn rev_last_modified(entries: &[Entry]) -> BTreeMap<&str, u64> {
         let Some(lm) = entry.lm else {
             continue;
         };
-        let slot = lm_of.entry(entry_compare_rev(entry)).or_insert(lm);
+        let slot = lm_of.entry(entry_value(entry)).or_insert(lm);
         *slot = (*slot).max(lm);
     }
     lm_of
@@ -153,7 +169,7 @@ pub(super) fn classify(
     let Some(comp) = comparator else {
         return Mark::Unknown;
     };
-    if rev == entry_compare_rev(comp) {
+    if rev == entry_value(comp) {
         return Mark::Base;
     }
     if let Some(status) = compares.get(id).and_then(|revs| revs.get(rev)) {
