@@ -15,6 +15,7 @@ use super::{
     super::tolerate,
     model::{
         Entry,
+        Identity,
         Side,
     },
 };
@@ -269,14 +270,11 @@ impl ScanDocuments {
                 findings.push(Finding {
                     identity: id,
                     entry:    Entry {
-                        path: path.to_vec(),
-                        name: strip_disambiguator(key).to_owned(),
-                        side: Side::Flake,
-                        rev:  locked
-                            .source_identity()
-                            .map(LockIdentity::into_string)
-                            .unwrap_or_default(),
-                        lm:   locked.last_modified(),
+                        path:     path.to_vec(),
+                        name:     strip_disambiguator(key).to_owned(),
+                        side:     Side::Flake,
+                        identity: locked.source_identity().map(Identity::from_lock),
+                        lm:       locked.last_modified(),
                     },
                 });
             }
@@ -351,13 +349,13 @@ impl ScanDocuments {
             findings.push(Finding {
                 identity: id,
                 entry:    Entry {
-                    path: path.to_vec(),
-                    name: input.name.clone(),
-                    side: Side::Tack,
-                    rev:  node
-                        .and_then(|n| n.source_identity().map(LockIdentity::into_string))
-                        .unwrap_or_default(),
-                    lm:   node.and_then(LockedNode::last_modified),
+                    path:     path.to_vec(),
+                    name:     input.name.clone(),
+                    side:     Side::Tack,
+                    identity: node
+                        .and_then(LockedNode::source_identity)
+                        .map(Identity::from_lock),
+                    lm:       node.and_then(LockedNode::last_modified),
                 },
             });
         }

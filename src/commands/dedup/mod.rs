@@ -29,6 +29,7 @@ use self::{
     follows::apply_follows,
     model::{
         Entry,
+        Identity,
         Side,
     },
     reporting::build_report,
@@ -41,7 +42,6 @@ use crate::{
     dispatcher,
     lock::{
         LockFile,
-        LockIdentity,
         LockedNode,
     },
     pins::{
@@ -102,7 +102,7 @@ fn dedup_report_inner(project: &Project, emit_diagnostics: bool) -> Result<Dedup
         .collect::<BTreeMap<&str, &pins::Input>>();
 
     let top_revs = top_map(&inputs, &lock, |n| {
-        n.source_identity().map(LockIdentity::into_string)
+        n.source_identity().map(Identity::from_lock)
     });
     let top_lms = top_map(&inputs, &lock, LockedNode::last_modified);
 
@@ -111,13 +111,13 @@ fn dedup_report_inner(project: &Project, emit_diagnostics: bool) -> Result<Dedup
     for inp in &inputs {
         let expanded = shorturls.expand(&inp.url)?;
         if let Some(id) = SourceId::from_url(&expanded) {
-            let rev = top_revs.get(&inp.name).cloned().unwrap_or_default();
+            let identity = top_revs.get(&inp.name).cloned();
             let lm = lock.get(&inp.name).and_then(LockedNode::last_modified);
             groups.entry(id).or_default().push(Entry {
                 path: vec![],
                 name: inp.name.clone(),
                 side: Side::Flake,
-                rev,
+                identity,
                 lm,
             });
         }

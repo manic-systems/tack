@@ -37,7 +37,14 @@ fn scan_records_gitlab_locked_nodes() {
         finding.identity.to_string(),
         "gitlab:gitlab.example.com:8443/group/sub/repo"
     );
-    assert_eq!(finding.entry.rev, "abc123");
+    assert_eq!(
+        finding
+            .entry
+            .identity
+            .as_ref()
+            .map(|identity| identity.value.as_str()),
+        Some("abc123")
+    );
     assert_eq!(finding.entry.lm, Some(1_700));
 }
 
