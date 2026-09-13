@@ -45,6 +45,7 @@ pub(super) fn convert(project: &Project, flake_path: &Path) -> Result<usize> {
             dir:        input.dir.as_deref(),
             submodules: input.submodules.unwrap_or(false),
             follows:    &follows,
+            impure:     false,
         });
         added += 1;
     }

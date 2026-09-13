@@ -151,6 +151,7 @@ pub struct Input {
     pub excludes:    BTreeSet<String>,
     pub omit_inputs: BTreeSet<String>,
     pub keep_inputs: BTreeSet<String>,
+    pub impure:      bool,
 }
 
 impl Input {
@@ -218,6 +219,7 @@ impl Input {
             excludes,
             omit_inputs,
             keep_inputs,
+            impure: entry.get("impure").and_then(Item::as_bool).unwrap_or(false),
         })
     }
 }
@@ -273,11 +275,16 @@ impl PinsDoc {
 
     pub fn inputs(&self) -> Result<Vec<Input>> {
         let mut out = Vec::new();
+        let shorturls = self.shorturls();
         let Some(table) = self.doc.get("inputs").and_then(Item::as_table) else {
             return Ok(out);
         };
         for (name, item) in table {
-            out.push(Input::from_item(name, item)?);
+            let input = Input::from_item(name, item)?;
+            if input.impure && !shorturls.expand(&input.url).starts_with("path:") {
+                user_bail!("input '{name}': impure is only valid for path pins");
+            }
+            out.push(input);
         }
         Ok(out)
     }
@@ -445,6 +452,7 @@ pub struct AddInputOpts<'a> {
     pub unpack:     Option<Unpack>,
     pub dir:        Option<&'a str>,
     pub submodules: bool,
+    pub impure:     bool,
     pub follows:    &'a [(String, String)],
 }
 
@@ -464,6 +472,9 @@ impl AddInputOpts<'_> {
         }
         if self.submodules {
             entry.insert("submodules", value(true));
+        }
+        if self.impure {
+            entry.insert("impure", value(true));
         }
         if !self.follows.is_empty() {
             let mut follows_tbl = Table::new();

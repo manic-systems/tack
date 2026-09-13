@@ -50,7 +50,7 @@ tack init [--force] [--resolver] [--flake]
                                       --flake also a wired flake.nix)
 tack update [names...] [--accept]    fetch latest, rewrite lock
 tack look [names...] [--verbose|-v]  report pins with newer upstream revs
-tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
+tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]] [--impure]
                       [--dir <d>] [--submodules] [--follows c=p]...
 tack rm <name>
 tack alias <name> <template>         define a shorturl scheme
@@ -84,9 +84,14 @@ type = "fixed"
 - `github:owner/repo[/ref]` tarball via codeload
 - `git+https://...` / `git+ssh://...` any git remote; `?ref=<branch>` /
   `?rev=<sha>` to pin, `submodules = true` to recurse
-- `path:/absolute/local/tree` or `path:./relative/tree` local convenience pins;
-  tack tracks absolute paths with a fast metadata fingerprint instead of
-  content-hashing them on every update
+- `path:/absolute/local/tree` or `path:./relative/tree` local path pins;
+  tack hashes them into the Nix store by default for pure evaluation. set
+  `impure = true` to keep a live working-tree path and track it with a fast
+  metadata fingerprint
+
+Path pins created before this setting was introduced keep their live behavior
+until `tack update` rewrites their lock entry. Pure path pins are copied into
+the store and change only after an update records a new hash.
 - `https://...` / `http://...` raw tarball, where the format is inferred
   from the extension (e.g. `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`,
   `.tar.zst`/`.tzst`).

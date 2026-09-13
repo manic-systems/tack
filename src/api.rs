@@ -120,6 +120,7 @@ impl<'a> Tack<'a> {
                 unpack,
                 dir,
                 submodules,
+                impure,
                 follows,
             } => {
                 let recorded = self.recorded(&label, || {
@@ -130,6 +131,7 @@ impl<'a> Tack<'a> {
                         unpack,
                         dir: dir.as_deref(),
                         submodules,
+                        impure,
                         follows: &follows,
                     })
                 })?;

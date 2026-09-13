@@ -281,7 +281,7 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
     }
 }
 
-pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
+pub fn fetch_pin(source: &Source, submodules: bool, impure: bool) -> Result<FetchedPin> {
     let resolved = downgrade_forge_for_submodules(source, submodules);
     match *resolved {
         Source::Github {
@@ -332,25 +332,33 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
             );
             Ok(FetchedPin::immutable_url(node, immutable_url))
         },
-        Source::Path { ref path } => {
-            let target = Path::new(path);
-            let Some(fingerprint) = target
-                .is_absolute()
-                .then(|| path_fingerprint(target))
-                .transpose()
-                .wrap_err_with(|| format!("stat path pin {path}"))?
-            else {
-                return Ok(FetchedPin::path(
-                    LockedNode::new_path(path.clone(), None),
-                    path.clone(),
-                ));
-            };
-            let identity = path_fingerprint_identity(path, fingerprint);
-            Ok(FetchedPin::path(
-                LockedNode::new_path_with_fingerprint(path.clone(), fingerprint),
-                identity,
-            ))
-        },
+        Source::Path { ref path } => path_pin(path, impure),
+    }
+}
+
+fn path_pin(path: &str, impure: bool) -> Result<FetchedPin> {
+    let target = Path::new(path);
+    if !target.is_absolute() {
+        return Ok(FetchedPin::path(
+            LockedNode::new_path(path.to_owned(), None),
+            path.to_owned(),
+        ));
+    }
+
+    if impure {
+        let fingerprint =
+            path_fingerprint(target).wrap_err_with(|| format!("stat path pin {path}"))?;
+        let identity = path_fingerprint_identity(path, fingerprint);
+        Ok(FetchedPin::path(
+            LockedNode::new_path_with_fingerprint(path.to_owned(), fingerprint),
+            identity,
+        ))
+    } else {
+        let nar_hash = nar::hash_path(target).wrap_err_with(|| format!("hash path pin {path}"))?;
+        Ok(FetchedPin::path(
+            LockedNode::new_path(path.to_owned(), Some(nar_hash)),
+            path.to_owned(),
+        ))
     }
 }
 

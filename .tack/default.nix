@@ -104,8 +104,7 @@ let
         ) (attrNames all_follow_raw)
       );
 
-      # path nodes are convenience pins, so return the live local path directly
-      # because fetchTree rejects unlocked paths in pure eval
+      # hashed path nodes use the store, while legacy or impure nodes stay live
       fetchPin =
         name:
         if !(lock ? ${name}) then
@@ -114,12 +113,20 @@ let
           let
             node = lock.${name};
           in
-          if (node.type or "") == "path" then
+          if
+            (node.type or "") == "path" && !((declared.${name} or { }).impure or false) && node ? narHash
+          then
+            fetchTree (
+              node
+              // {
+                path = if substring 0 1 node.path == "/" then node.path else resolverDir + ("/" + node.path);
+              }
+            )
+          else if (node.type or "") == "path" then
             {
               outPath = if substring 0 1 node.path == "/" then node.path else resolverDir + ("/" + node.path);
               lastModified = node.lastModified or 0;
             }
-            // (if node ? narHash then { inherit (node) narHash; } else { })
           else if !(elem (node.type or "") knownTypes) then
             throw "tack: unknown lock type '${node.type or "?"}' for pin '${name}'"
           else

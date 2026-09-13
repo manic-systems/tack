@@ -28,5 +28,6 @@
 #   keep_inputs     omitted input names to allow recursively for this pin
 #   dir             subdir holding flake.nix
 #   submodules      fetch git submodules
+#   impure          path pins stay live and require impure evaluation
 #   unpack          fixed-only tarball or file
 [inputs]

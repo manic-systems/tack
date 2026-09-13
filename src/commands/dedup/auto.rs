@@ -274,9 +274,15 @@ fn restrict_to_seed_identity(observations: &mut Vec<LockObservation>) {
     };
     let reference_id = SourceId::from_locked(&seed.node);
     let reference_kind = discriminant(&seed.node);
+    let reference_path_hash = matches!(&seed.node, LockedNode::Path { .. })
+        .then(|| seed.node.hash().map(str::to_owned))
+        .flatten();
     observations.retain(|obs| {
         discriminant(&obs.node) == reference_kind
             && SourceId::from_locked(&obs.node) == reference_id
+            && reference_path_hash
+                .as_ref()
+                .is_none_or(|hashed| obs.node.hash() == Some(hashed))
     });
 }
 

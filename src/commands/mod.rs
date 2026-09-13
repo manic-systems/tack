@@ -75,6 +75,7 @@ pub struct AddRequest<'a> {
     pub unpack:     Option<Unpack>,
     pub dir:        Option<&'a str>,
     pub submodules: bool,
+    pub impure:     bool,
     pub follows:    &'a [(String, String)],
 }
 

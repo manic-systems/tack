@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use eyre::Result;
+use eyre::{
+    Result,
+    bail,
+};
 
 use super::LOG_LIMIT;
 use crate::{
@@ -70,13 +73,22 @@ pub fn fetch_input(
     pin_type: PinType,
     unpack: Option<Unpack>,
     submodules: bool,
+    impure: bool,
     expanded: &str,
 ) -> Result<FetchedPin> {
     match pin_type {
-        PinType::Fixed => fetch::fetch_fixed_pin(expanded, unpack),
+        PinType::Fixed => {
+            if impure {
+                bail!("impure is only valid for path pins");
+            }
+            fetch::fetch_fixed_pin(expanded, unpack)
+        },
         PinType::Flake | PinType::Fetch => {
             let source = expanded.parse::<Source>()?;
-            fetch::fetch_pin(&source, submodules)
+            if impure && !matches!(source, Source::Path { .. }) {
+                bail!("impure is only valid for path pins");
+            }
+            fetch::fetch_pin(&source, submodules, impure)
         },
     }
 }
@@ -116,7 +128,13 @@ fn classify(
         return unchanged(warning);
     }
 
-    let fetched = match fetch_input(input.pin_type, input.unpack, input.submodules, expanded) {
+    let fetched = match fetch_input(
+        input.pin_type,
+        input.unpack,
+        input.submodules,
+        input.impure,
+        expanded,
+    ) {
         Ok(fetched) => fetched,
         Err(err) => {
             return PinResolution {

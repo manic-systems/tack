@@ -50,6 +50,7 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
             unpack,
             dir,
             submodules,
+            impure,
             follows,
         } => {
             recorded(&project, &label, || {
@@ -60,6 +61,7 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
                     unpack,
                     dir: dir.as_deref(),
                     submodules,
+                    impure,
                     follows: &follows,
                 })
             })

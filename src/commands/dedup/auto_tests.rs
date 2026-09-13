@@ -6,7 +6,10 @@ use super::{
 };
 use crate::{
     fetch::CompareStatus,
-    lock::LockedNode,
+    lock::{
+        LockedNode,
+        PathFingerprint,
+    },
 };
 
 fn github_node_in(owner: &str, repo: &str, rev: &str) -> LockedNode {
@@ -50,4 +53,27 @@ fn restrict_to_seed_identity_drops_foreign_repositories() {
         .map(|entry| node_rev(&entry.node))
         .collect::<Vec<_>>();
     assert_eq!(revs, vec!["current", "sibling"]);
+}
+
+#[test]
+fn restrict_to_seed_identity_keeps_path_purity() {
+    let mut obs = vec![
+        LockObservation::new(
+            100,
+            LockedNode::new_path("/tmp/dep", Some("sha256-h".to_owned())),
+        ),
+        LockObservation::new(
+            900,
+            LockedNode::new_path_with_fingerprint("/tmp/dep", PathFingerprint {
+                last_modified: 1,
+                mtime_nanos:   1,
+                tree_size:     1,
+                tree_entries:  1,
+            }),
+        ),
+    ];
+    restrict_to_seed_identity(&mut obs);
+
+    assert_eq!(obs.len(), 1);
+    assert!(obs[0].node.hash().is_some());
 }

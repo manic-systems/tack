@@ -32,6 +32,7 @@ pub enum Command {
         unpack:     Option<Unpack>,
         dir:        Option<String>,
         submodules: bool,
+        impure:     bool,
         follows:    Vec<(String, String)>,
     },
     Rm {
@@ -108,6 +109,9 @@ enum Cli {
         /// fetch git submodules
         #[pound(long)]
         submodules: bool,
+        /// keep a path pin live and require impure evaluation
+        #[pound(long)]
+        impure:     bool,
         /// follows child=parent (repeatable; a bare child follows its namesake)
         #[pound(long)]
         follows:    Vec<String>,
@@ -224,6 +228,7 @@ impl From<Cli> for Command {
                 unpack,
                 dir,
                 submodules,
+                impure,
                 follows,
             } => {
                 let pin_type = if fixed {
@@ -240,6 +245,7 @@ impl From<Cli> for Command {
                     unpack,
                     dir,
                     submodules,
+                    impure,
                     follows: follows.iter().map(|rule| parse_follows(rule)).collect(),
                 }
             },

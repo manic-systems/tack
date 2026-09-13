@@ -1,7 +1,8 @@
 {
   "replacement": {
     "type": "path",
-    "path": "../replacement"
+    "path": "../replacement",
+    "narHash": "sha256-Ck/Rzv2ZHbs0hFqAC1RqSv/mS93d3VKXlAg8mXaXkb0="
   },
   "top": {
     "type": "path",

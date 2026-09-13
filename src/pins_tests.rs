@@ -151,3 +151,9 @@ fn recomposable_flag_is_read_from_the_tack_table() {
     let unwired = PinsDoc::parse("[inputs.foo]\nurl = \"github:o/foo\"\n").unwrap();
     assert!(!unwired.is_recomposable());
 }
+
+#[test]
+fn impure_is_restricted_to_path_inputs() {
+    let doc = doc("[inputs.foo]\nurl = \"github:o/foo\"\nimpure = true\n");
+    let _ = doc.inputs().unwrap_err();
+}
