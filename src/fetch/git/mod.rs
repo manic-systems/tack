@@ -2,8 +2,15 @@
 
 use std::{
     collections::BTreeSet,
-    fs,
+    fs::{
+        self,
+        Permissions,
+    },
     num::NonZeroU32,
+    os::unix::fs::{
+        PermissionsExt as _,
+        symlink,
+    },
     path::{
         Path,
         PathBuf,
@@ -16,12 +23,12 @@ use gix::{
         BStr,
         ByteSlice as _,
     },
-    index::write::Options as IndexWriteOptions,
     objs::{
         self,
         Write as _,
         tree::EntryKind,
     },
+    path::from_bstr,
     progress::Discard,
     refs::{
         store::WriteReflog,
@@ -38,9 +45,15 @@ use gix::{
     },
     submodule::config::Update as SubmoduleUpdate,
     url::Scheme,
+    validate::path::{
+        component,
+        component::{
+            Mode as ComponentMode,
+            Options as ComponentOptions,
+        },
+    },
 };
 use gix_transport::client::blocking_io::Transport;
-use gix_worktree_state::checkout::Options as CheckoutOptions;
 use misstep::{
     OptionExt as _,
     Result,
@@ -467,22 +480,45 @@ fn checkout_existing_commit(repo: &gix::Repository, rev: &str) -> Result<(String
 
 fn checkout_commit(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<()> {
     let workdir = repo.workdir().context("gix repository has no worktree")?;
-    let tree_id = commit.tree_id()?;
-    let mut index = repo.index_from_tree(&tree_id)?;
-    let opts = CheckoutOptions {
-        destination_is_initially_empty: true,
-        ..Default::default()
+    write_tree(repo, commit.tree_id()?.detach(), workdir)?;
+    // with no index written, submodule discovery reads gitlinks from HEAD's tree
+    repo.reference("HEAD", commit.id, PreviousValue::Any, "checkout")?;
+    Ok(())
+}
+
+/// writes blobs verbatim, since nix's git fetcher applies no `.gitattributes`
+/// filters and an eol-converted file yields a NAR hash nix never reproduces
+fn write_tree(repo: &gix::Repository, tree_id: gix::ObjectId, dir: &Path) -> Result<()> {
+    let options = ComponentOptions {
+        protect_windows: false,
+        protect_hfs:     cfg!(target_os = "macos"),
+        protect_ntfs:    false,
     };
-    gix_worktree_state::checkout(
-        &mut index,
-        workdir,
-        repo.objects.clone().into_arc()?,
-        &Discard,
-        &Discard,
-        &AtomicBool::new(false),
-        opts,
-    )?;
-    index.write(IndexWriteOptions::default())?;
+    for entry_result in repo.find_tree(tree_id)?.iter() {
+        let entry = entry_result?;
+        let kind = entry.kind();
+        let name = entry.filename();
+        let mode = (kind == EntryKind::Link).then_some(ComponentMode::Symlink);
+        component(name, mode, options)
+            .with_context(|| format!("unsafe path {name:?} in tree {tree_id}"))?;
+        let path = dir.join(from_bstr(name));
+        match kind {
+            EntryKind::Tree => {
+                fs::create_dir_all(&path)?;
+                write_tree(repo, entry.id().detach(), &path)?;
+            },
+            EntryKind::Blob => fs::write(&path, &repo.find_blob(entry.id())?.data)?,
+            EntryKind::BlobExecutable => {
+                fs::write(&path, &repo.find_blob(entry.id())?.data)?;
+                fs::set_permissions(&path, Permissions::from_mode(0o755))?;
+            },
+            EntryKind::Link => {
+                let target = repo.find_blob(entry.id())?;
+                symlink(from_bstr(target.data.as_bstr()), &path)?;
+            },
+            EntryKind::Commit => fs::create_dir_all(&path)?,
+        }
+    }
     Ok(())
 }
 
