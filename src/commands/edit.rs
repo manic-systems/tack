@@ -5,12 +5,12 @@ use std::path::Path;
 use misstep::Result;
 
 use super::{
-    AddRequest,
     Selection,
     select,
     update,
 };
 use crate::{
+    cli::AddArgs,
     error::user_bail,
     fetch,
     pins::{
@@ -22,16 +22,16 @@ use crate::{
     source,
 };
 
-pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
-    let AddRequest {
-        name,
-        url,
+pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
+    let AddArgs {
+        ref name,
+        ref url,
         pin_type,
         unpack,
-        dir,
+        ref dir,
         submodules,
-        follows,
-    } = request;
+        ref follows,
+    } = *args;
     if unpack.is_some() && pin_type != PinType::Fixed {
         user_bail!("--unpack is only valid with --fixed");
     }
@@ -50,7 +50,7 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
     doc.add_input(name, url, &pins::AddInputOpts {
         pin_type,
         unpack,
-        dir,
+        dir: dir.as_deref(),
         submodules,
         follows,
     });

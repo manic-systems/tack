@@ -26,15 +26,7 @@ pub enum Command {
         names:   Vec<String>,
         verbose: bool,
     },
-    Add {
-        name:       String,
-        url:        String,
-        pin_type:   PinType,
-        unpack:     Option<Unpack>,
-        dir:        Option<String>,
-        submodules: bool,
-        follows:    Vec<(String, String)>,
-    },
+    Add(AddArgs),
     Rm {
         name: String,
     },
@@ -52,6 +44,17 @@ pub enum Command {
         list: bool,
     },
     Redo,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct AddArgs {
+    pub name:       String,
+    pub url:        String,
+    pub pin_type:   PinType,
+    pub unpack:     Option<Unpack>,
+    pub dir:        Option<String>,
+    pub submodules: bool,
+    pub follows:    Vec<(String, String)>,
 }
 
 /// flake-like toml nix pins, lazily fetched and transformed
@@ -195,7 +198,7 @@ impl Command {
                 }
                 parts.join(" ")
             },
-            Self::Add { ref name, .. } => format!("add {name}"),
+            Self::Add(ref args) => format!("add {}", args.name),
             Self::SetFrozen { ref names, frozen } => {
                 let verb = if frozen { "freeze" } else { "unfreeze" };
                 format!("{verb} {}", names.join(" "))
@@ -268,7 +271,7 @@ impl From<Cli> for Command {
                 } else {
                     PinType::Flake
                 };
-                Self::Add {
+                Self::Add(AddArgs {
                     name,
                     url,
                     pin_type,
@@ -276,7 +279,7 @@ impl From<Cli> for Command {
                     dir,
                     submodules,
                     follows: follows.iter().map(|rule| parse_follows(rule)).collect(),
-                }
+                })
             },
             Cli::Rm { name } => Self::Rm { name },
             Cli::Alias { name, template, rm } => Self::Alias { name, template, rm },

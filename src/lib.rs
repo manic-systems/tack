@@ -27,11 +27,11 @@ pub use api::{
     CommandStatus,
     Tack,
 };
-pub use cli::Command;
-pub use commands::{
-    AddRequest,
-    InitRequest,
+pub use cli::{
+    AddArgs,
+    Command,
 };
+pub use commands::InitRequest;
 pub use fetch::{
     BranchComparison,
     CommitLog,

@@ -143,25 +143,9 @@ impl<'a> Tack<'a> {
                 let report = commands::look(self.project, selection, verbose)?;
                 Ok(unrecorded(CommandOutcome::Look(report)))
             },
-            Command::Add {
-                name,
-                url,
-                pin_type,
-                unpack,
-                dir,
-                submodules,
-                follows,
-            } => {
+            Command::Add(args) => {
                 self.recorded_as(label, CommandOutcome::Add, || {
-                    commands::add(self.project, commands::AddRequest {
-                        name: &name,
-                        url: &url,
-                        pin_type,
-                        unpack,
-                        dir: dir.as_deref(),
-                        submodules,
-                        follows: &follows,
-                    })
+                    commands::add(self.project, &args)
                 })
             },
             Command::Rm { name } => {

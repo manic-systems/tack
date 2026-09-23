@@ -9,13 +9,10 @@ use std::{
 use misstep::Result;
 
 use crate::{
+    cli::AddArgs,
     fetch::FetchError,
     history::View,
-    pins::{
-        self,
-        PinType,
-        Unpack,
-    },
+    pins,
     project::Project,
     report::{
         DedupReport,
@@ -68,19 +65,8 @@ pub fn init(project: &Project, request: InitRequest) -> Result<()> {
     init::init(project, request)
 }
 
-#[derive(Clone, Copy)]
-pub struct AddRequest<'a> {
-    pub name:       &'a str,
-    pub url:        &'a str,
-    pub pin_type:   PinType,
-    pub unpack:     Option<Unpack>,
-    pub dir:        Option<&'a str>,
-    pub submodules: bool,
-    pub follows:    &'a [(String, String)],
-}
-
-pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
-    edit::add(project, request)
+pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
+    edit::add(project, args)
 }
 
 pub fn rm(project: &Project, name: &str) -> Result<()> {
@@ -237,6 +223,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::pins::PinType;
 
     fn inputs(names: &[&str]) -> Vec<pins::Input> {
         names

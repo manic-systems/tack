@@ -68,27 +68,7 @@ pub fn run(cmd: Command) -> misstep::Result<()> {
                 )
             })
         },
-        Command::Add {
-            name,
-            url,
-            pin_type,
-            unpack,
-            dir,
-            submodules,
-            follows,
-        } => {
-            recorded(&project, &label, || {
-                commands::add(&project, commands::AddRequest {
-                    name: &name,
-                    url: &url,
-                    pin_type,
-                    unpack,
-                    dir: dir.as_deref(),
-                    submodules,
-                    follows: &follows,
-                })
-            })
-        },
+        Command::Add(args) => recorded(&project, &label, || commands::add(&project, &args)),
         Command::Rm { name } => recorded(&project, &label, || commands::rm(&project, &name)),
         Command::Alias { name, template, rm } => {
             recorded(&project, &label, || {
