@@ -13,13 +13,13 @@ use crate::{
     fetch::{
         self,
         BranchComparison,
+        CommitLog,
         CompareStatus,
         FetchedPin,
         compare_planner::{
             CompareJob,
             CompareSession,
         },
-        github::CommitLog,
     },
     lock::{
         LockIdentity,
@@ -399,7 +399,7 @@ fn classify_look(
         Ok(current) => {
             let log = match (verbose, old_compare_rev) {
                 (true, Some(old_rev)) => {
-                    fetch::github::commits_between(&source, old_rev, &current.rev, LOG_LIMIT)
+                    fetch::commits_between(&source, old_rev, &current.rev, LOG_LIMIT)
                         .ok()
                         .flatten()
                 },

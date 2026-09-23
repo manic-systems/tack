@@ -34,8 +34,8 @@ pub use commands::{
 };
 pub use fetch::{
     BranchComparison,
+    CommitLog,
     CompareStatus,
-    github::CommitLog,
 };
 pub use history::{
     Row as HistoryRow,

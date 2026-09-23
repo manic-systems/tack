@@ -2,6 +2,16 @@
 
 use std::str::FromStr;
 
+/// the commits a pin would move across, newest first
+#[derive(Clone, Debug)]
+pub struct CommitLog {
+    pub fresh:  Vec<(String, String)>,
+    pub base:   Option<(String, String)>,
+    pub total:  usize,
+    pub ahead:  u64,
+    pub behind: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompareStatus {
     Ahead,

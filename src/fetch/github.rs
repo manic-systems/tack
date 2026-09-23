@@ -25,12 +25,14 @@ use super::{
     auth::with_credential_fallback,
     http::HttpClient,
     time::epoch_from_iso,
-    topology::CompareStatus,
+    topology::{
+        CommitLog,
+        CompareStatus,
+    },
 };
 use crate::{
     lock::LockedNode,
     nar,
-    source::Source,
 };
 
 #[derive(Clone, Copy)]
@@ -93,22 +95,15 @@ impl GithubClient {
 
     fn commits_between(
         self,
-        source: &Source,
+        owner: &str,
+        repo: &str,
         old: &str,
         new: &str,
         limit: usize,
-    ) -> FetchResult<Option<CommitLog>> {
-        let &Source::Github {
-            ref owner,
-            ref repo,
-            ..
-        } = source
-        else {
-            return Ok(None);
-        };
+    ) -> FetchResult<CommitLog> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}/compare/{old}...{new}");
         let parsed = self.http.github_json::<GithubCompareResponse>(&url, None)?;
-        Ok(Some(parsed.commit_log(limit)))
+        Ok(parsed.commit_log(limit))
     }
 
     fn resolve_for_pin(
@@ -476,22 +471,14 @@ pub(super) fn compare_status(
     GithubClient::global().compare_status(owner, repo, base, head)
 }
 
-#[derive(Clone, Debug)]
-pub struct CommitLog {
-    pub fresh:  Vec<(String, String)>,
-    pub base:   Option<(String, String)>,
-    pub total:  usize,
-    pub ahead:  u64,
-    pub behind: u64,
-}
-
-pub fn commits_between(
-    source: &Source,
+pub(super) fn commits_between(
+    owner: &str,
+    repo: &str,
     old: &str,
     new: &str,
     limit: usize,
-) -> FetchResult<Option<CommitLog>> {
-    GithubClient::global().commits_between(source, old, new, limit)
+) -> FetchResult<CommitLog> {
+    GithubClient::global().commits_between(owner, repo, old, new, limit)
 }
 
 #[cfg(test)]

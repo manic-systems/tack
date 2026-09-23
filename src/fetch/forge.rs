@@ -20,6 +20,7 @@ use ureq::http::{
 };
 
 use super::{
+    CommitLog,
     CompareStatus,
     FetchError,
     FetchResult,
@@ -73,6 +74,20 @@ pub(super) fn compare_status(
     head: &str,
 ) -> FetchResult<Option<CompareStatus>> {
     compare_detected(kind, host, owner, repo, base, head)
+}
+
+pub(super) fn commit_log(
+    repo: &HostedRepo,
+    old: &str,
+    new: &str,
+    limit: usize,
+) -> FetchResult<Option<CommitLog>> {
+    match repo.kind {
+        ForgeKind::Forgejo | ForgeKind::Gitea => {
+            forgejo_gitea_commit_log(&repo.host, &repo.owner, &repo.repo, old, new, limit).map(Some)
+        },
+        ForgeKind::Gitlab | ForgeKind::Cgit | ForgeKind::Unknown => Ok(None),
+    }
 }
 
 pub(super) fn resolve_ref(
@@ -166,15 +181,52 @@ fn compare_forgejo_gitea(
     })
 }
 
+fn forgejo_gitea_commit_log(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    old: &str,
+    new: &str,
+    limit: usize,
+) -> FetchResult<CommitLog> {
+    let (ahead_compare, behind_count) = thread::scope(|scope| {
+        let ahead = scope.spawn(|| compare(host, owner, repo, old, new));
+        let behind = compare_count(host, owner, repo, new, old);
+        (ahead.join(), behind)
+    });
+    let ahead = ahead_compare.unwrap_or_else(|payload| panic::resume_unwind(payload))?;
+    Ok(CommitLog {
+        fresh:  ahead
+            .commits
+            .iter()
+            .take(limit)
+            .map(ForgeCompareCommit::pair)
+            .collect(),
+        base:   None,
+        total:  usize::try_from(ahead.total_commits).unwrap_or(usize::MAX),
+        ahead:  ahead.total_commits,
+        behind: behind_count?,
+    })
+}
+
 fn compare_count(host: &str, owner: &str, repo: &str, base: &str, head: &str) -> FetchResult<u64> {
+    Ok(compare(host, owner, repo, base, head)?.total_commits)
+}
+
+fn compare(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    base: &str,
+    head: &str,
+) -> FetchResult<ForgeCompare> {
     let url = format!(
         "{}/compare/{}...{}",
         forgejo_repo_api(host, owner, repo),
         percent_encode(base),
         percent_encode(head),
     );
-    let parsed = json::<ForgeCompare>(&url, COMPARE_TIMEOUT)?;
-    Ok(parsed.total_commits)
+    json::<ForgeCompare>(&url, COMPARE_TIMEOUT)
 }
 
 fn detect_host(host: &str) -> ForgeKind {
@@ -325,9 +377,30 @@ struct GitlabProbe {
     revision: Option<String>,
 }
 
+/// commits arrive newest first, the reverse of GitHub's compare
 #[derive(Deserialize)]
 struct ForgeCompare {
     total_commits: u64,
+    #[serde(default)]
+    commits:       Vec<ForgeCompareCommit>,
+}
+
+#[derive(Deserialize)]
+struct ForgeCompareCommit {
+    sha:    String,
+    commit: ForgeCommitBody,
+}
+
+impl ForgeCompareCommit {
+    fn pair(&self) -> (String, String) {
+        let subject = self.commit.message.lines().next().unwrap_or("").trim_end();
+        (self.sha.clone(), subject.to_owned())
+    }
+}
+
+#[derive(Deserialize)]
+struct ForgeCommitBody {
+    message: String,
 }
 
 #[derive(Deserialize)]

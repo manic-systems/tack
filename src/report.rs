@@ -7,7 +7,7 @@ use std::collections::{
 
 use crate::fetch::{
     BranchComparison,
-    github::CommitLog,
+    CommitLog,
 };
 
 #[derive(Clone, Debug)]

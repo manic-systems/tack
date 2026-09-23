@@ -33,8 +33,8 @@ use unicode_width::UnicodeWidthChar as _;
 
 use crate::fetch::{
     BranchComparison,
+    CommitLog,
     CompareStatus,
-    github::CommitLog,
 };
 
 #[derive(Clone)]
