@@ -18,7 +18,7 @@ use std::{
     str::FromStr,
 };
 
-use eyre::Result;
+use misstep::Result;
 
 use crate::error::user_bail;
 
@@ -89,7 +89,7 @@ impl Source {
 }
 
 impl FromStr for Source {
-    type Err = eyre::Report;
+    type Err = misstep::Report;
 
     fn from_str(expanded: &str) -> Result<Self> {
         if let Some(body) = expanded.strip_prefix("github:") {

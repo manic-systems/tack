@@ -10,11 +10,11 @@ use std::{
     result::Result as StdResult,
 };
 
-use eyre::{
-    Result,
-    eyre,
-};
 use flate2::read::GzDecoder;
+use misstep::{
+    Result,
+    report,
+};
 use xz2::read::XzDecoder;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
@@ -41,7 +41,7 @@ pub(super) fn detect_tar_format(url: &str) -> Result<TarFormat> {
     TAR_FORMAT_SUFFIXES
         .into_iter()
         .find_map(|(suffix, format)| ends_with_ci(path, suffix).then_some(format))
-        .ok_or_else(|| eyre!("unknown tar format for URL: {url}"))
+        .ok_or_else(|| report!("unknown tar format for URL: {url}"))
 }
 
 #[inline]

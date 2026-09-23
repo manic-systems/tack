@@ -14,7 +14,7 @@ use etcetera::{
     BaseStrategy as _,
     choose_base_strategy,
 };
-use eyre::Result;
+use misstep::Result;
 
 use super::{
     History,
@@ -46,7 +46,7 @@ pub struct HistoryStore {
 pub struct RecordedRun {
     pub result:            Result<()>,
     pub captured_external: bool,
-    pub history_error:     Option<eyre::Report>,
+    pub history_error:     Option<misstep::Report>,
 }
 
 impl HistoryStore {

@@ -17,7 +17,6 @@ use std::{
     },
 };
 
-use eyre::ContextCompat as _;
 use gix_transport::{
     IsSpuriousError as _,
     client::blocking_io::{
@@ -33,6 +32,7 @@ use gix_transport::{
         },
     },
 };
+use misstep::OptionExt as _;
 use ureq::{
     Agent,
     Body,

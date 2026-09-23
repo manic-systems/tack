@@ -6,9 +6,9 @@ use std::{
     process::Command,
 };
 
-use eyre::{
+use misstep::{
     Result,
-    WrapErr as _,
+    ResultExt as _,
     bail,
 };
 use serde::Deserialize;
@@ -63,14 +63,14 @@ fn eval_inputs(flake_path: &Path) -> Result<BTreeMap<String, FlakeInput>> {
         .arg(flake_path)
         .args(["--apply", "flake: flake.inputs or { }", "--json"])
         .output()
-        .wrap_err("run `nix eval` (is nix installed?)")?;
+        .context("run `nix eval` (is nix installed?)")?;
     if !out.status.success() {
         bail!(
             "nix eval failed:\n{}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    serde_json::from_slice(&out.stdout).wrap_err("parse `nix eval` json")
+    serde_json::from_slice(&out.stdout).context("parse `nix eval` json")
 }
 
 #[derive(Deserialize)]

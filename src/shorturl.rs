@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use eyre::Result;
+use misstep::Result;
 
 use crate::error::user_bail;
 

@@ -14,10 +14,10 @@ use std::{
     str::FromStr,
 };
 
-use eyre::{
-    ContextCompat as _,
+use misstep::{
+    OptionExt as _,
     Result,
-    WrapErr as _,
+    ResultExt as _,
 };
 use pound::ValueEnum;
 use toml_edit::{
@@ -57,7 +57,7 @@ impl Display for PinType {
 }
 
 impl FromStr for PinType {
-    type Err = eyre::Report;
+    type Err = misstep::Report;
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
@@ -106,7 +106,7 @@ impl Display for Unpack {
 }
 
 impl FromStr for Unpack {
-    type Err = eyre::Report;
+    type Err = misstep::Report;
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
@@ -142,7 +142,7 @@ impl Input {
         let pin_type = match entry.get("type").and_then(Item::as_str) {
             Some(typ) => {
                 typ.parse::<PinType>()
-                    .wrap_err_with(|| format!("input '{name}'"))?
+                    .with_context(|| format!("input '{name}'"))?
             },
             None => {
                 match entry.get("flake").and_then(Item::as_bool) {
@@ -157,7 +157,7 @@ impl Input {
             .map(|unpack| {
                 unpack
                     .parse::<Unpack>()
-                    .wrap_err_with(|| format!("input '{name}'"))
+                    .with_context(|| format!("input '{name}'"))
             })
             .transpose()?;
         if pin_type != PinType::Fixed && unpack.is_some() {

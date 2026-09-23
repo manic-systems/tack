@@ -11,11 +11,6 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
-use eyre::{
-    ContextCompat as _,
-    Result,
-    WrapErr as _,
-};
 use gix::{
     bstr::{
         BStr,
@@ -46,6 +41,11 @@ use gix::{
 };
 use gix_transport::client::blocking_io::Transport;
 use gix_worktree_state::checkout::Options as CheckoutOptions;
+use misstep::{
+    OptionExt as _,
+    Result,
+    ResultExt as _,
+};
 
 use super::{
     CompareStatus,
@@ -120,7 +120,7 @@ fn checkout(
     if let Some(rev) = requested_rev {
         let repo = fetch_pinned(url, reff, rev, into)?;
         let (id, time) = checkout_existing_commit(&repo, rev)
-            .wrap_err_with(|| format!("checkout rev '{rev}' from {url}"))?;
+            .with_context(|| format!("checkout rev '{rev}' from {url}"))?;
         if submodules {
             update_submodules(&repo, url, 0)?;
         }
@@ -129,7 +129,7 @@ fn checkout(
     } else {
         let (repo, refname, fetched_ref) = clone_fetch(url, reff, true, into, true)?;
         let commit = fetched_commit(&repo, &fetched_ref)
-            .wrap_err_with(|| format!("resolve fetched head from {url}"))?;
+            .with_context(|| format!("resolve fetched head from {url}"))?;
         let id = commit.id().detach().to_string();
         let time = commit.time()?.seconds;
         if submodules {
@@ -163,7 +163,7 @@ fn clone_fetch(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| eyre::eyre!("no ref candidates for {url}")))
+    Err(last_err.unwrap_or_else(|| misstep::report!("no ref candidates for {url}")))
 }
 
 fn clone_fetch_candidate(
@@ -179,8 +179,8 @@ fn clone_fetch_candidate(
 
     if write_worktree {
         let commit = fetched_commit(&repo, &fetched_ref)
-            .wrap_err_with(|| format!("resolve {fetched_ref}"))?;
-        checkout_commit(&repo, &commit).wrap_err_with(|| format!("checkout {url}"))?;
+            .with_context(|| format!("resolve {fetched_ref}"))?;
+        checkout_commit(&repo, &commit).with_context(|| format!("checkout {url}"))?;
     }
 
     Ok((repo, fetched_ref))
@@ -216,14 +216,14 @@ fn fetch_pinned(
         }
     }
     Err(last_err.map_or_else(
-        || eyre::eyre!("rev '{pinned}' not reachable from refs on {url}"),
-        |err| err.wrap_err(format!("rev '{pinned}' not reachable from refs on {url}")),
+        || misstep::report!("rev '{pinned}' not reachable from refs on {url}"),
+        |err| err.context(format!("rev '{pinned}' not reachable from refs on {url}")),
     ))
 }
 
 fn init_scratch_repo(into: &Path) -> Result<gix::Repository> {
     let mut repo =
-        gix::init(into).wrap_err_with(|| format!("init repository at {}", into.display()))?;
+        gix::init(into).with_context(|| format!("init repository at {}", into.display()))?;
     repo.refs.write_reflog = WriteReflog::Disable;
     Ok(repo)
 }
@@ -240,13 +240,13 @@ fn fetch_refspecs_into(
 
     let mut remote = repo
         .remote_at(url)
-        .wrap_err_with(|| format!("prepare remote {url}"))?;
+        .with_context(|| format!("prepare remote {url}"))?;
     remote.replace_refspecs(
         refspecs.iter().map(|refspec| BStr::new(refspec.as_str())),
         Direction::Fetch,
     )?;
     remote = remote.with_fetch_tags(Tags::None);
-    fetch_into_repo(&remote, url, shallow).wrap_err_with(|| format!("fetch {url}"))
+    fetch_into_repo(&remote, url, shallow).with_context(|| format!("fetch {url}"))
 }
 
 fn local_file_repo(url: &str) -> Result<Option<gix::Repository>> {
@@ -254,7 +254,7 @@ fn local_file_repo(url: &str) -> Result<Option<gix::Repository>> {
     let Some(path) = local_file_url_path(&parsed_url) else {
         return Ok(None);
     };
-    Ok(Some(gix::open(&path).wrap_err_with(|| {
+    Ok(Some(gix::open(&path).with_context(|| {
         format!("open local git repository {}", path.display())
     })?))
 }
@@ -317,7 +317,7 @@ fn fetch_local_wildcard_refspec(
     let reference_platform = source.references()?;
     let references = reference_platform.prefixed(source_prefix)?;
     for reference_result in references {
-        let mut reference = reference_result.map_err(|err| eyre::eyre!("{err}"))?;
+        let mut reference = reference_result.map_err(|err| misstep::report!("{err}"))?;
         let id = reference.try_id().map_or_else(
             || reference.peel_to_id().map(gix::Id::detach),
             |id| Ok(id.detach()),
@@ -349,7 +349,7 @@ fn local_ref_id(repo: &gix::Repository, name: &str) -> Result<gix::ObjectId> {
             || reference.peel_to_id().map(gix::Id::detach),
             |id| Ok(id.detach()),
         )
-        .wrap_err_with(|| format!("resolve local ref {name}"))
+        .with_context(|| format!("resolve local ref {name}"))
 }
 
 fn copy_reachable_object(
@@ -365,17 +365,17 @@ fn copy_reachable_object(
 
     let object = source
         .find_object(id)
-        .wrap_err_with(|| format!("read local git object {id}"))?;
+        .with_context(|| format!("read local git object {id}"))?;
     let kind = object.kind;
     dest.objects
         .write_buf(kind, &object.data)
-        .map_err(|err| eyre::eyre!("{err}"))?;
+        .map_err(|err| misstep::report!("{err}"))?;
 
     match kind {
         objs::Kind::Commit => {
-            let commit = object
-                .try_into_commit()
-                .map_err(|_| eyre::eyre!("local git object {id} changed kind while copying"))?;
+            let commit = object.try_into_commit().map_err(|_| {
+                misstep::report!("local git object {id} changed kind while copying")
+            })?;
             copy_reachable_object(source, dest, commit.tree_id()?.detach(), seen, copy_parents)?;
             if copy_parents {
                 for parent in commit.parent_ids() {
@@ -384,9 +384,9 @@ fn copy_reachable_object(
             }
         },
         objs::Kind::Tree => {
-            let tree = object
-                .try_into_tree()
-                .map_err(|_| eyre::eyre!("local git object {id} changed kind while copying"))?;
+            let tree = object.try_into_tree().map_err(|_| {
+                misstep::report!("local git object {id} changed kind while copying")
+            })?;
             for entry_result in tree.iter() {
                 let entry = entry_result?;
                 if entry.kind() != EntryKind::Commit {
@@ -395,9 +395,9 @@ fn copy_reachable_object(
             }
         },
         objs::Kind::Tag => {
-            let tag = object
-                .try_into_tag()
-                .map_err(|_| eyre::eyre!("local git object {id} changed kind while copying"))?;
+            let tag = object.try_into_tag().map_err(|_| {
+                misstep::report!("local git object {id} changed kind while copying")
+            })?;
             copy_reachable_object(source, dest, tag.target_id()?.detach(), seen, copy_parents)?;
         },
         objs::Kind::Blob => {},
@@ -454,11 +454,11 @@ fn fetched_commit<'repo>(
 
 fn checkout_existing_commit(repo: &gix::Repository, rev: &str) -> Result<(String, i64)> {
     let oid = gix::ObjectId::from_hex(rev.as_bytes())
-        .wrap_err_with(|| format!("parse '{rev}' as object id"))?;
+        .with_context(|| format!("parse '{rev}' as object id"))?;
     let commit = repo
         .find_object(oid)?
         .peel_to_commit()
-        .wrap_err_with(|| format!("peel '{rev}' to commit"))?;
+        .with_context(|| format!("peel '{rev}' to commit"))?;
     let id = commit.id().detach().to_string();
     let time = commit.time()?.seconds;
     checkout_commit(repo, &commit)?;
@@ -490,7 +490,7 @@ fn update_submodules(repo: &gix::Repository, parent_url: &str, depth: u8) -> Res
     const MAX_SUBMODULE_DEPTH: u8 = 16;
 
     if depth > MAX_SUBMODULE_DEPTH {
-        eyre::bail!("submodule recursion exceeded {MAX_SUBMODULE_DEPTH} levels at {parent_url}");
+        misstep::bail!("submodule recursion exceeded {MAX_SUBMODULE_DEPTH} levels at {parent_url}");
     }
     let Some(submodules) = repo.submodules()? else {
         return Ok(());
@@ -508,9 +508,9 @@ fn update_submodules(repo: &gix::Repository, parent_url: &str, depth: u8) -> Res
         let work_dir = submodule.work_dir()?;
         let _ = fs::create_dir_all(&work_dir);
         let sub_repo = fetch_pinned(&url, None, &expected.to_string(), &work_dir)
-            .wrap_err_with(|| format!("clone submodule {url}"))?;
+            .with_context(|| format!("clone submodule {url}"))?;
         checkout_existing_commit(&sub_repo, &expected.to_string())
-            .wrap_err_with(|| format!("checkout submodule {} at {expected}", submodule.name()))?;
+            .with_context(|| format!("checkout submodule {} at {expected}", submodule.name()))?;
         update_submodules(&sub_repo, &url, depth + 1)?;
         remove_root_git_dir(&work_dir);
     }

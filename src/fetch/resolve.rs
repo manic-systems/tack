@@ -11,10 +11,10 @@ use std::{
     },
 };
 
-use eyre::{
-    ContextCompat as _,
+use misstep::{
+    OptionExt as _,
     Result,
-    WrapErr as _,
+    ResultExt as _,
     bail,
 };
 use ureq::{
@@ -152,7 +152,7 @@ pub(super) fn current_rev(source: &Source) -> Result<String> {
                 .head(url.as_str())
                 .call()
                 .or_else(|_| http.get(url.as_str()).call().map_err(Box::new))
-                .wrap_err_with(|| format!("probe {url}"))?;
+                .with_context(|| format!("probe {url}"))?;
             Ok(immutable_url_of(&resp, url))
         },
         Source::Path { ref path } => Ok(path.clone()),
@@ -173,13 +173,13 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<FetchedPin> 
     let mut resp = HttpClient::global()
         .get(url)
         .call()
-        .wrap_err_with(|| format!("GET {url}"))?;
+        .with_context(|| format!("GET {url}"))?;
     let immutable_url = immutable_url_of(&resp, url);
     let mut bytes = Vec::new();
     resp.body_mut()
         .as_reader()
         .read_to_end(&mut bytes)
-        .wrap_err_with(|| format!("read body of {url}"))?;
+        .with_context(|| format!("read body of {url}"))?;
     let sha256 = nar::hash_bytes(&bytes);
 
     // redirected immutable urls may lose the archive extension
@@ -218,8 +218,8 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
             let mut resp = HttpClient::global()
                 .get(url)
                 .call()
-                .wrap_err_with(|| format!("GET {url}"))?;
-            let format = detect_tar_format(url).wrap_err_with(|| format!("tarball {url}"))?;
+                .with_context(|| format!("GET {url}"))?;
+            let format = detect_tar_format(url).with_context(|| format!("tarball {url}"))?;
             unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
         },
         LockedNode::Gitlab {
@@ -254,7 +254,7 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
             ..
         } => {
             let rev = current_rev(resolved.as_ref())
-                .wrap_err_with(|| format!("resolve gitlab ref for {host}/{owner}/{repo}"))?;
+                .with_context(|| format!("resolve gitlab ref for {host}/{owner}/{repo}"))?;
             gitlab::download_archive(host, owner, repo, &rev, dir)
         },
         Source::Git { .. } => {
@@ -273,8 +273,8 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
             let mut resp = HttpClient::global()
                 .get(url.as_str())
                 .call()
-                .wrap_err_with(|| format!("GET {url}"))?;
-            let format = detect_tar_format(url).wrap_err_with(|| format!("tarball {url}"))?;
+                .with_context(|| format!("GET {url}"))?;
+            let format = detect_tar_format(url).with_context(|| format!("tarball {url}"))?;
             unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
         },
         Source::Path { .. } => bail!("cannot fetch a tree for a local path pin"),
@@ -308,7 +308,7 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
             let mut resp = HttpClient::global()
                 .get(url.as_str())
                 .call()
-                .wrap_err_with(|| format!("GET {url}"))?;
+                .with_context(|| format!("GET {url}"))?;
             let immutable_url = immutable_url_of(&resp, url);
             let last_modified = resp
                 .headers()
@@ -318,7 +318,7 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
                 .unwrap_or(0);
             let format = detect_tar_format(&immutable_url)
                 .or_else(|_| detect_tar_format(url))
-                .wrap_err_with(|| format!("tarball {url}"))?;
+                .with_context(|| format!("tarball {url}"))?;
 
             let dir = tempfile::tempdir()?;
             let root = unpack_tar_stream(resp.body_mut().as_reader(), format, dir.path())?;
@@ -338,7 +338,7 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
                 .is_absolute()
                 .then(|| path_fingerprint(target))
                 .transpose()
-                .wrap_err_with(|| format!("stat path pin {path}"))?
+                .with_context(|| format!("stat path pin {path}"))?
             else {
                 return Ok(FetchedPin::path(
                     LockedNode::new_path(path.clone(), None),
@@ -365,7 +365,7 @@ fn path_fingerprint(root: &Path) -> Result<PathFingerprint> {
 
     while let Some(path) = pending.pop() {
         let meta = fs::symlink_metadata(&path)
-            .wrap_err_with(|| format!("stat path pin entry {}", path.display()))?;
+            .with_context(|| format!("stat path pin entry {}", path.display()))?;
         fingerprint.tree_entries += 1;
         fingerprint.tree_size = fingerprint.tree_size.saturating_add(meta.len());
         let mtime_nanos = meta.mtime().saturating_mul(1_000_000_000) + meta.mtime_nsec();
@@ -374,7 +374,7 @@ fn path_fingerprint(root: &Path) -> Result<PathFingerprint> {
 
         if meta.is_dir() {
             for entry in fs::read_dir(&path)
-                .wrap_err_with(|| format!("read path pin dir {}", path.display()))?
+                .with_context(|| format!("read path pin dir {}", path.display()))?
             {
                 pending.push(entry?.path());
             }
@@ -433,7 +433,7 @@ fn fetch_gitlab_archive_pin(
     repo: &str,
 ) -> Result<FetchedPin> {
     let rev = current_rev(source)
-        .wrap_err_with(|| format!("resolve gitlab ref for {host}/{owner}/{repo}"))?;
+        .with_context(|| format!("resolve gitlab ref for {host}/{owner}/{repo}"))?;
     let dir = tempfile::tempdir()?;
     let root = gitlab::download_archive(host, owner, repo, &rev, dir.path())?;
     let nar_hash = nar::hash_path(&root)?;

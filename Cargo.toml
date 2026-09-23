@@ -17,10 +17,8 @@ name = "tack"
 path = "src/main.rs"
 
 [dependencies]
-color-eyre = "0.6.5"
 data-encoding = "2.11.0"
 etcetera = "0.11.0"
-eyre = "0.6.12"
 flate2 = "1.1.9"
 gix = { default-features = false, features = [
   "blocking-network-client",
@@ -40,6 +38,7 @@ gix-transport = { default-features = false, features = [
 ], version = "0.57.1" }
 gix-worktree-state = "0.31.0"
 hmac-sha256 = "1.1.14"
+misstep = { features = [ "pretty" ], version = "0.3.0" }
 percent-encoding = "2.3.2"
 pound = "0.1.4"
 serde = { features = [ "derive" ], version = "1.0.228" }

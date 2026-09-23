@@ -7,7 +7,7 @@ use crate::{
     project::Project,
 };
 
-pub fn run(cmd: Command) -> eyre::Result<()> {
+pub fn run(cmd: Command) -> misstep::Result<()> {
     let scaffolding = matches!(cmd, Command::Init { .. });
     let project = if scaffolding {
         Project::here()?
@@ -111,8 +111,8 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
 fn recorded(
     project: &Project,
     label: &str,
-    run: impl FnOnce() -> eyre::Result<()>,
-) -> eyre::Result<()> {
+    run: impl FnOnce() -> misstep::Result<()>,
+) -> misstep::Result<()> {
     let outcome = HistoryStore::for_project(project).record_run(project, label, run);
     if outcome.captured_external {
         println!("captured external edit");

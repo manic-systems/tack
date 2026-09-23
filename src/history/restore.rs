@@ -13,7 +13,7 @@ use std::{
     },
 };
 
-use eyre::Result;
+use misstep::Result;
 
 use super::Entry;
 use crate::project::Project;

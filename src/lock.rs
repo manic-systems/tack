@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use eyre::Result;
+use misstep::Result;
 use serde::{
     Deserialize,
     Deserializer,

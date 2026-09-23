@@ -16,7 +16,7 @@ use std::{
     },
 };
 
-use eyre::Result as EyreResult;
+use misstep::Result as MisstepResult;
 
 use crate::{
     lock,
@@ -139,7 +139,7 @@ impl Project {
         pins::PinsDoc::parse(&raw).map_err(|source| ConfigError::ParseToml { path, source })
     }
 
-    pub fn save_pins(&self, doc: &pins::PinsDoc) -> EyreResult<()> {
+    pub fn save_pins(&self, doc: &pins::PinsDoc) -> MisstepResult<()> {
         doc.save(&self.pins_path())
     }
 
@@ -178,12 +178,12 @@ impl Project {
         Ok(lock)
     }
 
-    pub fn save_lock(&self, lk: &lock::LockFile) -> EyreResult<()> {
+    pub fn save_lock(&self, lk: &lock::LockFile) -> MisstepResult<()> {
         lk.save(&self.lock_path())
     }
 }
 
-pub fn write_atomic(path: &Path, contents: &str) -> EyreResult<()> {
+pub fn write_atomic(path: &Path, contents: &str) -> MisstepResult<()> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|dur| dur.as_nanos())
