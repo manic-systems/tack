@@ -159,7 +159,27 @@ impl Selection<'_> {
     }
 }
 
+/// clusters pins by `group` in first-seen order, ungrouped pins last, so each
+/// group header in `look` and `update` prints once
 fn select<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pins::Input> {
+    let mut out = pick(inputs, selection);
+    let mut groups = Vec::new();
+    for group in out.iter().filter_map(|input| input.group.as_deref()) {
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+    out.sort_by_key(|input| {
+        input
+            .group
+            .as_deref()
+            .and_then(|group| groups.iter().position(|seen| *seen == group))
+            .unwrap_or(groups.len())
+    });
+    out
+}
+
+fn pick<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pins::Input> {
     let Selection { names, exclude } = selection;
     let known = |name: &String| inputs.iter().any(|input| input.name == *name);
 
@@ -208,6 +228,7 @@ mod tests {
                     unpack:     None,
                     follows:    BTreeMap::new(),
                     excludes:   BTreeSet::new(),
+                    group:      None,
                 }
             })
             .collect()

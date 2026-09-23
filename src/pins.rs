@@ -126,6 +126,7 @@ pub struct Input {
     pub unpack:     Option<Unpack>,
     pub follows:    BTreeMap<String, String>,
     pub excludes:   BTreeSet<String>,
+    pub group:      Option<String>,
 }
 
 impl Input {
@@ -193,6 +194,14 @@ impl Input {
             },
             None => BTreeSet::new(),
         };
+        let group = entry
+            .get("group")
+            .map(|group_item| {
+                group_item
+                    .as_str()
+                    .with_context(|| format!("input '{name}': group must be a string"))
+            })
+            .transpose()?;
         Ok(Self {
             name: name.to_owned(),
             url: url.to_owned(),
@@ -204,6 +213,7 @@ impl Input {
             unpack,
             follows,
             excludes,
+            group: group.map(str::to_owned),
         })
     }
 }
