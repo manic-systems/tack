@@ -56,15 +56,12 @@ where
     O: Send,
     F: Fn(usize, I) -> O + Sync,
 {
-    let mut outputs = Vec::new();
+    let mut slots = Vec::new();
+    slots.resize_with(items.len(), || None);
     stream(items, limit, run, |index, output| {
-        outputs.push((index, output));
+        slots[index] = Some(output);
     });
-    outputs.sort_by_key(|entry| entry.0);
-    outputs
-        .into_iter()
-        .map(|(_, output)| output)
-        .collect::<Vec<_>>()
+    slots.into_iter().flatten().collect::<Vec<_>>()
 }
 
 fn spawn<'scope, I, O, F>(
