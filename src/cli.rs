@@ -74,10 +74,10 @@ enum Cli {
         /// relock drifted pins instead of failing
         #[pound(long)]
         accept:  bool,
-        /// pins to leave alone (repeatable, or comma-separated)
+        /// pins or groups to leave alone (repeatable, or comma-separated)
         #[pound(long)]
         exclude: Vec<String>,
-        /// pins to update (default: all)
+        /// pins or groups to update (default: all)
         names:   Vec<String>,
     },
     /// show upstream drift without writing the lock
@@ -85,10 +85,10 @@ enum Cli {
         /// list the freshest commits for each changed pin
         #[pound(short, long)]
         verbose: bool,
-        /// pins to leave alone (repeatable, or comma-separated)
+        /// pins or groups to leave alone (repeatable, or comma-separated)
         #[pound(long)]
         exclude: Vec<String>,
-        /// pins to inspect (default: all)
+        /// pins or groups to inspect (default: all)
         names:   Vec<String>,
     },
     /// add a pin

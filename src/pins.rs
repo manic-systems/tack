@@ -256,6 +256,16 @@ impl PinsDoc {
         for (name, item) in table {
             out.push(Input::from_item(name, item)?);
         }
+        for input in &out {
+            if let Some(ref group) = input.group
+                && out.iter().any(|other| other.name == *group)
+            {
+                user_bail!(
+                    "input '{}' is in group '{group}', which is also an input name",
+                    input.name
+                );
+            }
+        }
         Ok(out)
     }
 

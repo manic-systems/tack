@@ -48,9 +48,9 @@ legacy `./inputs.nix` at repo root is detected and preserved as-is.
 tack init [--force] [--resolver] [--flake]
                                       scaffold .tack/ (--resolver writes only default.nix,
                                       --flake also a wired flake.nix)
-tack update [names...] [--accept] [--exclude <names>]...
+tack update [names|groups...] [--accept] [--exclude <names>]...
                                       fetch latest, rewrite lock
-tack look [names...] [--verbose|-v] [--exclude <names>]...
+tack look [names|groups...] [--verbose|-v] [--exclude <names>]...
                                       report pins with newer upstream revs
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                       [--dir <d>] [--submodules] [--follows c=p]...
@@ -109,6 +109,22 @@ url = "gh:owner/coolproject"
 [inputs.tack]
 url = "manic:tack"
 ```
+
+## groups
+
+tag pins with a `group` to print them under headers in `tack look` and
+`tack update`, and to select them together
+
+```toml
+[inputs.niri]
+url = "gh:niri-wm/niri"
+group = "desktop"
+```
+
+`tack update desktop` updates every pin in the group, and
+`--exclude desktop` leaves them all alone. names and groups mix freely, so
+`tack look desktop --exclude niri` works. a group can't share its name with
+a pin.
 
 ## follows
 
