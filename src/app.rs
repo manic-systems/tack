@@ -95,6 +95,11 @@ pub fn run(cmd: Command) -> eyre::Result<()> {
                 commands::alias(&project, &name, template.as_deref(), rm)
             })
         },
+        Command::SetFrozen { names, frozen } => {
+            recorded(&project, &label, || {
+                commands::set_frozen(&project, &names, frozen)
+            })
+        },
     };
 
     if check_resolver && res.is_ok() {

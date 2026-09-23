@@ -127,6 +127,7 @@ pub struct Input {
     pub follows:    BTreeMap<String, String>,
     pub excludes:   BTreeSet<String>,
     pub group:      Option<String>,
+    pub frozen:     bool,
 }
 
 impl Input {
@@ -202,6 +203,15 @@ impl Input {
                     .with_context(|| format!("input '{name}': group must be a string"))
             })
             .transpose()?;
+        let frozen = entry
+            .get("frozen")
+            .map(|frozen_item| {
+                frozen_item
+                    .as_bool()
+                    .with_context(|| format!("input '{name}': frozen must be a bool"))
+            })
+            .transpose()?
+            .unwrap_or(false);
         Ok(Self {
             name: name.to_owned(),
             url: url.to_owned(),
@@ -214,6 +224,7 @@ impl Input {
             follows,
             excludes,
             group: group.map(str::to_owned),
+            frozen,
         })
     }
 }
@@ -287,6 +298,23 @@ impl PinsDoc {
             .and_then(Item::as_table_mut)
             .and_then(|tbl| tbl.remove(name))
             .is_some()
+    }
+
+    /// # Panics
+    ///
+    /// if `name` isn't an input table, so pass names from `inputs`
+    pub fn set_frozen(&mut self, name: &str, frozen: bool) {
+        let entry = self
+            .doc
+            .get_mut("inputs")
+            .and_then(|inputs| inputs.get_mut(name))
+            .and_then(Item::as_table_like_mut)
+            .expect("input listed by inputs()");
+        if frozen {
+            entry.insert("frozen", value(true));
+        } else {
+            entry.remove("frozen");
+        }
     }
 
     pub fn set_alias(&mut self, name: &str, template: &str) {

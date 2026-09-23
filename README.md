@@ -55,6 +55,8 @@ tack look [names|groups...] [--verbose|-v] [--exclude <names>]...
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                       [--dir <d>] [--submodules] [--follows c=p]...
 tack rm <name>
+tack freeze <names|groups...>        hold pins at their locked rev
+tack unfreeze <names|groups...>      let update move them again
 tack alias <name> <template>         define a shorturl scheme
 tack alias --rm <name>               remove one
 tack dedup                           report inputs reachable from multiple pins
@@ -125,6 +127,11 @@ group = "desktop"
 `--exclude desktop` leaves them all alone. names and groups mix freely, so
 `tack look desktop --exclude niri` works. a group can't share its name with
 a pin.
+
+`tack freeze desktop` sets `frozen = true` on each pin in the group. a frozen
+pin stays at its locked rev through `tack update` and `tack update desktop`,
+and only moves when named directly, as in `tack update niri`. `tack look` still
+reports how far behind it is.
 
 ## follows
 

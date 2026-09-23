@@ -43,6 +43,10 @@ pub enum Command {
         template: Option<String>,
         rm:       bool,
     },
+    SetFrozen {
+        names:  Vec<String>,
+        frozen: bool,
+    },
     Dedup,
     Undo {
         list: bool,
@@ -131,6 +135,16 @@ enum Cli {
         #[pound(long)]
         rm:       bool,
     },
+    /// hold pins at their locked rev unless `tack update` names them
+    Freeze {
+        /// pins or groups to freeze
+        names: Vec<String>,
+    },
+    /// let `tack update` move frozen pins again
+    Unfreeze {
+        /// pins or groups to unfreeze
+        names: Vec<String>,
+    },
     /// collapse duplicate pins onto a single source
     Dedup,
     /// revert the last tack edit
@@ -182,6 +196,10 @@ impl Command {
                 parts.join(" ")
             },
             Self::Add { ref name, .. } => format!("add {name}"),
+            Self::SetFrozen { ref names, frozen } => {
+                let verb = if frozen { "freeze" } else { "unfreeze" };
+                format!("{verb} {}", names.join(" "))
+            },
             Self::Rm { ref name } => format!("rm {name}"),
             Self::Alias { ref name, rm, .. } => {
                 if rm {
@@ -262,6 +280,18 @@ impl From<Cli> for Command {
             },
             Cli::Rm { name } => Self::Rm { name },
             Cli::Alias { name, template, rm } => Self::Alias { name, template, rm },
+            Cli::Freeze { names } => {
+                Self::SetFrozen {
+                    names,
+                    frozen: true,
+                }
+            },
+            Cli::Unfreeze { names } => {
+                Self::SetFrozen {
+                    names,
+                    frozen: false,
+                }
+            },
             Cli::Dedup => Self::Dedup,
             Cli::Undo { list } => Self::Undo { list },
             Cli::Redo => Self::Redo,

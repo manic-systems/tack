@@ -91,6 +91,10 @@ pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool
     edit::alias(project, name, template, remove)
 }
 
+pub fn set_frozen(project: &Project, names: &[String], frozen: bool) -> Result<()> {
+    edit::set_frozen(project, names, frozen)
+}
+
 pub fn update(project: &Project, selection: Selection<'_>, accept: bool) -> Result<UpdateReport> {
     update::update(project, selection, accept)
 }
@@ -181,7 +185,7 @@ fn select<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pi
 }
 
 /// a name selects the input it names or every member of the group it names,
-/// which `PinsDoc::inputs` keeps from overlapping
+/// which [`PinsDoc::inputs`](crate::PinsDoc::inputs) keeps from overlapping
 fn pick<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pins::Input> {
     let Selection { names, exclude } = selection;
     let members = |name: &str| {
@@ -249,6 +253,7 @@ mod tests {
                     follows:    BTreeMap::new(),
                     excludes:   BTreeSet::new(),
                     group:      None,
+                    frozen:     false,
                 }
             })
             .collect()
