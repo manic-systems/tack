@@ -191,22 +191,10 @@ impl Input {
             },
             None => BTreeMap::new(),
         };
-        let excludes = match entry.get("exclude_follow") {
-            Some(exclude_item) => {
-                let arr = exclude_item.as_array().with_context(|| {
-                    format!("input '{name}': exclude_follow must be an array of strings")
-                })?;
-                let mut excludes = BTreeSet::new();
-                for (index, exclude_member) in arr.iter().enumerate() {
-                    let exclude = exclude_member.as_str().with_context(|| {
-                        format!("input '{name}': exclude_follow[{index}] must be a string")
-                    })?;
-                    excludes.insert(exclude.to_owned());
-                }
-                excludes
-            },
-            None => BTreeSet::new(),
-        };
+        let excludes = string_array(name, "exclude_follow", entry.get("exclude_follow"))?
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
         let group = str_field("group")?;
         let frozen = bool_field("frozen")?.unwrap_or(false);
         let submodules = bool_field("submodules")?.unwrap_or(false);
@@ -222,6 +210,27 @@ impl Input {
             frozen,
         })
     }
+}
+
+fn string_array<'item>(
+    name: &str,
+    key: &str,
+    item: Option<&'item Item>,
+) -> Result<Vec<&'item str>> {
+    let Some(array_item) = item else {
+        return Ok(Vec::new());
+    };
+    let arr = array_item
+        .as_array()
+        .with_context(|| format!("input '{name}': {key} must be an array of strings"))?;
+    arr.iter()
+        .enumerate()
+        .map(|(index, member)| {
+            member
+                .as_str()
+                .with_context(|| format!("input '{name}': {key}[{index}] must be a string"))
+        })
+        .collect::<Result<Vec<_>>>()
 }
 
 #[derive(Debug)]
