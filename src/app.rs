@@ -94,6 +94,10 @@ pub fn run(cmd: Command) -> misstep::Result<()> {
         Command::Signer(action) => {
             recorded(&project, &label, || commands::signer(&project, &action))
         },
+        Command::Patch(action) => recorded(&project, &label, || commands::patch(&project, &action)),
+        Command::Materialize { names } => {
+            recorded(&project, &label, || commands::materialize(&project, &names))
+        },
     };
 
     if check_resolver && res.is_ok() {

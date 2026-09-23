@@ -24,6 +24,7 @@ struct Entry {
     toml:     Option<String>,
     lock:     Option<String>,
     resolver: Option<String>,
+    files:    Option<String>,
 }
 
 impl Entry {

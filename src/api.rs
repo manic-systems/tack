@@ -57,6 +57,8 @@ pub enum CommandOutcome {
     Alias,
     SetFrozen,
     Signer,
+    Patch,
+    Materialize,
     Dedup(DedupReport),
     History(Option<HistoryView>),
     Undo(Option<HistoryView>),
@@ -128,10 +130,7 @@ impl<'a> Tack<'a> {
                 names,
                 accept,
             } => {
-                let selection = commands::Selection {
-                    names:   &names,
-                    exclude: &exclude,
-                };
+                let selection = commands::Selection::new(&names, &exclude);
                 self.recorded(label, || {
                     commands::update(self.project, selection, accept).map(CommandOutcome::Update)
                 })
@@ -141,18 +140,13 @@ impl<'a> Tack<'a> {
                 names,
                 verbose,
             } => {
-                let selection = commands::Selection {
-                    names:   &names,
-                    exclude: &exclude,
-                };
+                let selection = commands::Selection::new(&names, &exclude);
                 let report = commands::look(self.project, selection, verbose)?;
                 Ok(unrecorded(CommandOutcome::Look(report)))
             },
             Command::Tree { exclude, names } => {
-                let report = commands::tree(self.project, commands::Selection {
-                    names:   &names,
-                    exclude: &exclude,
-                })?;
+                let report =
+                    commands::tree(self.project, commands::Selection::new(&names, &exclude))?;
                 Ok(unrecorded(CommandOutcome::Tree(report)))
             },
             Command::Verify { base } => {
@@ -182,6 +176,16 @@ impl<'a> Tack<'a> {
             Command::Signer(action) => {
                 self.recorded_as(label, CommandOutcome::Signer, || {
                     commands::signer(self.project, &action)
+                })
+            },
+            Command::Patch(action) => {
+                self.recorded_as(label, CommandOutcome::Patch, || {
+                    commands::patch(self.project, &action)
+                })
+            },
+            Command::Materialize { names } => {
+                self.recorded_as(label, CommandOutcome::Materialize, || {
+                    commands::materialize(self.project, &names)
                 })
             },
             Command::Dedup => {
@@ -247,6 +251,8 @@ fn status_for(outcome: &CommandOutcome) -> CommandStatus {
         | CommandOutcome::Alias
         | CommandOutcome::SetFrozen
         | CommandOutcome::Signer
+        | CommandOutcome::Patch
+        | CommandOutcome::Materialize
         | CommandOutcome::Dedup(_)
         | CommandOutcome::History(_)
         | CommandOutcome::Undo(_)

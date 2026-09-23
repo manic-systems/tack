@@ -18,6 +18,7 @@ use misstep::{
     ResultExt as _,
     bail,
 };
+use tempfile::TempDir;
 use ureq::{
     Body,
     ResponseExt as _,
@@ -65,10 +66,25 @@ use crate::{
     },
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct FetchedPin {
     node:     LockedNode,
     identity: FetchIdentity,
+    tree:     Option<FetchedTree>,
+}
+
+/// the unpacked tree a pin was hashed from, kept so patching can reuse it
+/// instead of downloading the same rev again
+#[derive(Debug)]
+pub struct FetchedTree {
+    _dir: TempDir,
+    root: PathBuf,
+}
+
+impl FetchedTree {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
 
 impl FetchedPin {
@@ -76,6 +92,7 @@ impl FetchedPin {
         Self {
             node,
             identity: FetchIdentity::Rev(rev),
+            tree: None,
         }
     }
 
@@ -83,6 +100,7 @@ impl FetchedPin {
         Self {
             node,
             identity: FetchIdentity::ContentHash(hash),
+            tree: None,
         }
     }
 
@@ -90,6 +108,7 @@ impl FetchedPin {
         Self {
             node,
             identity: FetchIdentity::ImmutableUrl(url),
+            tree: None,
         }
     }
 
@@ -97,7 +116,19 @@ impl FetchedPin {
         Self {
             node,
             identity: FetchIdentity::Path(path),
+            tree: None,
         }
+    }
+
+    pub(super) fn with_tree(self, dir: TempDir, root: PathBuf) -> Self {
+        Self {
+            tree: Some(FetchedTree { _dir: dir, root }),
+            ..self
+        }
+    }
+
+    pub const fn take_tree(&mut self) -> Option<FetchedTree> {
+        self.tree.take()
     }
 
     pub fn into_parts(self) -> (LockedNode, FetchIdentity) {
@@ -355,7 +386,7 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
                     LockedNode::new_tarball_with_rev(immutable_url.clone(), rev, nar_hash.clone())
                 },
             );
-            Ok(FetchedPin::immutable_url(node, immutable_url))
+            Ok(FetchedPin::immutable_url(node, immutable_url).with_tree(dir, root))
         },
         Source::Path { ref path } => {
             let target = Path::new(path);
@@ -470,7 +501,7 @@ fn fetch_gitlab_archive_pin(
             0
         });
     let node = LockedNode::new_gitlab(host, owner, repo, rev.clone(), nar_hash, last_modified);
-    Ok(FetchedPin::rev(node, rev))
+    Ok(FetchedPin::rev(node, rev).with_tree(dir, root))
 }
 
 fn git_pin_from_checkout(
@@ -497,7 +528,8 @@ fn git_pin_from_checkout(
         },
     };
 
-    Ok(FetchedPin::rev(node, checkout.rev))
+    let root = checkout.dir.path().to_path_buf();
+    Ok(FetchedPin::rev(node, checkout.rev).with_tree(checkout.dir, root))
 }
 
 fn immutable_url_of(resp: &ureq_http::Response<Body>, fallback: &str) -> String {
@@ -668,7 +700,13 @@ fn commit_url(node: &LockedNode) -> Option<(String, &str)> {
     Some((url, rev.as_str()))
 }
 
-fn raw(url: &str, credential_host: Option<&str>) -> FetchResult<String> {
+/// whether tack holds a token for `host`, since forges answer a request for a
+/// private repo without one as if it didn't exist
+pub fn has_token(host: &str) -> bool {
+    token_for_host(host).is_some()
+}
+
+pub fn raw(url: &str, credential_host: Option<&str>) -> FetchResult<String> {
     HttpClient::global().raw_text(url, credential_host)
 }
 

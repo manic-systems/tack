@@ -14,6 +14,7 @@ use serde::{
 use serde_json::Value;
 
 use crate::{
+    patched::store::StorePath,
     project::write_atomic,
     source::{
         gitlab,
@@ -37,6 +38,8 @@ pub struct LockFile {
 struct Entry {
     #[serde(flatten)]
     node:      LockedNode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    patched:   Option<PatchedTree>,
     /// who signed the locked rev, which makes it the anchor later updates
     /// verify from
     #[serde(
@@ -75,6 +78,7 @@ impl From<LockedNode> for Entry {
     fn from(node: LockedNode) -> Self {
         Self {
             node,
+            patched: None,
             signed_by: None,
         }
     }
@@ -151,7 +155,8 @@ impl LockFile {
         self.entries.get(name).map(|entry| &entry.node)
     }
 
-    /// a new node drops the signer, since nothing has verified it yet
+    /// a new node drops the signer and the patched tree, since neither covers
+    /// it
     pub fn insert(&mut self, name: String, node: LockedNode) -> Option<LockedNode> {
         self.passthrough.remove(&name);
         self.entries
@@ -169,6 +174,19 @@ impl LockFile {
         };
         let changed = entry.signed_by != signer;
         entry.signed_by = signer;
+        changed
+    }
+
+    pub fn patched(&self, name: &str) -> Option<&PatchedTree> {
+        self.entries.get(name)?.patched.as_ref()
+    }
+
+    pub fn set_patched(&mut self, name: &str, tree: Option<PatchedTree>) -> bool {
+        let Some(entry) = self.entries.get_mut(name) else {
+            return false;
+        };
+        let changed = entry.patched != tree;
+        entry.patched = tree;
         changed
     }
 
@@ -219,6 +237,27 @@ impl Serialize for NodeRepr<'_> {
             Self::Declared(declared) => declared.serialize(serializer),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct PatchedTree {
+    pub path:          StorePath,
+    #[serde(rename = "narHash")]
+    pub nar_hash:      String,
+    #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<u64>,
+    pub patches:       Vec<PatchDigest>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct PatchDigest {
+    pub source: String,
+    /// where a remote patch was downloaded from, so repointing a shorturl
+    /// alias downloads it again
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url:    Option<String>,
+    pub file:   String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Deserialize)]

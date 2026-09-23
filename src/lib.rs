@@ -10,6 +10,7 @@ mod fetch;
 mod history;
 mod lock;
 mod nar;
+mod patched;
 mod pins;
 mod project;
 mod render;
@@ -32,6 +33,7 @@ pub use api::{
 pub use cli::{
     AddArgs,
     Command,
+    PatchAction,
     SignerAction,
 };
 pub use commands::InitRequest;

@@ -61,6 +61,10 @@ impl HistoryStore {
         }
     }
 
+    pub fn state_dir(&self) -> &Path {
+        &self.dir
+    }
+
     pub fn record(&self, label: &str, pre: Snapshot, post: Snapshot) -> Result<bool> {
         self.record_inner(label, pre, post)
     }
@@ -194,6 +198,7 @@ impl HistoryStore {
                 persist(&snaps, entry.toml.as_deref(), &mut referenced)?,
                 persist(&snaps, entry.lock.as_deref(), &mut referenced)?,
                 persist(&snaps, entry.resolver.as_deref(), &mut referenced)?,
+                persist(&snaps, entry.files.as_deref(), &mut referenced)?,
             ));
         }
         let doc = StoredHistory::new(history.cursor, entries);

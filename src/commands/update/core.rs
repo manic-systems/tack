@@ -18,6 +18,7 @@ use crate::{
         CommitLog,
         CompareStatus,
         FetchedPin,
+        FetchedTree,
         compare_planner::{
             CompareJob,
             CompareSession,
@@ -28,6 +29,12 @@ use crate::{
         LockIdentity,
         LockedNode,
         SignedBy,
+    },
+    patched::{
+        self,
+        Mode,
+        PatchedPin,
+        Settled,
     },
     pins::{
         self,
@@ -94,10 +101,12 @@ pub fn fetch_input(
 }
 
 struct PinResolution {
-    outcome: UpdateOutcome,
-    node:    Option<LockedNode>,
-    drift:   bool,
-    warning: Option<String>,
+    outcome:  UpdateOutcome,
+    node:     Option<LockedNode>,
+    upstream: Option<FetchedTree>,
+    patched:  Settled,
+    drift:    bool,
+    warning:  Option<String>,
 }
 
 enum SignerMark {
@@ -240,17 +249,20 @@ fn classify(
         return unchanged(warning);
     }
 
-    let fetched = match fetch_input(input.pin_type, input.unpack, input.submodules, expanded) {
+    let mut fetched = match fetch_input(input.pin_type, input.unpack, input.submodules, expanded) {
         Ok(fetched) => fetched,
         Err(err) => {
             return PinResolution {
                 outcome: UpdateOutcome::Failed(format!("{err:#}")),
                 node: None,
+                upstream: None,
+                patched: Settled::Current,
                 drift: false,
                 warning,
             };
         },
     };
+    let upstream = fetched.take_tree();
     let (node, identity) = fetched.into_parts();
     let new_identity = String::from(identity);
 
@@ -311,6 +323,8 @@ fn classify(
             signed_by: None,
         },
         node: Some(node),
+        upstream,
+        patched: Settled::Current,
         drift: false,
         warning,
     }
@@ -330,20 +344,24 @@ fn declared_changed(
         || !locked_from_source(input, localized_url.parse::<Source>().ok().as_ref(), node)
 }
 
-fn prune_declared(lock: &mut LockFile, all: &[pins::Input]) -> bool {
+/// forgets what the lock and the gcroots keep for pins no longer declared
+fn prune_departed(project: &Project, lock: &mut LockFile, all: &[pins::Input]) -> Result<bool> {
     let names = all
         .iter()
         .map(|input| input.name.as_str())
         .collect::<BTreeSet<_>>();
-    lock.retain_declared(|name| names.contains(name))
+    patched::prune_roots(project, &names.iter().copied().collect::<Vec<_>>())?;
+    Ok(lock.retain_declared(|name| names.contains(name)))
 }
 
 const fn frozen() -> PinResolution {
     PinResolution {
-        outcome: UpdateOutcome::Frozen,
-        node:    None,
-        drift:   false,
-        warning: None,
+        outcome:  UpdateOutcome::Frozen,
+        node:     None,
+        upstream: None,
+        patched:  Settled::Current,
+        drift:    false,
+        warning:  None,
     }
 }
 
@@ -382,6 +400,56 @@ fn locked_url(node: Option<&LockedNode>) -> Option<&str> {
             | &LockedNode::Path { .. },
         )
         | None => None,
+    }
+}
+
+/// a new node only lands once its patches apply, so a conflict keeps the
+/// pin on the rev it had
+fn settle_patches(
+    project: &Project,
+    input: &pins::Input,
+    lock: &LockFile,
+    resolution: &mut PinResolution,
+) {
+    let upstream = resolution.upstream.take();
+    if matches!(resolution.outcome, UpdateOutcome::Failed(_)) {
+        return;
+    }
+    let moved = resolution.node.is_some();
+    let Some(node) = resolution.node.as_ref().or_else(|| lock.get(&input.name)) else {
+        return;
+    };
+    let pin = PatchedPin::new(project, &input.name, node).with_upstream(upstream);
+    match pin.settle(
+        &input.patches,
+        lock.patched(&input.name),
+        moved,
+        Mode::Update,
+    ) {
+        Ok(settled) => {
+            // the rev line says unchanged, so a rebuild on the same node needs saying
+            let rebuilt = match settled {
+                Settled::Rehashed(_) => Some("its tree no longer matched the lock's hash"),
+                Settled::Rebuilt(_) if !moved => Some("its patches changed"),
+                Settled::Current | Settled::Restored | Settled::Rebuilt(_) | Settled::Unpatched => {
+                    None
+                },
+            };
+            if let Some(reason) = rebuilt {
+                let message = format!("{}: rebuilt its patched tree, {reason}", input.name);
+                resolution.warning = Some(
+                    resolution
+                        .warning
+                        .take()
+                        .map_or_else(|| message.clone(), |prev| format!("{prev} {message}")),
+                );
+            }
+            resolution.patched = settled;
+        },
+        Err(err) => {
+            resolution.outcome = UpdateOutcome::Failed(format!("{err:#}"));
+            resolution.node = None;
+        },
     }
 }
 
@@ -431,6 +499,8 @@ const fn unchanged(warning: Option<String>) -> PinResolution {
     PinResolution {
         outcome: UpdateOutcome::Unchanged,
         node: None,
+        upstream: None,
+        patched: Settled::Current,
         drift: false,
         warning,
     }
@@ -446,6 +516,8 @@ fn resolve_drift(
         PinResolution {
             outcome,
             node: Some(node),
+            upstream: None,
+            patched: Settled::Current,
             drift: false,
             warning,
         }
@@ -453,6 +525,8 @@ fn resolve_drift(
         PinResolution {
             outcome,
             node: None,
+            upstream: None,
+            patched: Settled::Current,
             drift: true,
             warning,
         }
@@ -489,13 +563,7 @@ pub(super) fn update(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut lock = project.load_lock()?;
-    let keyring = Keyring::load(
-        doc.signers()?
-            .into_iter()
-            .filter(|&(ref name, _)| selected.iter().any(|input| input.signers.contains(name)))
-            .collect(),
-        project.dir(),
-    )?;
+    let keyring = doc.keyring(&selected, project.dir())?;
     progress.begin(&selected);
 
     let session = CompareSession::new();
@@ -521,7 +589,11 @@ pub(super) fn update(
             &session,
         );
         let recorded = lock.signed_by(&input.name);
-        let mark = check_signers(input, old, recorded, &keyring, &mut resolution);
+        let mut mark = check_signers(input, old, recorded, &keyring, &mut resolution);
+        settle_patches(project, input, &lock, &mut resolution);
+        if matches!(resolution.outcome, UpdateOutcome::Failed(_)) {
+            mark = SignerMark::Keep;
+        }
         progress.finished(index, &resolution.outcome);
         (resolution, mark, url)
     });
@@ -543,6 +615,7 @@ pub(super) fn update(
             changed_names.push(input.name.clone());
         }
         changed |= mark.record_into(&mut lock, &input.name);
+        changed |= resolution.patched.record_into(&mut lock, &input.name);
         if resolution.drift {
             drift += 1;
         }
@@ -552,7 +625,7 @@ pub(super) fn update(
         });
     }
 
-    changed |= prune_declared(&mut lock, &all);
+    changed |= prune_departed(project, &mut lock, &all)?;
 
     let auto_dedup = if drift == 0 && !changed_names.is_empty() {
         dedup::auto_dedup_scoped(&all, &all_follow, &mut lock, &changed_names)

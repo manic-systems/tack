@@ -192,6 +192,9 @@ fn auto_dedup_inner(
     }
 
     for (target, mut obs) in observations {
+        if lock.patched(&target).is_some() {
+            continue;
+        }
         if let Some(current) = lock.get(&target) {
             obs.insert(0, LockObservation::from(current.clone()));
         }

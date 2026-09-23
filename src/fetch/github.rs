@@ -298,7 +298,7 @@ pub(super) fn fetch_pin(
     let nar_hash = nar::hash_path(&root)?;
     let rev = resolved.rev;
     let node = LockedNode::new_github(owner, repo, rev.clone(), nar_hash, resolved.last_modified);
-    Ok(FetchedPin::rev(node, rev))
+    Ok(FetchedPin::rev(node, rev).with_tree(dir, root))
 }
 
 struct ResolvedGithubRef {
@@ -574,6 +574,27 @@ struct GithubSshKey {
 #[derive(Deserialize)]
 struct GithubGpgKey {
     raw_key: Option<String>,
+}
+
+pub fn pull_diff(owner: &str, repo: &str, number: u64) -> FetchResult<String> {
+    diff_with_fallback(
+        &format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}"),
+        &format!("https://github.com/{owner}/{repo}/pull/{number}.diff"),
+    )
+}
+
+pub fn commit_diff(owner: &str, repo: &str, rev: &str) -> FetchResult<String> {
+    diff_with_fallback(
+        &format!("https://api.github.com/repos/{owner}/{repo}/commits/{rev}"),
+        &format!("https://github.com/{owner}/{repo}/commit/{rev}.diff"),
+    )
+}
+
+/// the api refuses diffs of more than 300 files, which the web route serves
+fn diff_with_fallback(api: &str, web: &str) -> FetchResult<String> {
+    let http = GithubClient::global().http;
+    http.github_diff(api)
+        .or_else(|err| http.raw_text(web, Some("github.com")).map_err(|_| err))
 }
 
 #[cfg(test)]

@@ -30,4 +30,5 @@
 #   submodules      fetch git submodules
 #   unpack          fixed-only tarball or file
 #   signers         names from [signers], one of whom must have signed the locked commit
+#   patches         patch urls or files relative to this dir, applied in order
 [inputs]

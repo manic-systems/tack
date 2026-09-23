@@ -3,6 +3,8 @@
 
 let
   inherit (builtins)
+    addErrorContext
+    all
     attrNames
     attrValues
     concatMap
@@ -10,6 +12,7 @@ let
     elemAt
     filter
     fromJSON
+    hashFile
     head
     intersectAttrs
     isList
@@ -92,7 +95,12 @@ let
           else if !(elem (node.type or "") knownTypes) then
             throw "tack: unknown lock type '${node.type or "?"}' for pin '${name}'"
           else
-            fetchTree (removeAttrs node [ "signedBy" ]);
+            fetchTree (
+              removeAttrs node [
+                "signedBy"
+                "patched"
+              ]
+            );
 
       fetchFixed =
         { name, entry }:
@@ -115,6 +123,54 @@ let
           };
         in
         if (entry.unpack or "file") == "tarball" then unpacked.outPath + "/" + name else raw.outPath;
+
+      # tack builds patched trees and adds them to the store, so eval only
+      # fetches a locked path and never builds
+      fetchPatched =
+        { name, pin }:
+        let
+          node = lock.${name} or { };
+          tree =
+            node.patched
+              or (throw "tack: pin '${name}' has patches but no patched tree, run tack update ${name}");
+          vendored =
+            digest:
+            let
+              file = ./. + "/${digest.file}";
+            in
+            if pathExists file then
+              file
+            else
+              throw "tack: patch ${digest.file} for pin '${name}' is missing, if this is a flake make sure it is tracked by git (git add .tack/patches)";
+          current =
+            map (digest: digest.source) tree.patches == pin.patches
+            && all (digest: hashFile "sha256" (vendored digest) == digest.sha256) tree.patches;
+          fetched =
+            addErrorContext
+              "tack: could not read the patched tree of '${name}', run tack materialize ${name}, or tack update ${name} if the lock was edited by hand"
+              (
+                fetchTree (
+                  {
+                    type = "path";
+                    inherit (tree) path narHash;
+                  }
+                  // (if tree ? lastModified then { inherit (tree) lastModified; } else { })
+                )
+              );
+        in
+        if !current then
+          throw "tack: patches for '${name}' changed since the lock was written, run tack update ${name}"
+        else
+          fetched
+          // (
+            if node ? rev then
+              {
+                dirtyRev = node.rev + "-dirty";
+                dirtyShortRev = substring 0 7 node.rev + "-dirty";
+              }
+            else
+              { }
+          );
 
       resolveSpec =
         { upLock, spec }:
@@ -393,7 +449,8 @@ let
           }
         else
           let
-            sourceInfo = fetchPin name;
+            sourceInfo =
+              if (pin.patches or [ ]) == [ ] then fetchPin name else fetchPatched { inherit name pin; };
             subdir = if pin ? dir then "/" + pin.dir else "";
           in
           if pinType == "flake" then

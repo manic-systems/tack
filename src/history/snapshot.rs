@@ -2,6 +2,7 @@
 
 use std::{
     collections::{
+        BTreeMap,
         HashSet,
         hash_map::DefaultHasher,
     },
@@ -14,7 +15,10 @@ use std::{
     result::Result as StdResult,
 };
 
-use data_encoding::HEXLOWER;
+use data_encoding::{
+    BASE64,
+    HEXLOWER,
+};
 use hmac_sha256::Hash as Sha256;
 use misstep::Result;
 use serde::{
@@ -35,6 +39,9 @@ pub struct Snapshot {
     toml:     Option<String>,
     lock:     Option<String>,
     resolver: Option<String>,
+    /// the vendored patch and signer key files, which the lock and pins.toml
+    /// point at
+    files:    Option<String>,
 }
 
 impl Snapshot {
@@ -43,6 +50,7 @@ impl Snapshot {
             toml:     fs::read_to_string(project.pins_path()).ok(),
             lock:     fs::read_to_string(project.lock_path()).ok(),
             resolver: fs::read_to_string(project.resolver_path()).ok(),
+            files:    capture_files(project.dir()),
         }
     }
 
@@ -53,11 +61,99 @@ impl Snapshot {
             toml: self.toml,
             lock: self.lock,
             resolver: self.resolver,
+            files: self.files,
         }
     }
 
     pub(super) fn matches_entry(&self, entry: &Entry) -> bool {
-        self.toml == entry.toml && self.lock == entry.lock && self.resolver == entry.resolver
+        self.toml == entry.toml
+            && self.lock == entry.lock
+            && self.resolver == entry.resolver
+            && self.files == entry.files
+    }
+}
+
+/// the `.tack` subdirectories whose files undo restores with the state files
+const VENDORED: [&str; 2] = ["patches", "keys"];
+
+/// every vendored file keyed by its path under `.tack`, as one text blob so
+/// undo stores it like the other state files
+fn capture_files(tack: &Path) -> Option<String> {
+    let files = vendored_files(tack);
+    if files.is_empty() {
+        return None;
+    }
+    let encoded = files
+        .into_iter()
+        .map(|(path, bytes)| (path, BASE64.encode(&bytes)))
+        .collect::<BTreeMap<_, _>>();
+    serde_json::to_string(&encoded).ok()
+}
+
+fn vendored_files(tack: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    for dir in VENDORED {
+        collect_files(tack, &tack.join(dir), &mut files);
+    }
+    files
+}
+
+fn collect_files(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
+    let Ok(read) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            collect_files(root, &path, files);
+        } else if !kind.is_symlink()
+            && let (Ok(relative), Ok(bytes)) = (path.strip_prefix(root), fs::read(&path))
+        {
+            files.insert(relative.to_string_lossy().into_owned(), bytes);
+        }
+    }
+}
+
+/// puts the vendored files back the way [`capture_files`] saw them
+pub(super) fn restore_files(tack: &Path, blob: Option<&str>) -> Result<()> {
+    let wanted = blob
+        .map(serde_json::from_str::<BTreeMap<String, String>>)
+        .transpose()?
+        .unwrap_or_default();
+    let present = vendored_files(tack);
+    for path in present.keys().filter(|path| !wanted.contains_key(*path)) {
+        fs::remove_file(tack.join(path))?;
+    }
+    for (path, encoded) in &wanted {
+        let bytes = BASE64.decode(encoded.as_bytes())?;
+        if present.get(path) == Some(&bytes) {
+            continue;
+        }
+        let target = tack.join(path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        project::write_atomic(&target, &bytes)?;
+    }
+    for dir in VENDORED {
+        prune_empty(&tack.join(dir));
+        let _ = fs::remove_dir(tack.join(dir));
+    }
+    Ok(())
+}
+
+fn prune_empty(dir: &Path) {
+    let Ok(read) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            prune_empty(&entry.path());
+            let _ = fs::remove_dir(entry.path());
+        }
     }
 }
 
@@ -91,6 +187,8 @@ pub(super) struct StoredEntry {
     lock:     SnapshotRef,
     #[serde(default)]
     resolver: SnapshotRef,
+    #[serde(default)]
+    files:    SnapshotRef,
 }
 
 impl StoredEntry {
@@ -100,6 +198,7 @@ impl StoredEntry {
         toml: SnapshotRef,
         lock: SnapshotRef,
         resolver: SnapshotRef,
+        files: SnapshotRef,
     ) -> Self {
         Self {
             label,
@@ -107,6 +206,7 @@ impl StoredEntry {
             toml,
             lock,
             resolver,
+            files,
         }
     }
 
@@ -117,6 +217,7 @@ impl StoredEntry {
             toml:     self.toml.resolve(snaps)?.into_option(),
             lock:     self.lock.resolve(snaps)?.into_option(),
             resolver: self.resolver.resolve(snaps)?.into_option(),
+            files:    self.files.resolve(snaps)?.into_option(),
         })
     }
 }

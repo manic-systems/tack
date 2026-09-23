@@ -46,6 +46,7 @@ use super::{
 
 const TACK_USER_AGENT: &str = "tack";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
+const GITHUB_DIFF_ACCEPT: &str = "application/vnd.github.diff";
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const GITHUB_GRAPHQL_TIMEOUT: Duration = Duration::from_secs(15);
 const APPLICATION_JSON: &str = "application/json";
@@ -146,6 +147,16 @@ impl HttpClient {
             serde_json::from_str::<T>(&body)
                 .map(|parsed| (parsed, next))
                 .map_err(|err| FetchError::Github(format!("api {url}: invalid json: {err}")))
+        })
+    }
+
+    pub(super) fn github_diff(self, url: &str) -> FetchResult<String> {
+        with_credential_fallback("github.com", true, |credential| {
+            let mut resp =
+                Self::with_credential(self.get(url).header(ACCEPT, GITHUB_DIFF_ACCEPT), credential)
+                    .call()
+                    .map_err(|err| FetchError::from_ureq(err, url))?;
+            read_ok_body(&mut resp, url)
         })
     }
 

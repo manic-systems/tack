@@ -116,6 +116,11 @@ impl Project {
         self.dir.join("pins.lock.json")
     }
 
+    /// where vendored and copied patch files live
+    pub fn patches_dir(&self) -> PathBuf {
+        self.dir.join("patches")
+    }
+
     /// legacy `inputs.nix` else `default.nix`
     pub fn resolver_path(&self) -> PathBuf {
         let legacy = self.dir.join("inputs.nix");
@@ -183,7 +188,10 @@ impl Project {
     }
 }
 
-pub fn write_atomic(path: &Path, contents: &str) -> MisstepResult<()> {
+pub fn write_atomic<Contents>(path: &Path, contents: Contents) -> MisstepResult<()>
+where
+    Contents: AsRef<[u8]>,
+{
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|dur| dur.as_nanos())

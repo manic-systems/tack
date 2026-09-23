@@ -57,6 +57,7 @@ fn gitlab_git_url_checkout_stays_generic_git_lock() {
     let fetched = git_pin_from_checkout(
         &source,
         git::PinCheckout {
+            dir:           tempfile::tempdir().unwrap(),
             rev:           "abc123".to_owned(),
             nar_hash:      "sha256-n".to_owned(),
             last_modified: 1_700,

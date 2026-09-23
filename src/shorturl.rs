@@ -16,6 +16,21 @@ impl<'doc> ShortUrls<'doc> {
     }
 
     pub fn expand(&self, url: &str) -> Result<String> {
+        let (expanded, from_alias) = self.resolve(url)?;
+        if from_alias {
+            Ok(Self::normalize_git_ref(&expanded))
+        } else {
+            Ok(expanded)
+        }
+    }
+
+    /// alias expansion without the pin-only rewrite of a trailing path segment
+    /// into `?ref=`, for urls that name something other than a repo
+    pub fn expand_aliases(&self, url: &str) -> Result<String> {
+        self.resolve(url).map(|(expanded, _)| expanded)
+    }
+
+    fn resolve(&self, url: &str) -> Result<(String, bool)> {
         let mut expanded = url.to_owned();
         let mut chain = Vec::new();
         while let Some((scheme, rest)) = expanded.split_once(':') {
@@ -32,13 +47,7 @@ impl<'doc> ShortUrls<'doc> {
             }
             expanded = template.replace("{path}", rest);
         }
-
-        let from_alias = !chain.is_empty();
-        if from_alias {
-            Ok(Self::normalize_git_ref(&expanded))
-        } else {
-            Ok(expanded)
-        }
+        Ok((expanded, !chain.is_empty()))
     }
 
     /// nix treats the trailing segment as path depth

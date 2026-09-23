@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 data-encoding = "2.11.0"
+diffy = "0.5.2"
 etcetera = "0.11.0"
 flate2 = "1.1.9"
 gix = { default-features = false, features = [

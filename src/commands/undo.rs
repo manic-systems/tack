@@ -5,6 +5,7 @@ use misstep::Result;
 use crate::{
     history,
     history::View,
+    patched,
     project::Project,
     render,
 };
@@ -39,10 +40,14 @@ pub fn history(project: &Project) -> Option<View> {
 
 pub fn undo_view(project: &Project) -> Result<Option<View>> {
     let store = history::HistoryStore::for_project(project);
-    store.undo(project)
+    let view = store.undo(project)?;
+    patched::reroot(project)?;
+    Ok(view)
 }
 
 pub fn redo_view(project: &Project) -> Result<Option<View>> {
     let store = history::HistoryStore::for_project(project);
-    store.redo(project)
+    let view = store.redo(project)?;
+    patched::reroot(project)?;
+    Ok(view)
 }

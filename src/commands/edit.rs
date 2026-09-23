@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::path::Path;
+use std::{
+    fs,
+    io::ErrorKind,
+    path::Path,
+};
 
-use misstep::Result;
+use misstep::{
+    Result,
+    ResultExt as _,
+};
 
 use super::{
     Selection,
@@ -13,6 +20,7 @@ use crate::{
     cli::AddArgs,
     error::user_bail,
     fetch,
+    patched::unroot,
     pins::{
         self,
         PinType,
@@ -111,6 +119,13 @@ fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
     }
     if removed_lock {
         project.save_lock(&lk)?;
+    }
+    unroot(&project, name)?;
+    match fs::remove_dir_all(project.patches_dir().join(name)) {
+        Err(err) if err.kind() != ErrorKind::NotFound => {
+            return Err(err).with_context(|| format!("remove patches/{name}"));
+        },
+        _ => {},
     }
     Ok((removed_pin, removed_lock))
 }

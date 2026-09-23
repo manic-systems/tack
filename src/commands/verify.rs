@@ -90,13 +90,7 @@ pub fn verify(project: &Project, base: Option<&str>) -> Result<VerifyReport> {
         return Ok(VerifyReport::default());
     }
     let lock = project.load_lock()?;
-    let keyring = Keyring::load(
-        doc.signers()?
-            .into_iter()
-            .filter(|&(ref name, _)| gated.iter().any(|input| input.signers.contains(name)))
-            .collect(),
-        project.dir(),
-    )?;
+    let keyring = doc.keyring(&gated, project.dir())?;
 
     let mut pins = gated
         .into_iter()

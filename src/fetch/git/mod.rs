@@ -59,6 +59,7 @@ use misstep::{
     Result,
     ResultExt as _,
 };
+use tempfile::TempDir;
 
 use super::{
     CommitObject,
@@ -74,6 +75,7 @@ mod dag;
 #[cfg(test)] mod test_remote;
 
 pub(super) struct PinCheckout {
+    pub dir:           TempDir,
     pub rev:           String,
     pub nar_hash:      String,
     pub last_modified: i64,
@@ -134,6 +136,7 @@ pub(super) fn fetch_pin_checkout(
     remove_root_git_dir(dir.path());
     let nar_hash = nar::hash_path(dir.path())?;
     Ok(PinCheckout {
+        dir,
         rev,
         nar_hash,
         last_modified,

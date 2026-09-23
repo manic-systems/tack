@@ -15,7 +15,10 @@ use std::{
 
 use misstep::Result;
 
-use super::Entry;
+use super::{
+    Entry,
+    snapshot::restore_files,
+};
 use crate::project::Project;
 
 /// restore all state files as one transaction
@@ -40,13 +43,11 @@ pub(super) fn restore(project: &Project, entry: &Entry) -> Result<()> {
             return Err(err);
         }
     }
-    match tx.commit() {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            tx.rollback();
-            Err(err)
-        },
+    if let Err(err) = tx.commit() {
+        tx.rollback();
+        return Err(err);
     }
+    restore_files(project.dir(), entry.files.as_deref())
 }
 
 struct RestoreStep {

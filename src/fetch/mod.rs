@@ -26,6 +26,7 @@ pub use error::{
 };
 pub use resolve::{
     FetchedPin,
+    FetchedTree,
     commit_object,
     commit_range,
     fetch_fixed_pin,
@@ -35,7 +36,9 @@ pub use resolve::{
     fetch_tree_into,
     forge_miss_untrusted,
     forge_raw_file,
+    has_token,
     locked_file,
+    raw,
     raw_file,
 };
 pub use topology::{

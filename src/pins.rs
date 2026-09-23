@@ -31,9 +31,11 @@ use toml_edit::{
 use crate::{
     error::user_bail,
     lock::DECLARED_KEY,
+    patched::source::PatchSource,
     project::write_atomic,
     shorturl::ShortUrls,
     signers::{
+        Keyring,
         SignerKey,
         SignerName,
         key_file,
@@ -135,12 +137,13 @@ pub struct Input {
     pub follows:    BTreeMap<String, String>,
     pub excludes:   BTreeSet<String>,
     pub signers:    Vec<SignerName>,
+    pub patches:    Vec<PatchSource>,
     pub group:      Option<String>,
     pub frozen:     bool,
 }
 
 impl Input {
-    fn from_item(name: &str, input_item: &Item) -> Result<Self> {
+    fn from_item(name: &str, input_item: &Item, shorturls: &ShortUrls<'_>) -> Result<Self> {
         if name == DECLARED_KEY {
             user_bail!("'{name}' is reserved for the lock file");
         }
@@ -187,22 +190,7 @@ impl Input {
         if pin_type != PinType::Fixed && unpack.is_some() {
             user_bail!("input '{name}': unpack is only valid for type = \"fixed\"");
         }
-        let follows = match entry.get("follows") {
-            Some(follows_item) => {
-                let tbl = follows_item
-                    .as_table_like()
-                    .with_context(|| format!("input '{name}': follows must be a table"))?;
-                let mut follows = BTreeMap::new();
-                for (child, target_item) in tbl.iter() {
-                    let target = target_item.as_str().with_context(|| {
-                        format!("input '{name}': follows.{child} must be a string")
-                    })?;
-                    follows.insert(child.to_owned(), target.to_owned());
-                }
-                follows
-            },
-            None => BTreeMap::new(),
-        };
+        let follows = follows_table(name, entry.get("follows"))?;
         let excludes = string_array(name, "exclude_follow", entry.get("exclude_follow"))?
             .into_iter()
             .map(str::to_owned)
@@ -215,6 +203,15 @@ impl Input {
             .with_context(|| format!("input '{name}'"))?;
         if pin_type == PinType::Fixed && !signers.is_empty() {
             user_bail!("input '{name}': signers are not valid for type = \"fixed\"");
+        }
+        let patches = string_array(name, "patches", entry.get("patches"))?
+            .into_iter()
+            .map(|raw| {
+                PatchSource::parse(raw, shorturls).with_context(|| format!("input '{name}'"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if pin_type == PinType::Fixed && !patches.is_empty() {
+            user_bail!("input '{name}': patches are not valid for type = \"fixed\"");
         }
         let group = str_field("group")?;
         let frozen = bool_field("frozen")?.unwrap_or(false);
@@ -229,10 +226,28 @@ impl Input {
             follows,
             excludes,
             signers,
+            patches,
             group: group.map(str::to_owned),
             frozen,
         })
     }
+}
+
+fn follows_table(name: &str, item: Option<&Item>) -> Result<BTreeMap<String, String>> {
+    let Some(follows_item) = item else {
+        return Ok(BTreeMap::new());
+    };
+    let tbl = follows_item
+        .as_table_like()
+        .with_context(|| format!("input '{name}': follows must be a table"))?;
+    tbl.iter()
+        .map(|(child, target_item)| {
+            let target = target_item
+                .as_str()
+                .with_context(|| format!("input '{name}': follows.{child} must be a string"))?;
+            Ok((child.to_owned(), target.to_owned()))
+        })
+        .collect()
 }
 
 fn string_array<'item>(
@@ -277,7 +292,7 @@ impl PinsDoc {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        write_atomic(path, &self.doc.to_string())
+        write_atomic(path, self.doc.to_string())
     }
 
     pub fn shorturls(&self) -> ShortUrls<'_> {
@@ -301,8 +316,9 @@ impl PinsDoc {
         let Some(table) = self.doc.get("inputs").and_then(Item::as_table_like) else {
             return Ok(out);
         };
+        let shorturls = self.shorturls();
         for (name, item) in table.iter() {
-            out.push(Input::from_item(name, item)?);
+            out.push(Input::from_item(name, item, &shorturls)?);
         }
         self.signers()?;
         let declared = self.doc.get("signers").and_then(Item::as_table_like);
@@ -322,6 +338,16 @@ impl PinsDoc {
             }
         }
         Ok(out)
+    }
+
+    /// the keys of every signer that one of `inputs` lists
+    pub fn keyring(&self, inputs: &[&Input], dir: &Path) -> Result<Keyring> {
+        let listed = self
+            .signers()?
+            .into_iter()
+            .filter(|&(ref name, _)| inputs.iter().any(|input| input.signers.contains(name)))
+            .collect();
+        Keyring::load(listed, dir)
     }
 
     /// each signer's values, every one a key or a path under `.tack` to one
@@ -418,6 +444,82 @@ impl PinsDoc {
         } else {
             entry.remove("frozen");
         }
+    }
+
+    pub fn add_patch(&mut self, name: &str, patch: &str) -> Result<()> {
+        let item = self.input_item_mut(name)?;
+        let entry = item
+            .as_table_like_mut()
+            .with_context(|| format!("input '{name}' is not a table"))?;
+        match entry.get_mut("patches").and_then(Item::as_array_mut) {
+            Some(patches) => {
+                let multiline = patches.iter().any(|listed| {
+                    listed
+                        .decor()
+                        .prefix()
+                        .and_then(|prefix| prefix.as_str())
+                        .is_some_and(|prefix| prefix.contains('\n'))
+                });
+                // a multiline array keeps its layout when the new entry takes the
+                // indent of the last one, without the comments above it
+                let indent = patches
+                    .iter()
+                    .last()
+                    .and_then(|last| last.decor().prefix()?.as_str())
+                    .and_then(|prefix| prefix.rsplit_once('\n'))
+                    .map(|(_, indent)| format!("\n{indent}"));
+                patches.push(patch);
+                match (multiline, indent, patches.iter_mut().last()) {
+                    (true, Some(prefix), Some(added)) => added.decor_mut().set_prefix(prefix),
+                    (false, ..) => patches.fmt(),
+                    (true, ..) => {},
+                }
+            },
+            None => {
+                entry.insert("patches", value(Array::from_iter([patch])));
+            },
+        }
+        if let Some(inline) = item.as_inline_table_mut() {
+            inline.fmt();
+        }
+        Ok(())
+    }
+
+    pub fn remove_patch(&mut self, name: &str, patch: &str) -> Result<()> {
+        let item = self.input_item_mut(name)?;
+        let entry = item
+            .as_table_like_mut()
+            .with_context(|| format!("input '{name}' is not a table"))?;
+        let Some(patches) = entry.get_mut("patches").and_then(Item::as_array_mut) else {
+            return Ok(());
+        };
+        let Some(index) = patches
+            .iter()
+            .position(|listed| listed.as_str() == Some(patch))
+        else {
+            return Ok(());
+        };
+        let removed = patches.remove(index);
+        if patches.is_empty() {
+            entry.remove("patches");
+        } else if index == 0
+            && let Some(first) = patches.get_mut(0)
+        {
+            let prefix = removed.decor().prefix().cloned().unwrap_or_default();
+            first.decor_mut().set_prefix(prefix);
+        }
+        if let Some(inline) = item.as_inline_table_mut() {
+            inline.fmt();
+        }
+        Ok(())
+    }
+
+    fn input_item_mut(&mut self, name: &str) -> Result<&mut Item> {
+        self.doc
+            .get_mut("inputs")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|tbl| tbl.get_mut(name))
+            .with_context(|| format!("no input '{name}'"))
     }
 
     pub fn set_alias(&mut self, name: &str, template: &str) {

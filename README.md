@@ -66,6 +66,10 @@ tack signer add <name> <key-or-file> | --github <user>
                                       trust a signer's keys
 tack signer rm <name>                drop a signer no pin lists
 tack signer list                     show signers and the pins that list them
+tack patch add <name> <source>       apply a patch to a pin
+tack patch update [names...]         re-download remote patches
+tack patch rm <name> <source>        drop one
+tack materialize [names...]          rebuild patched trees missing from the store
 tack dedup                           report inputs reachable from multiple pins
 ```
 
@@ -246,6 +250,50 @@ new pins. without `--base` it checks each locked tip. it also reads the base
 pin removed outright. every `ok` line says when only the tip was checked and
 why, and when the trusted signers or their keys changed, as in `ok  signed by
 alice (keys changed: alice, tip only, signers added: mallory)`.
+
+## patches
+
+list patches on a flake or fetch pin and tack applies them in order, with no
+import-from-derivation
+
+```toml
+[inputs.nixpkgs]
+url = "gh:NixOS/nixpkgs/nixos-unstable"
+patches = [
+  "https://github.com/NixOS/nixpkgs/pull/444444",
+  "patches/nixpkgs/local-fix.patch",
+]
+```
+
+a source is a pull request or commit url on GitHub, Forgejo or Gitea, a merge
+request or commit url on GitLab, any other https url serving a diff, or a file
+relative to `.tack`. sources expand through `[shorturls]` like pin urls, and
+`github:` or `gitlab:` paths work too, so with `nixpkgs-pr =
+"https://github.com/NixOS/nixpkgs/pull/{path}"` a source can be
+`nixpkgs-pr:444444`. `tack patch add nixpkgs <source>` vendors
+remote patches into `patches/<pin>/`, and copies local files from outside
+`.tack` there too, so every patch you build against is checked in. nothing is
+vendored unless the patch applies.
+
+tack applies the patches itself, adds the result to the nix store, and locks
+its store path and narHash, so eval only ever reads a path that already exists.
+`tack update` reapplies them to each new rev, and a patch that stops applying
+keeps the pin on the rev it had. when the patch failed because upstream already
+has its change, tack says so and points at `tack patch rm`. `tack update` never
+re-downloads a patch, so a force-pushed pull request can't slip in, and
+`tack patch update` is how you take the new version on purpose.
+
+patched trees only exist in the store of the machine that built them. on a
+fresh machine or in CI, run `tack materialize` before evaluating. it rebuilds
+each tree and refuses one whose hash differs from the lock.
+
+hunks may sit at a different line than the patch says, and hand-edited hunk
+counts are recounted the way GNU patch does, but context lines must match
+exactly, since its fuzz isn't supported. binary, symlink, and submodule changes
+aren't either. when a patch stops applying, the hunks that failed land in a
+`.rej` file next to it, a patch of their own to fix up by hand. `tack patch rm`
+deletes a remote patch's vendored copy but leaves local files alone, and
+`tack undo` restores `patches/` along with the lock.
 
 ## laziness
 

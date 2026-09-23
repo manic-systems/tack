@@ -51,6 +51,10 @@ pub enum Command {
         frozen: bool,
     },
     Signer(SignerAction),
+    Patch(PatchAction),
+    Materialize {
+        names: Vec<String>,
+    },
     Dedup,
     Undo {
         list: bool,
@@ -203,6 +207,16 @@ enum Cli {
         #[pound(subcommand)]
         action: SignerAction,
     },
+    /// manage patches applied to a pin
+    Patch {
+        #[pound(subcommand)]
+        action: PatchAction,
+    },
+    /// rebuild patched pins that are missing from this machine's nix store
+    Materialize {
+        /// pins to materialize (default: all)
+        names: Vec<String>,
+    },
     /// collapse duplicate pins onto a single source
     Dedup,
     /// revert the last tack edit
@@ -213,6 +227,29 @@ enum Cli {
     },
     /// reapply an undone edit
     Redo,
+}
+
+#[derive(Parse, Debug, PartialEq, Eq)]
+pub enum PatchAction {
+    /// apply a patch, vendoring remote ones under patches/<name>/
+    Add {
+        /// input name
+        name:   String,
+        /// pull request, merge request or commit url, patch url, or local file
+        source: String,
+    },
+    /// re-download remote patches and rebuild the patched tree
+    Update {
+        /// pins to refresh (default: all)
+        names: Vec<String>,
+    },
+    /// drop a patch from a pin
+    Rm {
+        /// input name
+        name:   String,
+        /// the patch as listed in pins.toml
+        source: String,
+    },
 }
 
 pub fn parse() -> Command {
@@ -261,6 +298,14 @@ impl Command {
             Self::Signer(SignerAction::Add { ref name, .. }) => format!("signer add {name}"),
             Self::Signer(SignerAction::Rm { ref name }) => format!("signer rm {name}"),
             Self::Rm { ref name } => format!("rm {name}"),
+            Self::Patch(PatchAction::Add { ref name, .. }) => format!("patch add {name}"),
+            Self::Patch(PatchAction::Update { ref names }) => {
+                let mut parts = vec!["patch update".to_owned()];
+                parts.extend(names.iter().cloned());
+                parts.join(" ")
+            },
+            Self::Patch(PatchAction::Rm { ref name, .. }) => format!("patch rm {name}"),
+            Self::Materialize { .. } => "materialize".to_owned(),
             Self::Alias { ref name, rm, .. } => {
                 if rm {
                     format!("alias --rm {name}")
@@ -366,6 +411,8 @@ impl From<Cli> for Command {
                 }
             },
             Cli::Signer { action } => Self::Signer(action),
+            Cli::Patch { action } => Self::Patch(action),
+            Cli::Materialize { names } => Self::Materialize { names },
             Cli::Dedup => Self::Dedup,
             Cli::Undo { list } => Self::Undo { list },
             Cli::Redo => Self::Redo,

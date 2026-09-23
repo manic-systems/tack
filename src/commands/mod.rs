@@ -11,6 +11,7 @@ use misstep::Result;
 use crate::{
     cli::{
         AddArgs,
+        PatchAction,
         SignerAction,
     },
     fetch::FetchError,
@@ -51,6 +52,7 @@ mod convert;
 mod dedup;
 mod edit;
 mod init;
+mod patch;
 mod signer;
 mod tree;
 mod undo;
@@ -91,6 +93,14 @@ pub fn set_frozen(project: &Project, names: &[String], frozen: bool) -> Result<(
 
 pub fn signer(project: &Project, action: &SignerAction) -> Result<()> {
     signer::run(project, action)
+}
+
+pub fn patch(project: &Project, action: &PatchAction) -> Result<()> {
+    patch::run(project, action)
+}
+
+pub fn materialize(project: &Project, names: &[String]) -> Result<()> {
+    patch::materialize(project, names)
 }
 
 pub fn update(project: &Project, selection: Selection<'_>, accept: bool) -> Result<UpdateReport> {
@@ -168,7 +178,11 @@ pub struct Selection<'a> {
     pub exclude: &'a [String],
 }
 
-impl Selection<'_> {
+impl<'a> Selection<'a> {
+    pub const fn new(names: &'a [String], exclude: &'a [String]) -> Self {
+        Self { names, exclude }
+    }
+
     /// true when the command asked for every pin, so an empty result means an
     /// empty project
     pub const fn is_everything(&self) -> bool {
@@ -267,6 +281,7 @@ mod tests {
                     follows:    BTreeMap::new(),
                     excludes:   BTreeSet::new(),
                     signers:    Vec::new(),
+                    patches:    Vec::new(),
                     group:      None,
                     frozen:     false,
                 }
