@@ -219,6 +219,57 @@ fn check_signers(
     }
 }
 
+impl PinResolution {
+    fn failed(err: &misstep::Report, warning: Option<String>) -> Self {
+        Self {
+            outcome: UpdateOutcome::Failed(format!("{err:#}")),
+            node: None,
+            upstream: None,
+            patched: Settled::Current,
+            drift: false,
+            warning,
+        }
+    }
+
+    const fn frozen() -> Self {
+        Self {
+            outcome:  UpdateOutcome::Frozen,
+            node:     None,
+            upstream: None,
+            patched:  Settled::Current,
+            drift:    false,
+            warning:  None,
+        }
+    }
+
+    const fn unchanged(warning: Option<String>) -> Self {
+        Self {
+            outcome: UpdateOutcome::Unchanged,
+            node: None,
+            upstream: None,
+            patched: Settled::Current,
+            drift: false,
+            warning,
+        }
+    }
+
+    fn drift(
+        outcome: UpdateOutcome,
+        node: LockedNode,
+        accept: bool,
+        warning: Option<String>,
+    ) -> Self {
+        Self {
+            outcome,
+            node: accept.then_some(node),
+            upstream: None,
+            patched: Settled::Current,
+            drift: !accept,
+            warning,
+        }
+    }
+}
+
 fn classify(
     input: &pins::Input,
     expanded: &str,
@@ -246,28 +297,19 @@ fn classify(
         && !stale
         && old_identity.as_deref() == Some(current.rev.as_str())
     {
-        return unchanged(warning);
+        return PinResolution::unchanged(warning);
     }
 
     let mut fetched = match fetch_input(input.pin_type, input.unpack, input.submodules, expanded) {
         Ok(fetched) => fetched,
-        Err(err) => {
-            return PinResolution {
-                outcome: UpdateOutcome::Failed(format!("{err:#}")),
-                node: None,
-                upstream: None,
-                patched: Settled::Current,
-                drift: false,
-                warning,
-            };
-        },
+        Err(err) => return PinResolution::failed(&err, warning),
     };
     let upstream = fetched.take_tree();
     let (node, identity) = fetched.into_parts();
     let new_identity = String::from(identity);
 
     if old == Some(&node) {
-        return unchanged(warning);
+        return PinResolution::unchanged(warning);
     }
     if input.pin_type == PinType::Fixed
         && !stale
@@ -275,7 +317,7 @@ fn classify(
         && old_identity.as_deref() != Some(new_identity.as_str())
         && locked_url(old) == locked_url(Some(&node))
     {
-        return resolve_drift(
+        return PinResolution::drift(
             UpdateOutcome::FixedDrift {
                 old:      old_identity.unwrap_or_default(),
                 new:      new_identity,
@@ -288,7 +330,7 @@ fn classify(
     }
     if !stale && old_identity.as_deref() == Some(new_identity.as_str()) {
         return if hash_drifted(old, &node) {
-            resolve_drift(
+            PinResolution::drift(
                 UpdateOutcome::Drift {
                     rev:      new_identity,
                     accepted: accept,
@@ -298,7 +340,7 @@ fn classify(
                 warning,
             )
         } else {
-            unchanged(warning)
+            PinResolution::unchanged(warning)
         };
     }
 
@@ -352,17 +394,6 @@ fn prune_departed(project: &Project, lock: &mut LockFile, all: &[pins::Input]) -
         .collect::<BTreeSet<_>>();
     patched::prune_roots(project, &names.iter().copied().collect::<Vec<_>>())?;
     Ok(lock.retain_declared(|name| names.contains(name)))
-}
-
-const fn frozen() -> PinResolution {
-    PinResolution {
-        outcome:  UpdateOutcome::Frozen,
-        node:     None,
-        upstream: None,
-        patched:  Settled::Current,
-        drift:    false,
-        warning:  None,
-    }
 }
 
 fn locked_from_source(input: &pins::Input, source: Option<&Source>, node: &LockedNode) -> bool {
@@ -495,44 +526,6 @@ fn compare_with_planner(
         .map_or_else(BranchComparison::unavailable, BranchComparison::verified)
 }
 
-const fn unchanged(warning: Option<String>) -> PinResolution {
-    PinResolution {
-        outcome: UpdateOutcome::Unchanged,
-        node: None,
-        upstream: None,
-        patched: Settled::Current,
-        drift: false,
-        warning,
-    }
-}
-
-fn resolve_drift(
-    outcome: UpdateOutcome,
-    node: LockedNode,
-    accept: bool,
-    warning: Option<String>,
-) -> PinResolution {
-    if accept {
-        PinResolution {
-            outcome,
-            node: Some(node),
-            upstream: None,
-            patched: Settled::Current,
-            drift: false,
-            warning,
-        }
-    } else {
-        PinResolution {
-            outcome,
-            node: None,
-            upstream: None,
-            patched: Settled::Current,
-            drift: true,
-            warning,
-        }
-    }
-}
-
 fn hash_drifted(old: Option<&LockedNode>, node: &LockedNode) -> bool {
     matches!(
         (old.and_then(LockedNode::hash), node.hash()),
@@ -574,7 +567,7 @@ pub(super) fn update(
         let held =
             input.frozen && !selection.names.contains(&input.name) && old.is_some() && !stale;
         if held {
-            let resolution = frozen();
+            let resolution = PinResolution::frozen();
             progress.finished(index, &resolution.outcome);
             return (resolution, SignerMark::Keep, url);
         }
