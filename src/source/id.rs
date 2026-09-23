@@ -32,7 +32,7 @@ fn classify_git_url(url: &str) -> SourceId {
         return SourceId::github(&repo.owner, &repo.repo);
     }
     SourceId::Git {
-        url: url.to_lowercase(),
+        url: url.to_ascii_lowercase(),
     }
 }
 
@@ -71,12 +71,12 @@ impl From<Source> for SourceId {
             Source::Git { url, .. } => classify_git_url(&url),
             Source::Tarball { url } => {
                 Self::Tarball {
-                    url: strip_query_fragment(&url).to_lowercase(),
+                    url: strip_query_fragment(&url).to_ascii_lowercase(),
                 }
             },
             Source::Path { path } => {
                 Self::Path {
-                    path: path.to_lowercase(),
+                    path: path.to_ascii_lowercase(),
                 }
             },
         }
@@ -104,17 +104,17 @@ impl SourceId {
             LockedNode::Git { ref url, .. } => Some(classify_git_url(strip_query_fragment(url))),
             LockedNode::Tarball { ref url, .. } => {
                 Some(Self::Tarball {
-                    url: strip_query_fragment(url).to_lowercase(),
+                    url: strip_query_fragment(url).to_ascii_lowercase(),
                 })
             },
             LockedNode::Indirect { ref id, .. } => {
                 Some(Self::Indirect {
-                    id: id.to_lowercase(),
+                    id: id.to_ascii_lowercase(),
                 })
             },
             LockedNode::Path { ref path, .. } => {
                 Some(Self::Path {
-                    path: path.to_lowercase(),
+                    path: path.to_ascii_lowercase(),
                 })
             },
             LockedNode::Fixed { .. } => None,
@@ -123,16 +123,16 @@ impl SourceId {
 
     fn github(owner: &str, repo: &str) -> Self {
         Self::Github {
-            owner: owner.to_lowercase(),
-            repo:  repo.to_lowercase(),
+            owner: owner.to_ascii_lowercase(),
+            repo:  repo.to_ascii_lowercase(),
         }
     }
 
     fn gitlab(host: &str, owner: &str, repo: &str) -> Self {
         Self::Gitlab {
             host:  host::normalized(host),
-            owner: owner.to_lowercase(),
-            repo:  repo.to_lowercase(),
+            owner: owner.to_ascii_lowercase(),
+            repo:  repo.to_ascii_lowercase(),
         }
     }
 

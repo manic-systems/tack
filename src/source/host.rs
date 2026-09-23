@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 pub(super) fn is_gitlab(host: &str) -> bool {
-    let lowered = host.to_lowercase();
+    let lowered = host.to_ascii_lowercase();
     let name = without_port_for_classification(&lowered);
     name == "gitlab.com" || name.starts_with("gitlab.")
 }
@@ -11,7 +11,7 @@ pub(super) fn normalized(host: &str) -> String {
 }
 
 pub(super) fn normalized_with_default_port(host: &str, default_port: Option<&str>) -> String {
-    let lowered = host.to_lowercase();
+    let lowered = host.to_ascii_lowercase();
     let (name, port) = split_port(&lowered);
     if port.is_some() && port == default_port {
         name.to_owned()

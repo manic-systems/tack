@@ -84,7 +84,7 @@ fn host_from_authority(authority: &str, port_policy: HostPortPolicy) -> String {
         HostPortPolicy::Default(default_port) => {
             host::normalized_with_default_port(host, default_port)
         },
-        HostPortPolicy::Strip => strip_port(host).to_lowercase(),
+        HostPortPolicy::Strip => strip_port(host).to_ascii_lowercase(),
     }
 }
 

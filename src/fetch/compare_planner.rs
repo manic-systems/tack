@@ -305,7 +305,7 @@ impl CompareSource {
             Source::Git { .. } => {
                 let target = source.git_target()?;
                 Some(Self::Git {
-                    url: target.url.to_lowercase(),
+                    url: target.url.to_ascii_lowercase(),
                 })
             },
             Source::Tarball { .. } | Source::Path { .. } => None,
