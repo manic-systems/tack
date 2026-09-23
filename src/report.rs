@@ -27,6 +27,7 @@ pub enum UpdateOutcome {
         new:      String,
         accepted: bool,
     },
+    Frozen,
     Failed(String),
 }
 

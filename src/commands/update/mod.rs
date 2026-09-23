@@ -70,6 +70,7 @@ impl From<&UpdateOutcome> for PinStatus {
                     accepted,
                 }
             },
+            UpdateOutcome::Frozen => Self::Skipped("frozen".to_owned()),
             UpdateOutcome::Failed(ref msg) => Self::Failed(msg.clone()),
         }
     }

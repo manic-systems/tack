@@ -298,6 +298,17 @@ pub(super) fn update(
 
     let session = CompareSession::new();
     let resolutions = dispatcher::ordered(jobs, UPDATE_IN_FLIGHT, |index, (input, url)| {
+        let held = input.frozen && !selection.names.contains(&input.name);
+        if held && lock.get(&input.name).is_some() {
+            let resolution = PinResolution {
+                outcome: UpdateOutcome::Frozen,
+                node:    None,
+                drift:   false,
+                warning: None,
+            };
+            progress.finished(index, &resolution.outcome);
+            return resolution;
+        }
         progress.fetching(index);
         let localized = source::localize_path_url_with_warning(&url, project.dir());
         let old = lock.get(&input.name);

@@ -51,6 +51,7 @@ pub enum CommandOutcome {
     Add,
     Rm,
     Alias,
+    SetFrozen,
     Dedup(DedupReport),
     History(Option<HistoryView>),
     Undo(Option<HistoryView>),
@@ -176,6 +177,12 @@ impl<'a> Tack<'a> {
                         .map(|()| CommandOutcome::Alias)
                 })
             },
+            Command::SetFrozen { names, frozen } => {
+                self.recorded(label, || {
+                    commands::set_frozen(self.project, &names, frozen)
+                        .map(|()| CommandOutcome::SetFrozen)
+                })
+            },
             Command::Dedup => {
                 let report = commands::dedup_report(self.project)?;
                 Ok(unrecorded(CommandOutcome::Dedup(report)))
@@ -222,6 +229,7 @@ fn status_for(outcome: &CommandOutcome) -> CommandStatus {
         | CommandOutcome::Add
         | CommandOutcome::Rm
         | CommandOutcome::Alias
+        | CommandOutcome::SetFrozen
         | CommandOutcome::Dedup(_)
         | CommandOutcome::History(_)
         | CommandOutcome::Undo(_)

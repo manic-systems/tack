@@ -6,6 +6,8 @@ use eyre::Result;
 
 use super::{
     AddRequest,
+    Selection,
+    select,
     update,
 };
 use crate::{
@@ -128,6 +130,37 @@ pub fn alias(project: &Project, name: &str, template: Option<&str>, remove: bool
         doc.set_alias(name, tpl);
         project.save_pins(&doc)?;
         println!("alias {name} = {tpl}");
+    }
+    Ok(())
+}
+
+pub fn set_frozen(project: &Project, names: &[String], frozen: bool) -> Result<()> {
+    if names.is_empty() {
+        user_bail!("name at least one pin or group");
+    }
+    let mut doc = project.load_pins()?;
+    let all = doc.inputs()?;
+    let targets = select(&all, Selection {
+        names,
+        exclude: &[],
+    });
+    let (verb, unchanged) = if frozen {
+        ("froze", "is already frozen")
+    } else {
+        ("unfroze", "isn't frozen")
+    };
+    let mut changed = false;
+    for input in targets {
+        if input.frozen == frozen {
+            println!("{} {unchanged}", input.name);
+        } else {
+            doc.set_frozen(&input.name, frozen);
+            println!("{verb} {}", input.name);
+            changed = true;
+        }
+    }
+    if changed {
+        project.save_pins(&doc)?;
     }
     Ok(())
 }
