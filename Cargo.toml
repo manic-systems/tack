@@ -36,7 +36,6 @@ gix-transport = { default-features = false, features = [
   "blocking-client",
   "http-client",
 ], version = "0.57.1" }
-gix-worktree-state = "0.31.0"
 hmac-sha256 = "1.1.14"
 misstep = { features = [ "pretty" ], version = "0.3.0" }
 percent-encoding = "2.3.2"
