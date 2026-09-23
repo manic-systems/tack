@@ -8,9 +8,9 @@ use std::{
     time::Duration,
 };
 
-use eyre::{
+use misstep::{
     Result,
-    WrapErr as _,
+    ResultExt as _,
 };
 use serde::Deserialize;
 
@@ -84,7 +84,7 @@ impl GitlabClient {
             unpack_tar_stream(resp.body_mut().as_reader(), TarFormat::Gz, into)
                 .map_err(|err| FetchError::Transport(format!("download {url}: {err}")))
         })
-        .map_err(|err| eyre::eyre!("download {url}: {err}"))
+        .map_err(|err| misstep::report!("download {url}: {err}"))
     }
 
     fn commit_last_modified(self, host: &str, owner: &str, repo: &str, rev: &str) -> Option<i64> {
@@ -129,8 +129,8 @@ fn epoch_from_rfc3339(input: &str) -> Result<i64> {
 }
 
 fn offset_seconds(input: &str) -> Result<i64> {
-    use eyre::{
-        ContextCompat as _,
+    use misstep::{
+        OptionExt as _,
         bail,
     };
     let raw_tail = input
@@ -148,12 +148,12 @@ fn offset_seconds(input: &str) -> Result<i64> {
     let (hh, mm) = body
         .split_once(':')
         .with_context(|| format!("bad timezone offset: {input}"))?;
-    let hours: i64 = hh
-        .parse()
-        .wrap_err_with(|| format!("bad timezone offset: {input}"))?;
-    let mins: i64 = mm
-        .parse()
-        .wrap_err_with(|| format!("bad timezone offset: {input}"))?;
+    let hours = hh
+        .parse::<i64>()
+        .with_context(|| format!("bad timezone offset: {input}"))?;
+    let mins = mm
+        .parse::<i64>()
+        .with_context(|| format!("bad timezone offset: {input}"))?;
     Ok(sign * (hours * 3_600 + mins * 60))
 }
 

@@ -6,7 +6,7 @@ use std::{
     result::Result as StdResult,
 };
 
-use eyre::Result;
+use misstep::Result;
 
 use crate::{
     fetch::FetchError,

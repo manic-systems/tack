@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use eyre::Result;
+use misstep::Result;
 
 use crate::{
     history,

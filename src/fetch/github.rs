@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use eyre::Result;
+use misstep::Result;
 use serde::{
     Deserialize,
     Serialize,
@@ -141,7 +141,7 @@ impl GithubClient {
             unpack_tar_stream(resp.body_mut().as_reader(), TarFormat::Gz, into)
                 .map_err(|err| FetchError::Transport(format!("download {url}: {err}")))
         })
-        .map_err(|err| eyre::eyre!("download {url}: {err}"))
+        .map_err(|err| misstep::report!("download {url}: {err}"))
     }
 }
 

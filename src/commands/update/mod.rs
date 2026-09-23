@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use eyre::Result;
+use misstep::Result;
 
 mod core;
 

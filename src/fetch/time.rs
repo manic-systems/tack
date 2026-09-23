@@ -2,10 +2,10 @@
 
 use std::ops::Range;
 
-use eyre::{
-    ContextCompat as _,
+use misstep::{
+    OptionExt as _,
     Result,
-    WrapErr as _,
+    ResultExt as _,
     bail,
 };
 
@@ -17,12 +17,12 @@ pub(super) fn epoch_from_http_date(input: &str) -> Result<i64> {
     let slice = |range: Range<usize>| -> Result<&str> {
         input
             .get(range)
-            .wrap_err_with(|| format!("bad http date: {input}"))
+            .with_context(|| format!("bad http date: {input}"))
     };
     let parse_num = |range: Range<usize>| -> Result<i64> {
         slice(range)?
-            .parse()
-            .wrap_err_with(|| format!("bad http date: {input}"))
+            .parse::<i64>()
+            .with_context(|| format!("bad http date: {input}"))
     };
     let day = parse_num(5..7)?;
     let month = match slice(8..11)? {
@@ -55,9 +55,9 @@ pub(super) fn epoch_from_iso(input: &str) -> Result<i64> {
     let parse_num = |range: Range<usize>| -> Result<i64> {
         input
             .get(range)
-            .wrap_err_with(|| format!("bad timestamp: {input}"))?
-            .parse()
-            .wrap_err_with(|| format!("bad timestamp: {input}"))
+            .with_context(|| format!("bad timestamp: {input}"))?
+            .parse::<i64>()
+            .with_context(|| format!("bad timestamp: {input}"))
     };
     let (year, month, day) = (parse_num(0..4)?, parse_num(5..7)?, parse_num(8..10)?);
     let (hh, mi, ss) = (parse_num(11..13)?, parse_num(14..16)?, parse_num(17..19)?);

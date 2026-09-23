@@ -15,7 +15,7 @@ use std::{
     mem,
 };
 
-use eyre::Result;
+use misstep::Result;
 
 pub(super) use self::auto::{
     AutoDedupReport,

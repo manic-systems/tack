@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use eyre::Result;
+use misstep::Result;
 
 use super::{
     super::tolerate,

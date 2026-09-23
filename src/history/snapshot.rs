@@ -15,8 +15,8 @@ use std::{
 };
 
 use data_encoding::HEXLOWER;
-use eyre::Result;
 use hmac_sha256::Hash as Sha256;
+use misstep::Result;
 use serde::{
     Deserialize,
     Deserializer,

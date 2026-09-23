@@ -28,7 +28,6 @@ pub use api::{
     Tack,
 };
 pub use cli::Command;
-use color_eyre::config::HookBuilder;
 pub use commands::{
     AddRequest,
     InitRequest,
@@ -80,11 +79,6 @@ pub use source::{
 
 #[must_use]
 pub fn run() -> ExitCode {
-    if let Err(err) = HookBuilder::default().display_env_section(false).install() {
-        eprintln!("tack: {err}");
-        return ExitCode::FAILURE;
-    }
-
     let cmd = cli::parse();
 
     match app::run(cmd) {
@@ -101,7 +95,7 @@ pub fn run() -> ExitCode {
 }
 
 /// an expected failure rather than a tack bug, so it prints as one line
-fn expected(report: &eyre::Report) -> bool {
+fn expected(report: &misstep::Report) -> bool {
     report.chain().any(|cause| {
         cause.downcast_ref::<error::UserError>().is_some()
             || cause.downcast_ref::<ConfigError>().is_some()
@@ -109,7 +103,7 @@ fn expected(report: &eyre::Report) -> bool {
     })
 }
 
-fn exit_code(report: &eyre::Report) -> ExitCode {
+fn exit_code(report: &misstep::Report) -> ExitCode {
     for cause in report.chain() {
         if cause.downcast_ref::<ConfigError>().is_some() {
             return ExitCode::from(3);
@@ -123,8 +117,8 @@ fn exit_code(report: &eyre::Report) -> ExitCode {
 
 #[expect(
     clippy::use_debug,
-    reason = "color-eyre renders Report through its Debug implementation"
+    reason = "unexpected errors print the full report, which misstep renders through Debug"
 )]
-fn print_report(err: &eyre::Report) {
+fn print_report(err: &misstep::Report) {
     eprintln!("{err:?}");
 }
