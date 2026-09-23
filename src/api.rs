@@ -109,14 +109,13 @@ impl<'a> Tack<'a> {
                 flake,
                 convert,
             } => {
-                self.recorded(label, || {
+                self.recorded_as(label, CommandOutcome::Init, || {
                     commands::init(self.project, commands::InitRequest {
                         force,
                         resolver,
                         flake,
                         convert,
                     })
-                    .map(|()| CommandOutcome::Init)
                 })
             },
             Command::Update {
@@ -153,7 +152,7 @@ impl<'a> Tack<'a> {
                 submodules,
                 follows,
             } => {
-                self.recorded(label, || {
+                self.recorded_as(label, CommandOutcome::Add, || {
                     commands::add(self.project, commands::AddRequest {
                         name: &name,
                         url: &url,
@@ -163,24 +162,21 @@ impl<'a> Tack<'a> {
                         submodules,
                         follows: &follows,
                     })
-                    .map(|()| CommandOutcome::Add)
                 })
             },
             Command::Rm { name } => {
-                self.recorded(label, || {
-                    commands::rm(self.project, &name).map(|()| CommandOutcome::Rm)
+                self.recorded_as(label, CommandOutcome::Rm, || {
+                    commands::rm(self.project, &name)
                 })
             },
             Command::Alias { name, template, rm } => {
-                self.recorded(label, || {
+                self.recorded_as(label, CommandOutcome::Alias, || {
                     commands::alias(self.project, &name, template.as_deref(), rm)
-                        .map(|()| CommandOutcome::Alias)
                 })
             },
             Command::SetFrozen { names, frozen } => {
-                self.recorded(label, || {
+                self.recorded_as(label, CommandOutcome::SetFrozen, || {
                     commands::set_frozen(self.project, &names, frozen)
-                        .map(|()| CommandOutcome::SetFrozen)
                 })
             },
             Command::Dedup => {
@@ -200,6 +196,15 @@ impl<'a> Tack<'a> {
                 Ok(unrecorded(CommandOutcome::Redo(view)))
             },
         }
+    }
+
+    fn recorded_as(
+        &self,
+        label: &str,
+        outcome: CommandOutcome,
+        run: impl FnOnce() -> Result<()>,
+    ) -> Result<Recorded<CommandOutcome>> {
+        self.recorded(label, || run().map(|()| outcome))
     }
 
     fn recorded<T>(&self, label: &str, run: impl FnOnce() -> Result<T>) -> Result<Recorded<T>> {
