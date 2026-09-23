@@ -63,58 +63,100 @@ pub enum PinStatus {
 
 const FRAMES: [char; 4] = ['/', '-', '\\', '|'];
 
+struct Row {
+    name:   String,
+    header: Option<GroupHeader>,
+}
+
+struct GroupHeader {
+    label: String,
+    first: bool,
+}
+
+impl GroupHeader {
+    fn tty(&self) -> String {
+        format!("{}\x1b[1m{}\x1b[0m", self.gap(), self.label)
+    }
+
+    fn plain(&self) -> String {
+        format!("{}# {}", self.gap(), self.label)
+    }
+
+    const fn gap(&self) -> &'static str {
+        if self.first { "" } else { "\n" }
+    }
+}
+
 pub struct Display {
     states: Arc<Mutex<Vec<PinStatus>>>,
-    names:  Arc<[String]>,
+    rows:   Arc<[Row]>,
     stop:   Arc<AtomicBool>,
-    rows:   Arc<AtomicUsize>,
+    drawn:  Arc<AtomicUsize>,
     handle: Option<JoinHandle<()>>,
     tty:    bool,
 }
 
 impl Display {
-    pub fn new(initial_names: Vec<String>) -> Self {
+    /// takes `(name, group)` pairs already clustered by group, and skips
+    /// headers entirely when no pin has a group
+    pub fn new(pins: Vec<(String, Option<String>)>) -> Self {
         let tty = io::stdout().is_terminal();
-        let states = Arc::new(Mutex::new(vec![PinStatus::Pending; initial_names.len()]));
-        let names = initial_names.into();
+        let states = Arc::new(Mutex::new(vec![PinStatus::Pending; pins.len()]));
+        let grouped = pins.iter().any(|&(_, ref group)| group.is_some());
+        let mut previous = None;
+        let rows = pins
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, group))| {
+                let starts_group = index == 0 || previous.as_ref() != Some(&group);
+                let header = (grouped && starts_group).then(|| {
+                    GroupHeader {
+                        label: group.clone().unwrap_or_else(|| "ungrouped".to_owned()),
+                        first: index == 0,
+                    }
+                });
+                previous = Some(group);
+                Row { name, header }
+            })
+            .collect::<Arc<[Row]>>();
         let stop = Arc::new(AtomicBool::new(false));
-        let rows = Arc::new(AtomicUsize::new(0));
+        let drawn = Arc::new(AtomicUsize::new(0));
 
         let handle = tty.then(|| {
             let states_for_draw = Arc::clone(&states);
-            let names_for_draw = Arc::clone(&names);
-            let stop_for_draw = Arc::clone(&stop);
             let rows_for_draw = Arc::clone(&rows);
+            let stop_for_draw = Arc::clone(&stop);
+            let drawn_for_draw = Arc::clone(&drawn);
             thread::spawn(move || {
                 let mut drawn_rows = 0_usize;
                 let mut frame = 0;
                 while !stop_for_draw.load(Ordering::Relaxed) {
                     drawn_rows = FrameRenderer::new(
-                        &names_for_draw,
+                        &rows_for_draw,
                         &states_for_draw.lock().unwrap(),
                         frame,
                         drawn_rows,
                     )
                     .draw();
-                    rows_for_draw.store(drawn_rows, Ordering::Relaxed);
+                    drawn_for_draw.store(drawn_rows, Ordering::Relaxed);
                     frame = frame.wrapping_add(1);
                     thread::sleep(Duration::from_millis(67));
                 }
                 drawn_rows = FrameRenderer::new(
-                    &names_for_draw,
+                    &rows_for_draw,
                     &states_for_draw.lock().unwrap(),
                     frame,
                     drawn_rows,
                 )
                 .draw();
-                rows_for_draw.store(drawn_rows, Ordering::Relaxed);
+                drawn_for_draw.store(drawn_rows, Ordering::Relaxed);
             })
         });
         Self {
             states,
-            names,
-            stop,
             rows,
+            stop,
+            drawn,
             handle,
             tty,
         }
@@ -131,8 +173,11 @@ impl Display {
         }
         if !self.tty {
             let states = self.states.lock().unwrap();
-            for (name, st) in self.names.iter().zip(states.iter()) {
-                if let Some(line) = StatusLine::new(name, st).plain() {
+            for (row, st) in self.rows.iter().zip(states.iter()) {
+                if let Some(ref header) = row.header {
+                    println!("{}", header.plain());
+                }
+                if let Some(line) = StatusLine::new(&row.name, st).plain() {
                     println!("{line}");
                 }
             }
@@ -148,27 +193,33 @@ impl Display {
         let mut out = io::stdout().lock();
         if self.tty {
             // replace live spinner rows
-            let _ = write!(out, "\x1b[{}A\x1b[J", self.rows.load(Ordering::Relaxed));
-            for ((name, status), entry) in self.names.iter().zip(states.iter()).zip(logs.iter()) {
-                let line = StatusLine::new(name, status);
+            let _ = write!(out, "\x1b[{}A\x1b[J", self.drawn.load(Ordering::Relaxed));
+            for ((row, status), entry) in self.rows.iter().zip(states.iter()).zip(logs.iter()) {
+                if let Some(ref header) = row.header {
+                    let _ = writeln!(out, "{}", header.tty());
+                }
+                let line = StatusLine::new(&row.name, status);
                 let _ = writeln!(out, "{}", line.tty());
                 if line.is_updated()
                     && let Some(log) = entry.as_ref()
                 {
-                    let indent = " ".repeat(4 + name.len() + 2);
+                    let indent = " ".repeat(4 + row.name.len() + 2);
                     CommitLogLines::new(&indent, log).write_to(&mut out);
                 }
             }
         } else {
-            for ((name, status), entry) in self.names.iter().zip(states.iter()).zip(logs.iter()) {
-                let line = StatusLine::new(name, status);
+            for ((row, status), entry) in self.rows.iter().zip(states.iter()).zip(logs.iter()) {
+                if let Some(ref header) = row.header {
+                    let _ = writeln!(out, "{}", header.plain());
+                }
+                let line = StatusLine::new(&row.name, status);
                 if let Some(text) = line.plain() {
                     let _ = writeln!(out, "{text}");
                 }
                 if line.is_updated()
                     && let Some(log) = entry.as_ref()
                 {
-                    let indent = " ".repeat(name.len() + 2);
+                    let indent = " ".repeat(row.name.len() + 2);
                     CommitLogLines::new(&indent, log).write_to(&mut out);
                 }
             }
@@ -255,7 +306,7 @@ impl<'a> CommitLogSummary<'a> {
 }
 
 struct FrameRenderer<'a> {
-    names:      &'a [String],
+    rows:       &'a [Row],
     states:     &'a [PinStatus],
     frame:      usize,
     drawn_rows: usize,
@@ -263,13 +314,13 @@ struct FrameRenderer<'a> {
 
 impl<'a> FrameRenderer<'a> {
     const fn new(
-        names: &'a [String],
+        rows: &'a [Row],
         states: &'a [PinStatus],
         frame: usize,
         drawn_rows: usize,
     ) -> Self {
         Self {
-            names,
+            rows,
             states,
             frame,
             drawn_rows,
@@ -285,9 +336,14 @@ impl<'a> FrameRenderer<'a> {
         }
 
         let mut rows = 0_usize;
-        for (name, status) in self.names.iter().zip(self.states) {
-            let line = StatusLine::new(name, status).tty_with_frame(self.frame);
-            for segment in Self::terminal_segments(&line) {
+        for (row, status) in self.rows.iter().zip(self.states) {
+            let header = row.header.as_ref().map(GroupHeader::tty);
+            let line = StatusLine::new(&row.name, status).tty_with_frame(self.frame);
+            for segment in header
+                .iter()
+                .chain([&line])
+                .flat_map(|text| Self::terminal_segments(text))
+            {
                 out.push_str("\x1b[2K");
                 let _ = writeln!(out, "{segment}");
                 rows += Self::visual_rows(segment, terminal_width);

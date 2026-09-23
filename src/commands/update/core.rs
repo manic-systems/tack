@@ -50,7 +50,7 @@ const UPDATE_IN_FLIGHT: usize = 16;
 const LOOK_IN_FLIGHT: usize = 16;
 
 pub(super) trait Progress<O>: Sync {
-    fn begin(&self, names: &[String]);
+    fn begin(&self, selected: &[&pins::Input]);
 
     fn fetching(&self, index: usize);
 
@@ -60,7 +60,7 @@ pub(super) trait Progress<O>: Sync {
 pub(super) struct NoProgress;
 
 impl<O> Progress<O> for NoProgress {
-    fn begin(&self, _names: &[String]) {}
+    fn begin(&self, _selected: &[&pins::Input]) {}
 
     fn fetching(&self, _index: usize) {}
 
@@ -271,10 +271,6 @@ fn hash_drifted(old: Option<&LockedNode>, node: &LockedNode) -> bool {
     )
 }
 
-fn pin_names(selected: &[&pins::Input]) -> Vec<String> {
-    selected.iter().map(|input| input.name.clone()).collect()
-}
-
 pub(super) fn update(
     project: &Project,
     selection: Selection<'_>,
@@ -298,7 +294,7 @@ pub(super) fn update(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut lock = project.load_lock()?;
-    progress.begin(&pin_names(&selected));
+    progress.begin(&selected);
 
     let session = CompareSession::new();
     let resolutions = dispatcher::ordered(jobs, UPDATE_IN_FLIGHT, |index, (input, url)| {
@@ -433,7 +429,7 @@ pub(super) fn look(
         })
         .collect::<Result<Vec<_>>>()?;
     let lock = project.load_lock()?;
-    progress.begin(&pin_names(&selected));
+    progress.begin(&selected);
 
     let session = CompareSession::new();
     let look_results = dispatcher::ordered(jobs, LOOK_IN_FLIGHT, |index, (input, url)| {

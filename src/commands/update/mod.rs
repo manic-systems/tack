@@ -12,6 +12,7 @@ use crate::{
     commands::Selection,
     error::user_bail,
     fetch::BranchComparison,
+    pins,
     project::Project,
     render,
     report::{
@@ -104,8 +105,12 @@ impl Spinner {
         Self(OnceLock::new())
     }
 
-    fn begin(&self, names: &[String]) {
-        let _ = self.0.set(Display::new(names.to_vec()));
+    fn begin(&self, selected: &[&pins::Input]) {
+        let rows = selected
+            .iter()
+            .map(|input| (input.name.clone(), input.group.clone()))
+            .collect();
+        let _ = self.0.set(Display::new(rows));
     }
 
     fn step(&self, index: usize, status: PinStatus) {
@@ -125,8 +130,8 @@ struct SpinnerProgress<'a, O> {
 }
 
 impl<O> core::Progress<O> for SpinnerProgress<'_, O> {
-    fn begin(&self, names: &[String]) {
-        self.spinner.begin(names);
+    fn begin(&self, selected: &[&pins::Input]) {
+        self.spinner.begin(selected);
     }
 
     fn fetching(&self, index: usize) {
