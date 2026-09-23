@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    mem,
+};
 
 use misstep::Result;
 
@@ -62,6 +65,7 @@ use crate::{
         Source,
         id::SourceId,
     },
+    tag,
 };
 
 const UPDATE_IN_FLIGHT: usize = 16;
@@ -105,6 +109,8 @@ struct PinResolution {
     node:     Option<LockedNode>,
     upstream: Option<FetchedTree>,
     patched:  Settled,
+    /// the tag a pin with a template resolved to
+    tag:      Option<String>,
     drift:    bool,
     warning:  Option<String>,
 }
@@ -192,11 +198,8 @@ fn check_signers(
             signer,
             rolled_back,
         }) => {
-            if let UpdateOutcome::Updated {
-                ref mut signed_by, ..
-            } = resolution.outcome
-            {
-                *signed_by = Some(Signed {
+            if let Some(slot) = resolution.outcome.signed_by_mut() {
+                *slot = Some(Signed {
                     signer: signer.to_string(),
                     rolled_back,
                 });
@@ -220,12 +223,21 @@ fn check_signers(
 }
 
 impl PinResolution {
+    fn tagged(mut self, previous: Option<&str>, chosen: Option<String>) -> Self {
+        if let Some(picked) = chosen.as_deref() {
+            self.outcome.show_tag(previous, picked);
+        }
+        self.tag = chosen;
+        self
+    }
+
     fn failed(err: &misstep::Report, warning: Option<String>) -> Self {
         Self {
             outcome: UpdateOutcome::Failed(format!("{err:#}")),
             node: None,
             upstream: None,
             patched: Settled::Current,
+            tag: None,
             drift: false,
             warning,
         }
@@ -237,6 +249,7 @@ impl PinResolution {
             node:     None,
             upstream: None,
             patched:  Settled::Current,
+            tag:      None,
             drift:    false,
             warning:  None,
         }
@@ -248,6 +261,7 @@ impl PinResolution {
             node: None,
             upstream: None,
             patched: Settled::Current,
+            tag: None,
             drift: false,
             warning,
         }
@@ -264,6 +278,7 @@ impl PinResolution {
             node: accept.then_some(node),
             upstream: None,
             patched: Settled::Current,
+            tag: None,
             drift: !accept,
             warning,
         }
@@ -367,9 +382,39 @@ fn classify(
         node: Some(node),
         upstream,
         patched: Settled::Current,
+        tag: None,
         drift: false,
         warning,
     }
+}
+
+/// writes what a pin's update settled into the lock, returning whether the lock
+/// changed and whether the pin moved to a new node
+fn record_pin(
+    lock: &mut LockFile,
+    input: &pins::Input,
+    url: &str,
+    resolution: &mut PinResolution,
+    mark: SignerMark,
+) -> (bool, bool) {
+    let resolved = !resolution.drift && !matches!(resolution.outcome, UpdateOutcome::Failed(_));
+    let mut changed = resolved && lock.set_declared(&input.name, url);
+    // a pin that failed keeps the tag of the rev it stays on
+    let settled =
+        resolution.node.is_some() || matches!(resolution.outcome, UpdateOutcome::Unchanged);
+    let moved = resolution
+        .node
+        .take()
+        .map(|node| lock.insert(input.name.clone(), node))
+        .is_some();
+    changed |= moved;
+    changed |= mark.record_into(lock, &input.name);
+    if settled {
+        changed |= lock.set_tag(&input.name, resolution.tag.take());
+    }
+    changed |=
+        mem::replace(&mut resolution.patched, Settled::Current).record_into(lock, &input.name);
+    (changed, moved)
 }
 
 fn declared_changed(
@@ -572,15 +617,21 @@ pub(super) fn update(
             return (resolution, SignerMark::Keep, url);
         }
         progress.fetching(index);
-        let mut resolution = classify(
-            input,
-            &localized.url,
-            stale,
-            old,
-            accept,
-            localized.warning,
-            &session,
-        );
+        let mut resolution = match tag::follow(&input.name, input.tag.as_ref(), &localized.url) {
+            Ok(followed) => {
+                classify(
+                    input,
+                    &followed.url,
+                    stale,
+                    old,
+                    accept,
+                    localized.warning,
+                    &session,
+                )
+                .tagged(lock.tag(&input.name), followed.tag)
+            },
+            Err(err) => PinResolution::failed(&err, localized.warning),
+        };
         let recorded = lock.signed_by(&input.name);
         let mut mark = check_signers(input, old, recorded, &keyring, &mut resolution);
         settle_patches(project, input, &lock, &mut resolution);
@@ -596,19 +647,13 @@ pub(super) fn update(
     let mut pins = Vec::with_capacity(resolutions.len());
     let mut warnings = Vec::new();
     let mut changed_names = Vec::new();
-    for (input, (resolution, mark, url)) in selected.iter().zip(resolutions) {
-        if let Some(warning) = resolution.warning {
-            warnings.push(warning);
-        }
-        let settled = !resolution.drift && !matches!(resolution.outcome, UpdateOutcome::Failed(_));
-        changed |= settled && lock.set_declared(&input.name, &url);
-        if let Some(node) = resolution.node {
-            lock.insert(input.name.clone(), node);
-            changed = true;
+    for (input, (mut resolution, mark, url)) in selected.iter().zip(resolutions) {
+        warnings.extend(resolution.warning.take());
+        let (recorded, moved) = record_pin(&mut lock, input, &url, &mut resolution, mark);
+        changed |= recorded;
+        if moved {
             changed_names.push(input.name.clone());
         }
-        changed |= mark.record_into(&mut lock, &input.name);
-        changed |= resolution.patched.record_into(&mut lock, &input.name);
         if resolution.drift {
             drift += 1;
         }
@@ -731,15 +776,22 @@ pub(super) fn look(
             .get(&input.name)
             .filter(|_| !stale)
             .and_then(comparable_rev);
-        let (outcome, log) = classify_look(
-            input,
-            &localized.url,
-            old.as_deref(),
-            old_compare_rev,
-            stale,
-            verbose,
-            &session,
-        );
+        let (mut outcome, log, chosen) =
+            match tag::follow(&input.name, input.tag.as_ref(), &localized.url) {
+                Ok(followed) => {
+                    let (outcome, log) = classify_look(
+                        input,
+                        &followed.url,
+                        old.as_deref(),
+                        old_compare_rev,
+                        stale,
+                        verbose,
+                        &session,
+                    );
+                    (outcome, log, followed.tag)
+                },
+                Err(err) => (LookOutcome::Failed(format!("{err:#}")), None, None),
+            };
         let mut warnings = Vec::from_iter(localized.warning);
         let pulls = match (lock.get(&input.name), lock.patched(&input.name)) {
             (Some(node), Some(tree)) => {
@@ -752,7 +804,9 @@ pub(super) fn look(
                 let upstream = match outcome {
                     LookOutcome::Updated { ref new, .. } => Some(new.as_str()),
                     LookOutcome::Unchanged => old_compare_rev,
-                    LookOutcome::Skipped(_) | LookOutcome::Failed(_) => None,
+                    LookOutcome::Skipped(_) | LookOutcome::Failed(_) | LookOutcome::Tagged(_) => {
+                        None
+                    },
                 };
                 let (found, unchecked) =
                     patched::pull_patches(&input.patches, tree, node, upstream);
@@ -765,6 +819,10 @@ pub(super) fn look(
             },
             _ => Vec::new(),
         };
+        // after the pull status check, which needs the upstream rev, not the tag
+        if let Some(picked) = chosen.as_deref() {
+            outcome.show_tag(lock.tag(&input.name), picked);
+        }
         progress.finished(index, &outcome);
         (
             PinLook {

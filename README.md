@@ -57,6 +57,7 @@ tack tree [names|groups...] [--exclude <names>]...
 tack verify [--base <git-ref>]       check locked commits against declared signers
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                       [--dir <d>] [--submodules] [--follows c=p]...
+                      [--tag <template>]
 tack rm <name>
 tack freeze <names|groups...>        hold pins at their locked rev
 tack unfreeze <names|groups...>      let update move them again
@@ -123,6 +124,25 @@ url = "gh:owner/coolproject"
 [inputs.tack]
 url = "manic:tack"
 ```
+
+## release tags
+
+the `tag` field follows the newest release tag matching a template instead of a branch
+
+```toml
+[inputs.proton-ge]
+url = "gh:GloriousEggroll/proton-ge-custom"
+type = "fetch"
+tag = "GE-Proton{version}"
+```
+
+`{version}` matches numbers joined by one separator, either `.`, `-` or `_`,
+used consistently, and the highest version wins. `v{version}` takes `v2.1.0` over
+`v2.0.9` and `GE-Proton{version}` matches `GE-Proton10-17`, while mixed tags like
+`v2.1.0-1`, `v1.0.0-20240101` and `v2.0.3-purple` are skipped. tack lists
+tags over the git protocol, so any github, gitlab or network git url works, as
+long as it names no ref or rev of its own. local `file://` urls are not
+supported. the chosen tag is kept in the lock and shown by `tack look` and `tack update`.
 
 ## groups
 

@@ -49,6 +49,8 @@ struct Entry {
         skip_serializing_if = "Option::is_none"
     )]
     signed_by: Option<SignedBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tag:       Option<String>,
 }
 
 /// a record that doesn't parse reads as unsigned, so the node stays typed and
@@ -80,6 +82,7 @@ impl From<LockedNode> for Entry {
             node,
             patched: None,
             signed_by: None,
+            tag: None,
         }
     }
 }
@@ -155,8 +158,8 @@ impl LockFile {
         self.entries.get(name).map(|entry| &entry.node)
     }
 
-    /// a new node drops the signer and the patched tree, since neither covers
-    /// it
+    /// a new node drops the signer, patched tree and tag, since none of them
+    /// cover it
     pub fn insert(&mut self, name: String, node: LockedNode) -> Option<LockedNode> {
         self.passthrough.remove(&name);
         self.entries
@@ -187,6 +190,19 @@ impl LockFile {
         };
         let changed = entry.patched != tree;
         entry.patched = tree;
+        changed
+    }
+
+    pub fn tag(&self, name: &str) -> Option<&str> {
+        self.entries.get(name)?.tag.as_deref()
+    }
+
+    pub fn set_tag(&mut self, name: &str, tag: Option<String>) -> bool {
+        let Some(entry) = self.entries.get_mut(name) else {
+            return false;
+        };
+        let changed = entry.tag != tag;
+        entry.tag = tag;
         changed
     }
 

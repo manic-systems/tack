@@ -40,6 +40,10 @@ use crate::{
         SignerName,
         key_file,
     },
+    tag::{
+        self,
+        TagTemplate,
+    },
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -138,6 +142,7 @@ pub struct Input {
     pub excludes:   BTreeSet<String>,
     pub signers:    Vec<SignerName>,
     pub patches:    Vec<PatchSource>,
+    pub tag:        Option<TagTemplate>,
     pub group:      Option<String>,
     pub frozen:     bool,
 }
@@ -213,6 +218,18 @@ impl Input {
         if pin_type == PinType::Fixed && !patches.is_empty() {
             user_bail!("input '{name}': patches are not valid for type = \"fixed\"");
         }
+        let tag = str_field("tag")?
+            .map(|tag| {
+                tag.parse::<TagTemplate>()
+                    .with_context(|| format!("input '{name}'"))
+            })
+            .transpose()?;
+        if pin_type == PinType::Fixed && tag.is_some() {
+            user_bail!("input '{name}': tag is not valid for type = \"fixed\"");
+        }
+        if tag.is_some() {
+            tag::followable(name, &shorturls.expand(url)?)?;
+        }
         let group = str_field("group")?;
         let frozen = bool_field("frozen")?.unwrap_or(false);
         let submodules = bool_field("submodules")?.unwrap_or(false);
@@ -227,6 +244,7 @@ impl Input {
             excludes,
             signers,
             patches,
+            tag,
             group: group.map(str::to_owned),
             frozen,
         })
@@ -620,6 +638,7 @@ pub struct AddInputOpts<'a> {
     pub dir:        Option<&'a str>,
     pub submodules: bool,
     pub follows:    &'a [(String, String)],
+    pub tag:        Option<&'a TagTemplate>,
 }
 
 impl AddInputOpts<'_> {
@@ -638,6 +657,9 @@ impl AddInputOpts<'_> {
         }
         if self.submodules {
             entry.insert("submodules", value(true));
+        }
+        if let Some(template) = self.tag {
+            entry.insert("tag", value(template.to_string()));
         }
         if !self.follows.is_empty() {
             let mut follows_tbl = Table::new();

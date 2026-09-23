@@ -20,6 +20,7 @@ mod shorturl;
 mod signers;
 mod source;
 mod style;
+mod tag;
 mod ui;
 
 use std::process::ExitCode;

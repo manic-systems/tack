@@ -282,6 +282,7 @@ mod tests {
                     excludes:   BTreeSet::new(),
                     signers:    Vec::new(),
                     patches:    Vec::new(),
+                    tag:        None,
                     group:      None,
                     frozen:     false,
                 }

@@ -21,6 +21,35 @@ use crate::{
     render,
 };
 
+/// a tag pin's move, which reads as tag names, with the old side keeping its
+/// rev until a tag has been recorded for it
+#[derive(Clone, Debug)]
+pub struct TagMove {
+    pub old:        Option<String>,
+    pub new:        String,
+    pub comparison: BranchComparison,
+    pub signed_by:  Option<Signed>,
+}
+
+impl TagMove {
+    fn new(
+        old: Option<&str>,
+        comparison: BranchComparison,
+        previous: Option<&str>,
+        chosen: &str,
+    ) -> Self {
+        Self {
+            old: previous.map_or_else(
+                || old.map(render::display_identity),
+                |tag| Some(tag.to_owned()),
+            ),
+            new: chosen.to_owned(),
+            comparison,
+            signed_by: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum UpdateOutcome {
     Unchanged,
@@ -31,6 +60,7 @@ pub enum UpdateOutcome {
         /// the signer of the new rev, for pins with `signers`
         signed_by:  Option<Signed>,
     },
+    Tagged(TagMove),
     Drift {
         rev:      String,
         accepted: bool,
@@ -42,6 +72,34 @@ pub enum UpdateOutcome {
     },
     Frozen,
     Failed(String),
+}
+
+impl UpdateOutcome {
+    pub fn show_tag(&mut self, previous: Option<&str>, chosen: &str) {
+        if let Self::Updated {
+            ref old,
+            comparison,
+            ..
+        } = *self
+        {
+            *self = Self::Tagged(TagMove::new(old.as_deref(), comparison, previous, chosen));
+        }
+    }
+
+    /// where a moved pin shows the signer of its new rev
+    pub const fn signed_by_mut(&mut self) -> Option<&mut Option<Signed>> {
+        match *self {
+            Self::Updated {
+                ref mut signed_by, ..
+            } => Some(signed_by),
+            Self::Tagged(ref mut moved) => Some(&mut moved.signed_by),
+            Self::Unchanged
+            | Self::Drift { .. }
+            | Self::FixedDrift { .. }
+            | Self::Frozen
+            | Self::Failed(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -148,8 +206,22 @@ pub enum LookOutcome {
         new:        String,
         comparison: BranchComparison,
     },
+    Tagged(TagMove),
     Skipped(String),
     Failed(String),
+}
+
+impl LookOutcome {
+    pub fn show_tag(&mut self, previous: Option<&str>, chosen: &str) {
+        if let Self::Updated {
+            ref old,
+            comparison,
+            ..
+        } = *self
+        {
+            *self = Self::Tagged(TagMove::new(old.as_deref(), comparison, previous, chosen));
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

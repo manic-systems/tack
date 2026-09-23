@@ -400,12 +400,13 @@ impl ScanDocuments {
         if input.pin_type == PinType::Fixed {
             return;
         }
+        let locked = lock.get(&input.name).cloned();
+        if input.tag.is_some() && locked.is_none() {
+            return;
+        }
         let mut next = path.to_vec();
         next.push(input.name.clone());
-        let source = lock
-            .get(&input.name)
-            .cloned()
-            .map_or(SourceRef::Url(expanded), SourceRef::Locked);
+        let source = locked.map_or(SourceRef::Url(expanded), SourceRef::Locked);
         transitive.push(ScanTarget {
             path: next,
             source,

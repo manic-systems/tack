@@ -21,6 +21,7 @@ use crate::{
         PullPatch,
         PullStatus,
         Signed,
+        TagMove,
         UpdateOutcome,
         UpdateReport,
     },
@@ -55,6 +56,15 @@ fn updated_status(
     }
 }
 
+fn tagged_status(moved: &TagMove) -> PinStatus {
+    PinStatus::Updated {
+        old:        moved.old.clone().unwrap_or_else(|| "NEW".to_owned()),
+        new:        moved.new.clone(),
+        comparison: moved.comparison,
+        signed_by:  moved.signed_by.clone(),
+    }
+}
+
 impl From<&UpdateOutcome> for PinStatus {
     fn from(outcome: &UpdateOutcome) -> Self {
         match *outcome {
@@ -65,6 +75,7 @@ impl From<&UpdateOutcome> for PinStatus {
                 comparison,
                 ref signed_by,
             } => updated_status(old.as_deref(), new, comparison, signed_by.as_ref()),
+            UpdateOutcome::Tagged(ref moved) => tagged_status(moved),
             UpdateOutcome::Drift { ref rev, accepted } => {
                 Self::Drift {
                     rev: render::short(rev),
@@ -97,6 +108,7 @@ impl From<&LookOutcome> for PinStatus {
                 ref new,
                 comparison,
             } => updated_status(old.as_deref(), new, comparison, None),
+            LookOutcome::Tagged(ref moved) => tagged_status(moved),
             LookOutcome::Skipped(ref note) => Self::Skipped(note.clone()),
             LookOutcome::Failed(ref msg) => Self::Failed(msg.clone()),
         }

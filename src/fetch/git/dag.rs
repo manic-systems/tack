@@ -64,6 +64,7 @@ const SCAN_FILE_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const DEFAULT_DEEPEN_ROUNDS: usize = 3;
 const MAX_DEEPEN_ROUNDS: usize = 10;
 const DEEPEN_ROUNDS_ENV: &str = "TACK_GIT_DAG_ROUNDS";
+const MAX_TAG_CHARS: usize = 256;
 const PACK_LIMIT_MARKER: &str = "git DAG pack exceeded";
 const RANGE_DEPTHS: [usize; 4] = [1 << 5, 1 << 8, 1 << 11, 1 << 14];
 
@@ -113,11 +114,7 @@ pub(super) fn resolve_tip(url: &str, reff: Option<&str>) -> FetchResult<String> 
         return resolve_local_tip(&path, reff);
     }
 
-    let dir = tempfile::tempdir()
-        .map_err(|err| FetchError::Transport(format!("create ref probe repo: {err}")))?;
-    let repo = gix::init_bare(dir.path())
-        .map_err(|err| FetchError::Transport(format!("init ref probe repo: {err}")))?;
-    let remote_refs = list_refs(&repo, url, Some(ref_prefixes(reff)))?;
+    let remote_refs = probe_refs(url, ref_prefixes(reff))?;
     for candidate in str_ref_candidates(reff) {
         if let Some(object) = remote_refs
             .iter()
@@ -132,6 +129,37 @@ pub(super) fn resolve_tip(url: &str, reff: Option<&str>) -> FetchResult<String> 
             |target_ref| format!("git ref {target_ref}"),
         ),
     })
+}
+
+pub(super) fn list_tags(url: &str) -> FetchResult<Vec<String>> {
+    if super::is_local_url(url) {
+        return Err(FetchError::Transport(format!(
+            "tag following needs a network remote, not {url}"
+        )));
+    }
+    let mut prefixes = RefPrefixes::new();
+    prefixes.extend(["refs/tags/".into()]);
+    let remote_refs = probe_refs(url, prefixes)?;
+    Ok(remote_refs.iter().filter_map(tag_name).collect())
+}
+
+fn probe_refs(url: &str, prefixes: RefPrefixes) -> FetchResult<Vec<handshake::Ref>> {
+    let dir = tempfile::tempdir()
+        .map_err(|err| FetchError::Transport(format!("create ref probe repo: {err}")))?;
+    let repo = gix::init_bare(dir.path())
+        .map_err(|err| FetchError::Transport(format!("init ref probe repo: {err}")))?;
+    list_refs(&repo, url, Some(prefixes))
+}
+
+fn tag_name(reference: &handshake::Ref) -> Option<String> {
+    let (full_ref_name, _) = named_object(reference)?;
+    let name = String::from_utf8(
+        full_ref_name
+            .strip_prefix(b"refs/tags/".as_slice())?
+            .to_vec(),
+    )
+    .ok()?;
+    (name.chars().count() <= MAX_TAG_CHARS).then_some(name)
 }
 
 struct DagGraph {
@@ -610,6 +638,12 @@ fn str_ref_candidates(reff: Option<&str>) -> Vec<String> {
 }
 
 fn object_for_ref(reference: &handshake::Ref, candidate: &str) -> Option<gix::ObjectId> {
+    named_object(reference)
+        .filter(|&(full_ref_name, _)| full_ref_name == candidate.as_bytes())
+        .map(|(_, object)| object)
+}
+
+fn named_object(reference: &handshake::Ref) -> Option<(&[u8], gix::ObjectId)> {
     match *reference {
         handshake::Ref::Peeled {
             ref full_ref_name,
@@ -624,11 +658,8 @@ fn object_for_ref(reference: &handshake::Ref, candidate: &str) -> Option<gix::Ob
             ref full_ref_name,
             object,
             ..
-        } if full_ref_name.as_slice() == candidate.as_bytes() => Some(object),
-        handshake::Ref::Peeled { .. }
-        | handshake::Ref::Direct { .. }
-        | handshake::Ref::Symbolic { .. }
-        | handshake::Ref::Unborn { .. } => None,
+        } => Some((full_ref_name.as_slice(), object)),
+        handshake::Ref::Unborn { .. } => None,
     }
 }
 

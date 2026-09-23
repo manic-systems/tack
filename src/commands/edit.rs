@@ -28,6 +28,7 @@ use crate::{
     project::Project,
     render,
     source,
+    tag,
 };
 
 pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
@@ -39,9 +40,13 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         ref dir,
         submodules,
         ref follows,
+        ref template,
     } = *args;
     if unpack.is_some() && pin_type != PinType::Fixed {
         user_bail!("--unpack is only valid with --fixed");
+    }
+    if template.is_some() && pin_type == PinType::Fixed {
+        user_bail!("--tag is not valid with --fixed");
     }
     let mut doc = project.load_pins()?;
     if doc.has_input(name) {
@@ -55,12 +60,16 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         user_bail!("'{name}' is already a group name");
     }
     let expanded = doc.shorturls().expand(url)?;
+    if template.is_some() {
+        tag::followable(name, &expanded)?;
+    }
     doc.add_input(name, url, &pins::AddInputOpts {
         pin_type,
         unpack,
         dir: dir.as_deref(),
         submodules,
         follows,
+        tag: template.as_ref(),
     });
     project.save_pins(&doc)?;
 
@@ -68,18 +77,23 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     if let Some(warning) = localized.warning {
         eprintln!("tack: {warning}");
     }
-    let fetched = update::fetch_input(pin_type, unpack, submodules, &localized.url);
+    let fetched = tag::follow(name, template.as_ref(), &localized.url).and_then(|followed| {
+        update::fetch_input(pin_type, unpack, submodules, &followed.url)
+            .map(|pin| (pin, followed.tag))
+    });
     match fetched {
-        Ok(fetched_pin) => {
+        Ok((fetched_pin, chosen)) => {
             let (node, identity) = fetched_pin.into_parts();
             let mut lk = project.load_lock()?;
             lk.insert(name.to_owned(), node);
             lk.set_declared(name, &expanded);
-            project.save_lock(&lk)?;
-            println!(
-                "added {name}  {}",
-                render::added_identity(identity.as_str())
+            let shown = chosen.as_deref().map_or_else(
+                || render::added_identity(identity.as_str()),
+                |tag| format!("NEW -> {tag}"),
             );
+            lk.set_tag(name, chosen);
+            project.save_lock(&lk)?;
+            println!("added {name}  {shown}");
         },
         Err(err) => {
             println!("added {name} to pins.toml, but locking failed: {err:#}");

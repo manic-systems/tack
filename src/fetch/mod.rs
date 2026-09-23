@@ -37,6 +37,8 @@ pub use resolve::{
     forge_miss_untrusted,
     forge_raw_file,
     has_token,
+    is_local_url,
+    list_tags,
     locked_file,
     raw,
     raw_file,

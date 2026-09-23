@@ -9,6 +9,7 @@ use crate::{
         Unpack,
     },
     signers::SignerName,
+    tag::TagTemplate,
 };
 
 /// the parsed subcommand, in the shape the rest of tack consumes
@@ -71,9 +72,10 @@ pub struct AddArgs {
     pub dir:        Option<String>,
     pub submodules: bool,
     pub follows:    Vec<(String, String)>,
+    pub template:   Option<TagTemplate>,
 }
 
-pound::from_str!(SignerName, GithubUser);
+pound::from_str!(SignerName, GithubUser, TagTemplate);
 
 #[derive(Debug, PartialEq, Eq, Parse)]
 pub enum SignerAction {
@@ -176,6 +178,10 @@ enum Cli {
         /// follows child=parent (repeatable; a bare child follows its namesake)
         #[pound(long)]
         follows:    Vec<String>,
+        /// follow the newest tag matching a template like v{version} (not with
+        /// --fixed)
+        #[pound(long)]
+        tag:        Option<TagTemplate>,
     },
     /// remove a pin
     Rm {
@@ -378,6 +384,7 @@ impl From<Cli> for Command {
                 dir,
                 submodules,
                 follows,
+                tag,
             } => {
                 let pin_type = if fixed {
                     PinType::Fixed
@@ -394,6 +401,7 @@ impl From<Cli> for Command {
                     dir,
                     submodules,
                     follows: follows.iter().map(|rule| parse_follows(rule)).collect(),
+                    template: tag,
                 })
             },
             Cli::Rm { name } => Self::Rm { name },

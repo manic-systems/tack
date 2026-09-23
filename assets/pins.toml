@@ -31,4 +31,8 @@
 #   unpack          fixed-only tarball or file
 #   signers         names from [signers], one of whom must have signed the locked commit
 #   patches         patch urls or files relative to this dir, applied in order
+#   tag             follow the newest tag like "v{version}", where {version} is numbers
+#                   joined by one separator, `.` `-` or `_`, used consistently so mixed
+#                   tags are skipped, needs a github, gitlab or network git url with
+#                   no ref or rev, not file://
 [inputs]

@@ -71,6 +71,34 @@ let
     "indirect"
   ];
 
+  fetchTreeAttrs = {
+    type = null;
+    owner = null;
+    repo = null;
+    host = null;
+    url = null;
+    id = null;
+    ref = null;
+    rev = null;
+    narHash = null;
+    lastModified = null;
+    revCount = null;
+    submodules = null;
+    shallow = null;
+    allRefs = null;
+    name = null;
+    lfs = null;
+    exportIgnore = null;
+    verifyCommit = null;
+    keytype = null;
+    publicKey = null;
+    publicKeys = null;
+    dirtyRev = null;
+    dirtyShortRev = null;
+    unpack = null;
+    treeHash = null;
+  };
+
   call =
     {
       overrides ? { },
@@ -95,12 +123,7 @@ let
           else if !(elem (node.type or "") knownTypes) then
             throw "tack: unknown lock type '${node.type or "?"}' for pin '${name}'"
           else
-            fetchTree (
-              removeAttrs node [
-                "signedBy"
-                "patched"
-              ]
-            );
+            fetchTree (intersectAttrs fetchTreeAttrs node);
 
       fetchFixed =
         { name, entry }:

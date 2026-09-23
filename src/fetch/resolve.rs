@@ -204,6 +204,33 @@ pub(super) fn current_rev(source: &Source) -> Result<String> {
     }
 }
 
+/// whether `url` is a `file://` git remote, which has no tags to list over the
+/// wire
+pub fn is_local_url(url: &str) -> bool {
+    git::is_local_url(url)
+}
+
+pub fn list_tags(source: &Source) -> Result<Vec<String>> {
+    let url = match *source {
+        Source::Github {
+            ref owner,
+            ref repo,
+            ..
+        } => clone_url("github.com", owner, repo),
+        Source::Git { .. } | Source::Gitlab { .. } => {
+            source
+                .git_target()
+                .context("git-backed source missing git target")?
+                .url
+                .into_owned()
+        },
+        Source::Tarball { .. } | Source::Path { .. } => {
+            user_bail!("tag following needs a github, gitlab, or git source")
+        },
+    };
+    Ok(git::list_tags(&url)?)
+}
+
 fn forge_resolve_ref(url: &str, reff: Option<&str>) -> Option<String> {
     let repo = forge::detect_git_url(url)?;
     forge::resolve_ref(repo.kind, &repo.host, &repo.owner, &repo.repo, reff)

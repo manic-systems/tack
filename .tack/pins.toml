@@ -15,6 +15,7 @@
 #   dir             subdir holding flake.nix
 #   submodules      fetch git submodules
 #   unpack          fixed-only: tarball or file
+#   tag             follow the newest tag like "v{version}", numbers joined by one of `.` `-` `_`
 [tack]
 recomposable = true
 

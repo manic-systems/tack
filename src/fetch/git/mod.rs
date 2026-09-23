@@ -89,6 +89,10 @@ pub(super) fn current_rev(url: &str, reff: Option<&str>, pinned: Option<&str>) -
     )
 }
 
+pub(super) fn list_tags(url: &str) -> FetchResult<Vec<String>> {
+    dag::list_tags(url)
+}
+
 pub(super) fn compare_status(
     url: &str,
     base: &str,
@@ -587,7 +591,7 @@ fn update_submodules(repo: &gix::Repository, parent_url: &str, depth: u8) -> Res
     Ok(())
 }
 
-fn is_local_url(url: &str) -> bool {
+pub(super) fn is_local_url(url: &str) -> bool {
     gix::Url::try_from(url).is_ok_and(|parsed| parsed.scheme == Scheme::File)
 }
 
