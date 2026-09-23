@@ -37,6 +37,13 @@ pub fn add(project: &Project, request: AddRequest<'_>) -> Result<()> {
     if doc.has_input(name) {
         user_bail!("input '{name}' already exists");
     }
+    if doc
+        .inputs()?
+        .iter()
+        .any(|input| input.group.as_deref() == Some(name))
+    {
+        user_bail!("'{name}' is already a group name");
+    }
     let expanded = doc.shorturls().expand(url)?;
     doc.add_input(name, url, &pins::AddInputOpts {
         pin_type,

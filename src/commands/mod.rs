@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
+    collections::BTreeSet,
     fs,
     result::Result as StdResult,
 };
@@ -179,29 +180,48 @@ fn select<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pi
     out
 }
 
+/// a name selects the input it names or every member of the group it names,
+/// which `PinsDoc::inputs` keeps from overlapping
 fn pick<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pins::Input> {
     let Selection { names, exclude } = selection;
-    let known = |name: &String| inputs.iter().any(|input| input.name == *name);
+    let members = |name: &str| {
+        inputs
+            .iter()
+            .filter(|input| input.name == name || input.group.as_deref() == Some(name))
+            .collect::<Vec<_>>()
+    };
 
-    for name in exclude.iter().filter(|name| !known(name)) {
-        eprintln!("tack: no input '{name}' to exclude");
+    let mut excluded = BTreeSet::new();
+    for name in exclude {
+        let matched = members(name);
+        if matched.is_empty() {
+            eprintln!("tack: no input or group '{name}' to exclude");
+        }
+        excluded.extend(matched.into_iter().map(|input| input.name.as_str()));
     }
 
     if names.is_empty() {
         return inputs
             .iter()
-            .filter(|input| !exclude.contains(&input.name))
+            .filter(|input| !excluded.contains(input.name.as_str()))
             .collect();
     }
 
-    let mut out = Vec::new();
+    let mut out = Vec::<&pins::Input>::new();
     for name in names {
-        if !known(name) {
-            eprintln!("tack: no input '{name}'");
-        } else if exclude.contains(name) {
+        let matched = members(name);
+        if matched.is_empty() {
+            eprintln!("tack: no input or group '{name}'");
+        } else if excluded.contains(name.as_str()) {
             eprintln!("tack: input '{name}' is both named and excluded, leaving it alone");
         } else {
-            out.extend(inputs.iter().find(|input| input.name == *name));
+            for input in matched {
+                if !excluded.contains(input.name.as_str())
+                    && !out.iter().any(|seen| seen.name == input.name)
+                {
+                    out.push(input);
+                }
+            }
         }
     }
     out
