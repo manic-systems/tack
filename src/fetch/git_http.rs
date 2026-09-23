@@ -27,7 +27,6 @@ use gix_transport::{
             Http,
             PostBodyDataKind,
             PostResponse,
-            Transport as HttpTransport,
             connect_http,
         },
     },
@@ -50,19 +49,13 @@ use super::{
     http,
 };
 
-type UreqTransport = HttpTransport<UreqHttp>;
-
-pub(super) fn connect(parsed_url: gix::Url) -> UreqTransport {
-    connect_http(
+pub(super) fn boxed(parsed_url: gix::Url) -> Box<dyn BlockingTransport + Send> {
+    Box::new(connect_http(
         UreqHttp::default(),
         parsed_url,
         gix_transport::Protocol::V2,
         false,
-    )
-}
-
-pub(super) fn boxed(parsed_url: gix::Url) -> Box<dyn BlockingTransport + Send> {
-    Box::new(connect(parsed_url))
+    ))
 }
 
 pub(super) struct UreqHttp {

@@ -35,7 +35,6 @@ use gix::{
         transaction::PreviousValue,
     },
     remote::{
-        Connection,
         Direction,
         fetch::{
             Shallow,
@@ -53,7 +52,6 @@ use gix::{
         },
     },
 };
-use gix_transport::client::blocking_io::Transport;
 use misstep::{
     OptionExt as _,
     Result,
@@ -429,23 +427,15 @@ fn commit_present(repo: &gix::Repository, rev: &str) -> bool {
 
 fn fetch_into_repo(remote: &gix::Remote<'_>, url: &str, shallow: bool) -> Result<()> {
     let parsed_url = gix::Url::try_from(url)?;
-    match parsed_url.scheme {
+    // one boxed transport type keeps gix's fetch pipeline to a single instantiation
+    let connection = match parsed_url.scheme {
         Scheme::Http | Scheme::Https => {
-            let transport = git_http::connect(parsed_url);
-            receive_fetch(remote.to_connection_with_transport(transport), shallow)?;
+            remote.to_connection_with_transport(git_http::boxed(parsed_url))
         },
         Scheme::File | Scheme::Git | Scheme::Ssh | Scheme::Ext(_) => {
-            let connection = remote.connect(Direction::Fetch)?;
-            receive_fetch(connection, shallow)?;
+            remote.connect(Direction::Fetch)?
         },
-    }
-    Ok(())
-}
-
-fn receive_fetch<T>(connection: Connection<'_, '_, T>, shallow: bool) -> Result<()>
-where
-    T: Transport,
-{
+    };
     let interrupt = AtomicBool::new(false);
     let mut prepare = connection.prepare_fetch(Discard, RefMapOptions::default())?;
     if shallow {
