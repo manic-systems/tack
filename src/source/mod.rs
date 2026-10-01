@@ -57,41 +57,26 @@ pub struct GitTarget<'a> {
 }
 
 impl Source {
-    pub fn git_target(&self) -> Option<GitTarget<'_>> {
-        match *self {
-            Self::Git {
-                ref url,
-                ref reff,
-                ref rev,
-            } => {
-                Some(GitTarget {
-                    url:  Cow::Borrowed(url),
-                    reff: reff.as_deref(),
-                    rev:  rev.as_deref(),
-                })
-            },
-            Self::Gitlab {
-                ref host,
-                ref owner,
-                ref repo,
-                ref reff,
-                ref rev,
-            } => {
-                Some(GitTarget {
-                    url:  Cow::Owned(clone_url(host, owner, repo)),
-                    reff: reff.as_deref(),
-                    rev:  rev.as_deref(),
-                })
-            },
-            Self::Github { .. } | Self::Tarball { .. } | Self::Path { .. } => None,
+    /// nix rejects anything but a full hash, so a short one would only fail
+    /// later at eval
+    pub fn full_rev(&self, expanded: &str) -> Result<()> {
+        if let Self::Github {
+            rev: Some(ref rev), ..
         }
+        | Self::Gitlab {
+            rev: Some(ref rev), ..
+        }
+        | Self::Git {
+            rev: Some(ref rev), ..
+        } = *self
+            && !(matches!(rev.len(), 40 | 64) && rev.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            user_bail!("rev '{rev}' must be a full commit hash: {expanded}");
+        }
+        Ok(())
     }
-}
 
-impl FromStr for Source {
-    type Err = misstep::Report;
-
-    fn from_str(expanded: &str) -> Result<Self> {
+    pub fn parse_unchecked(expanded: &str) -> Result<Self> {
         if let Some(body) = expanded.strip_prefix("github:") {
             let (path, raw_query) = split_query_fragment(body);
             let fields = parse_query_fields(raw_query);
@@ -145,6 +130,46 @@ impl FromStr for Source {
             });
         }
         user_bail!("unsupported url scheme: {expanded}")
+    }
+
+    pub fn git_target(&self) -> Option<GitTarget<'_>> {
+        match *self {
+            Self::Git {
+                ref url,
+                ref reff,
+                ref rev,
+            } => {
+                Some(GitTarget {
+                    url:  Cow::Borrowed(url),
+                    reff: reff.as_deref(),
+                    rev:  rev.as_deref(),
+                })
+            },
+            Self::Gitlab {
+                ref host,
+                ref owner,
+                ref repo,
+                ref reff,
+                ref rev,
+            } => {
+                Some(GitTarget {
+                    url:  Cow::Owned(clone_url(host, owner, repo)),
+                    reff: reff.as_deref(),
+                    rev:  rev.as_deref(),
+                })
+            },
+            Self::Github { .. } | Self::Tarball { .. } | Self::Path { .. } => None,
+        }
+    }
+}
+
+impl FromStr for Source {
+    type Err = misstep::Report;
+
+    fn from_str(expanded: &str) -> Result<Self> {
+        let source = Self::parse_unchecked(expanded)?;
+        source.full_rev(expanded)?;
+        Ok(source)
     }
 }
 

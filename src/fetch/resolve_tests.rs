@@ -51,14 +51,14 @@ fn path_pin_locks_absolute_targets_with_a_metadata_fingerprint() {
 
 #[test]
 fn gitlab_git_url_checkout_stays_generic_git_lock() {
-    let source = "git+https://gitlab.com/Group/Repo.git?ref=main&rev=abc123"
+    let source = "git+https://gitlab.com/Group/Repo.git?ref=main&rev=abc1230000000000000000000000000000000000"
         .parse::<Source>()
         .unwrap();
     let fetched = git_pin_from_checkout(
         &source,
         git::PinCheckout {
             dir:           tempfile::tempdir().unwrap(),
-            rev:           "abc123".to_owned(),
+            rev:           "abc1230000000000000000000000000000000000".to_owned(),
             nar_hash:      "sha256-n".to_owned(),
             last_modified: 1_700,
             refname:       "refs/heads/main".to_owned(),
@@ -74,13 +74,16 @@ fn gitlab_git_url_checkout_stays_generic_git_lock() {
             "type": "git",
             "url": "https://gitlab.com/Group/Repo.git",
             "ref": "refs/heads/main",
-            "rev": "abc123",
+            "rev": "abc1230000000000000000000000000000000000",
             "narHash": "sha256-n",
             "lastModified": 1_700_i64,
             "submodules": true
         }))
     );
-    assert_eq!(identity, FetchIdentity::Rev("abc123".to_owned()));
+    assert_eq!(
+        identity,
+        FetchIdentity::Rev("abc1230000000000000000000000000000000000".to_owned())
+    );
 }
 
 #[test]

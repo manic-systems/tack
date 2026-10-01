@@ -29,7 +29,10 @@ use crate::{
     render,
     report::Dates,
     resolver,
-    source,
+    source::{
+        self,
+        Source,
+    },
     tag,
 };
 
@@ -62,6 +65,9 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         user_bail!("'{name}' is already a group name");
     }
     let expanded = doc.shorturls().expand(url)?;
+    if let Ok(parsed) = Source::parse_unchecked(&expanded) {
+        parsed.full_rev(&expanded)?;
+    }
     if template.is_some() {
         tag::followable(name, &expanded)?;
         resolver::ensure(project, &[(name, resolver::TAG)])?;
