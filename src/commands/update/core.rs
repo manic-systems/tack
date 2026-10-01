@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
+use std::collections::BTreeSet;
+
 use misstep::Result;
 
 use super::LOG_LIMIT;
@@ -211,17 +213,18 @@ fn check_signers(
 fn classify(
     input: &pins::Input,
     expanded: &str,
+    stale: bool,
     old: Option<&LockedNode>,
     accept: bool,
     warning: Option<String>,
     session: &CompareSession,
 ) -> PinResolution {
+    let source = expanded.parse::<Source>().ok();
     let old_identity = old
         .and_then(LockedNode::resolved_identity)
         .map(LockIdentity::into_string);
-    let old_compare_rev = old.and_then(comparable_rev);
+    let old_compare_rev = old.filter(|_| !stale).and_then(comparable_rev);
 
-    let source = expanded.parse::<Source>().ok();
     let resolved = if input.pin_type != PinType::Fixed
         && let Some(ref src) = source
     {
@@ -231,6 +234,7 @@ fn classify(
     };
 
     if let Some(ref current) = resolved
+        && !stale
         && old_identity.as_deref() == Some(current.rev.as_str())
     {
         return unchanged(warning);
@@ -254,8 +258,10 @@ fn classify(
         return unchanged(warning);
     }
     if input.pin_type == PinType::Fixed
+        && !stale
         && old_identity.is_some()
         && old_identity.as_deref() != Some(new_identity.as_str())
+        && locked_url(old) == locked_url(Some(&node))
     {
         return resolve_drift(
             UpdateOutcome::FixedDrift {
@@ -268,7 +274,7 @@ fn classify(
             warning,
         );
     }
-    if old_identity.as_deref() == Some(new_identity.as_str()) {
+    if !stale && old_identity.as_deref() == Some(new_identity.as_str()) {
         return if hash_drifted(old, &node) {
             resolve_drift(
                 UpdateOutcome::Drift {
@@ -307,6 +313,75 @@ fn classify(
         node: Some(node),
         drift: false,
         warning,
+    }
+}
+
+fn declared_changed(
+    input: &pins::Input,
+    lock: &LockFile,
+    declared_url: &str,
+    localized_url: &str,
+) -> bool {
+    let Some(node) = lock.get(&input.name) else {
+        return false;
+    };
+    lock.declared(&input.name)
+        .is_some_and(|recorded| recorded != declared_url)
+        || !locked_from_source(input, localized_url.parse::<Source>().ok().as_ref(), node)
+}
+
+fn prune_declared(lock: &mut LockFile, all: &[pins::Input]) -> bool {
+    let names = all
+        .iter()
+        .map(|input| input.name.as_str())
+        .collect::<BTreeSet<_>>();
+    lock.retain_declared(|name| names.contains(name))
+}
+
+const fn frozen() -> PinResolution {
+    PinResolution {
+        outcome: UpdateOutcome::Frozen,
+        node:    None,
+        drift:   false,
+        warning: None,
+    }
+}
+
+fn locked_from_source(input: &pins::Input, source: Option<&Source>, node: &LockedNode) -> bool {
+    let Some(declared) = source else {
+        return true;
+    };
+    if input.pin_type == PinType::Fixed {
+        return true;
+    }
+    match *declared {
+        Source::Tarball { .. } | Source::Path { .. } => return true,
+        Source::Github { .. } | Source::Gitlab { .. } | Source::Git { .. } => {},
+    }
+    let locks_as_git = input.submodules || matches!(*declared, Source::Git { .. });
+    let kind_matches = match *node {
+        LockedNode::Git { submodules, .. } => locks_as_git && submodules == input.submodules,
+        LockedNode::Github { .. } | LockedNode::Gitlab { .. } => !locks_as_git,
+        LockedNode::Tarball { .. }
+        | LockedNode::Fixed { .. }
+        | LockedNode::Indirect { .. }
+        | LockedNode::Path { .. } => false,
+    };
+    kind_matches && SourceId::from_locked(node) == Some(SourceId::from(declared.clone()))
+}
+
+fn locked_url(node: Option<&LockedNode>) -> Option<&str> {
+    match node {
+        Some(&LockedNode::Fixed { ref url, .. }) => url.as_deref(),
+        Some(
+            &LockedNode::Github { .. }
+            | &LockedNode::Gitlab { .. }
+            | &LockedNode::Git { .. }
+            | &LockedNode::Tarball { .. }
+            | &LockedNode::Indirect { .. }
+            | &LockedNode::Path { .. },
+        )
+        | None => None,
     }
 }
 
@@ -425,23 +500,21 @@ pub(super) fn update(
 
     let session = CompareSession::new();
     let resolutions = dispatcher::ordered(jobs, UPDATE_IN_FLIGHT, |index, (input, url)| {
-        let held = input.frozen && !selection.names.contains(&input.name);
-        if held && lock.get(&input.name).is_some() {
-            let resolution = PinResolution {
-                outcome: UpdateOutcome::Frozen,
-                node:    None,
-                drift:   false,
-                warning: None,
-            };
-            progress.finished(index, &resolution.outcome);
-            return (resolution, SignerMark::Keep);
-        }
-        progress.fetching(index);
         let localized = source::localize_path_url_with_warning(&url, project.dir());
         let old = lock.get(&input.name);
+        let stale = declared_changed(input, &lock, &url, &localized.url);
+        let held =
+            input.frozen && !selection.names.contains(&input.name) && old.is_some() && !stale;
+        if held {
+            let resolution = frozen();
+            progress.finished(index, &resolution.outcome);
+            return (resolution, SignerMark::Keep, url);
+        }
+        progress.fetching(index);
         let mut resolution = classify(
             input,
             &localized.url,
+            stale,
             old,
             accept,
             localized.warning,
@@ -450,7 +523,7 @@ pub(super) fn update(
         let recorded = lock.signed_by(&input.name);
         let mark = check_signers(input, old, recorded, &keyring, &mut resolution);
         progress.finished(index, &resolution.outcome);
-        (resolution, mark)
+        (resolution, mark, url)
     });
 
     let mut changed = false;
@@ -458,10 +531,12 @@ pub(super) fn update(
     let mut pins = Vec::with_capacity(resolutions.len());
     let mut warnings = Vec::new();
     let mut changed_names = Vec::new();
-    for (input, (resolution, mark)) in selected.iter().zip(resolutions) {
+    for (input, (resolution, mark, url)) in selected.iter().zip(resolutions) {
         if let Some(warning) = resolution.warning {
             warnings.push(warning);
         }
+        let settled = !resolution.drift && !matches!(resolution.outcome, UpdateOutcome::Failed(_));
+        changed |= settled && lock.set_declared(&input.name, &url);
         if let Some(node) = resolution.node {
             lock.insert(input.name.clone(), node);
             changed = true;
@@ -476,6 +551,8 @@ pub(super) fn update(
             outcome: resolution.outcome,
         });
     }
+
+    changed |= prune_declared(&mut lock, &all);
 
     let auto_dedup = if drift == 0 && !changed_names.is_empty() {
         dedup::auto_dedup_scoped(&all, &all_follow, &mut lock, &changed_names)
@@ -508,6 +585,7 @@ fn classify_look(
     expanded: &str,
     old_identity: Option<&str>,
     old_compare_rev: Option<&str>,
+    stale: bool,
     verbose: bool,
     session: &CompareSession,
 ) -> (LookOutcome, Option<CommitLog>) {
@@ -525,7 +603,9 @@ fn classify_look(
         return (LookOutcome::Skipped("local path".to_owned()), None);
     }
     match session.resolve_and_compare(&source, old_compare_rev) {
-        Ok(current) if old_identity == Some(current.rev.as_str()) => (LookOutcome::Unchanged, None),
+        Ok(current) if !stale && old_identity == Some(current.rev.as_str()) => {
+            (LookOutcome::Unchanged, None)
+        },
         Ok(current) => {
             let log = match (verbose, old_compare_rev) {
                 (true, Some(old_rev)) => {
@@ -580,12 +660,17 @@ pub(super) fn look(
             .get(&input.name)
             .and_then(LockedNode::resolved_identity)
             .map(LockIdentity::into_string);
-        let old_compare_rev = lock.get(&input.name).and_then(comparable_rev);
+        let stale = declared_changed(input, &lock, &url, &localized.url);
+        let old_compare_rev = lock
+            .get(&input.name)
+            .filter(|_| !stale)
+            .and_then(comparable_rev);
         let (outcome, log) = classify_look(
             input,
             &localized.url,
             old.as_deref(),
             old_compare_rev,
+            stale,
             verbose,
             &session,
         );

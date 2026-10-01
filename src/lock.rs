@@ -21,9 +21,12 @@ use crate::{
     },
 };
 
+pub const DECLARED_KEY: &str = "$declared";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockFile {
     entries:     BTreeMap<String, Entry>,
+    declared:    BTreeMap<String, String>,
     /// unknown nodes survive saves
     passthrough: BTreeMap<String, Value>,
 }
@@ -81,6 +84,7 @@ impl LockFile {
     pub const fn new() -> Self {
         Self {
             entries:     BTreeMap::new(),
+            declared:    BTreeMap::new(),
             passthrough: BTreeMap::new(),
         }
     }
@@ -89,7 +93,11 @@ impl LockFile {
         let values = serde_json::from_str::<BTreeMap<String, Value>>(raw)?;
         let mut lock = Self::new();
         for (name, value) in values {
-            if let Ok(entry) = Entry::deserialize(&value) {
+            if name == DECLARED_KEY
+                && let Ok(declared) = serde_json::from_value(value.clone())
+            {
+                lock.declared = declared;
+            } else if let Ok(entry) = Entry::deserialize(&value) {
                 lock.entries.insert(name, entry);
             } else {
                 lock.passthrough.insert(name, value);
@@ -113,7 +121,30 @@ impl LockFile {
             .passthrough
             .iter()
             .map(|(name, value)| (name.as_str(), NodeRepr::Kept(value)));
-        typed.chain(kept).collect()
+        let declared = (!self.declared.is_empty())
+            .then_some((DECLARED_KEY, NodeRepr::Declared(&self.declared)));
+        typed.chain(kept).chain(declared).collect()
+    }
+
+    pub fn declared(&self, name: &str) -> Option<&str> {
+        self.declared.get(name).map(String::as_str)
+    }
+
+    pub fn set_declared(&mut self, name: &str, url: &str) -> bool {
+        if self.declared.get(name).is_some_and(|prev| prev == url) {
+            return false;
+        }
+        self.declared.insert(name.to_owned(), url.to_owned());
+        true
+    }
+
+    pub fn retain_declared<Keep>(&mut self, mut keep: Keep) -> bool
+    where
+        Keep: FnMut(&str) -> bool,
+    {
+        let before = self.declared.len();
+        self.declared.retain(|name, _| keep(name));
+        self.declared.len() != before
     }
 
     pub fn get(&self, name: &str) -> Option<&LockedNode> {
@@ -142,6 +173,7 @@ impl LockFile {
     }
 
     pub fn remove(&mut self, name: &str) -> bool {
+        self.declared.remove(name);
         let typed = self.entries.remove(name).is_some();
         let kept = self.passthrough.remove(name).is_some();
         typed || kept
@@ -173,6 +205,7 @@ impl LockFile {
 enum NodeRepr<'a> {
     Typed(&'a Entry),
     Kept(&'a Value),
+    Declared(&'a BTreeMap<String, String>),
 }
 
 impl Serialize for NodeRepr<'_> {
@@ -183,6 +216,7 @@ impl Serialize for NodeRepr<'_> {
         match *self {
             Self::Typed(entry) => entry.serialize(serializer),
             Self::Kept(value) => value.serialize(serializer),
+            Self::Declared(declared) => declared.serialize(serializer),
         }
     }
 }

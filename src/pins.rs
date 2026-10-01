@@ -30,6 +30,7 @@ use toml_edit::{
 
 use crate::{
     error::user_bail,
+    lock::DECLARED_KEY,
     project::write_atomic,
     shorturl::ShortUrls,
     signers::{
@@ -140,6 +141,9 @@ pub struct Input {
 
 impl Input {
     fn from_item(name: &str, input_item: &Item) -> Result<Self> {
+        if name == DECLARED_KEY {
+            user_bail!("'{name}' is reserved for the lock file");
+        }
         let entry = input_item
             .as_table_like()
             .with_context(|| format!("input '{name}' is not a table"))?;

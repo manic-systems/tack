@@ -66,6 +66,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
             let (node, identity) = fetched_pin.into_parts();
             let mut lk = project.load_lock()?;
             lk.insert(name.to_owned(), node);
+            lk.set_declared(name, &expanded);
             project.save_lock(&lk)?;
             println!(
                 "added {name}  {}",
