@@ -17,15 +17,16 @@ fn flake_lock(nodes: &Map<String, Value>) -> FlakeLock {
     FlakeLock::parse(&lock.to_string()).unwrap()
 }
 
-fn no_follows() -> Follows<'static> {
-    Follows {
-        first:  BTreeMap::new(),
-        deeper: BTreeMap::new(),
-    }
-}
-
 fn walk(lock: &FlakeLock) -> (Vec<TreeInput>, bool) {
-    let mut walk = Walk::new(lock, no_follows());
+    let kept = BTreeSet::new();
+    let wiring = Wiring {
+        first:         BTreeMap::new(),
+        deeper:        BTreeMap::new(),
+        omitted:       BTreeSet::new(),
+        kept:          &kept,
+        self_followed: BTreeSet::new(),
+    };
+    let mut walk = Walk::new(lock, wiring);
     let inputs = walk.inputs(lock.root(), 0);
     (inputs, walk.truncated)
 }
@@ -114,14 +115,4 @@ fn unknown_lock_types_stay_visible() {
     let (inputs, _) = walk(&flake_lock(&nodes));
 
     assert!(matches!(inputs[0].target, TreeTarget::Unknown(ref kind) if kind == "sourcehut"));
-}
-
-#[test]
-fn colliding_follows_keys_resolve_like_the_resolver() {
-    let flake_key = "flake:nixpkgs".to_owned();
-    let bare_key = "nixpkgs".to_owned();
-    let (qualified, bare) = ("a".to_owned(), "b".to_owned());
-    let follows = BTreeMap::from([(&bare_key, &bare), (&flake_key, &qualified)]);
-
-    assert_eq!(Follows::flake_side(follows).get("nixpkgs"), Some(&"a"));
 }

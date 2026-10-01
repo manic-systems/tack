@@ -160,6 +160,10 @@ impl<'a> TreeView<'a> {
                     let text = format!("{name} follows input '{}'", steps.join("/"));
                     println!("{prefix}{glyph}{}", style.paint(Sgr::Dim, &text));
                 },
+                TreeTarget::Omitted => {
+                    let text = format!("{name}  omitted");
+                    println!("{prefix}{glyph}{}", style.paint(Sgr::Dim, &text));
+                },
                 TreeTarget::FollowsPin(_) => {},
             }
         }
@@ -227,7 +231,8 @@ fn name_column(inputs: &[TreeInput], start: usize) -> usize {
                 TreeTarget::Repeated(_) => Some(own),
                 TreeTarget::Unknown(_)
                 | TreeTarget::FollowsInput(_)
-                | TreeTarget::FollowsPin(_) => None,
+                | TreeTarget::FollowsPin(_)
+                | TreeTarget::Omitted => None,
             }
         })
         .max()

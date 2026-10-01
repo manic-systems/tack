@@ -356,6 +356,8 @@ pub enum TreeTarget {
     /// a path of input names from the root of the pin's flake.lock
     FollowsInput(Vec<String>),
     FollowsPin(String),
+    /// dropped by `omit_inputs`, so never fetched
+    Omitted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

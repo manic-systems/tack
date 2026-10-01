@@ -5,6 +5,7 @@ mod view;
 use std::{
     collections::{
         BTreeMap,
+        BTreeSet,
         HashSet,
     },
     fs,
@@ -31,6 +32,7 @@ use crate::{
     pins::{
         self,
         PinType,
+        Side,
     },
     project::Project,
     report::{
@@ -52,10 +54,11 @@ pub fn tree(project: &Project, selection: Selection<'_>) -> Result<TreeReport> {
     let doc = project.load_pins()?;
     let all = doc.inputs()?;
     let all_follow = doc.all_follows()?;
+    let omit_inputs = doc.omit_inputs()?;
     let lock = project.load_lock()?;
     let selected = select(&all, selection)?;
     let trees = dispatcher::ordered(selected, TREE_IN_FLIGHT, |_, input| {
-        pin_tree(input, &all_follow, &lock)
+        pin_tree(input, &all_follow, &omit_inputs, &lock)
     });
 
     let mut warnings = Vec::new();
@@ -77,6 +80,7 @@ pub fn tree_cli(project: &Project, selection: Selection<'_>) -> Result<()> {
 fn pin_tree(
     input: &pins::Input,
     all_follow: &BTreeMap<String, String>,
+    omit_inputs: &BTreeSet<String>,
     lock: &LockFile,
 ) -> (PinTree, Option<String>) {
     let locked = lock.get(&input.name);
@@ -117,7 +121,8 @@ fn pin_tree(
         },
     };
 
-    let mut walk = Walk::new(&flake_lock, Follows::for_pin(input, all_follow));
+    let wiring = Wiring::for_pin(input, all_follow, omit_inputs);
+    let mut walk = Walk::new(&flake_lock, wiring);
     tree.inputs = walk.inputs(flake_lock.root(), 0);
     let warning = walk.truncated.then(|| {
         format!(
@@ -141,40 +146,60 @@ fn patched_file(lock: &LockFile, name: &str, path: &str) -> Result<Option<String
 }
 
 /// the resolver applies a pin's own follows on its first level only, and
-/// `[all_follow]` at every depth
-struct Follows<'a> {
-    first:  BTreeMap<&'a str, &'a str>,
-    deeper: BTreeMap<&'a str, &'a str>,
+/// `[all_follow]` and omits at every depth
+struct Wiring<'a> {
+    first:         BTreeMap<&'a str, &'a str>,
+    deeper:        BTreeMap<&'a str, &'a str>,
+    omitted:       BTreeSet<String>,
+    kept:          &'a BTreeSet<String>,
+    /// first-level inputs other pins follow into, which an omit can't drop
+    self_followed: BTreeSet<&'a str>,
 }
 
-impl<'a> Follows<'a> {
-    fn for_pin(input: &'a pins::Input, all_follow: &'a BTreeMap<String, String>) -> Self {
-        let rules = all_follow
-            .iter()
-            .filter(|&(alias, _)| !input.excludes.contains(alias))
-            .collect::<BTreeMap<_, _>>();
+impl<'a> Wiring<'a> {
+    fn for_pin(
+        input: &'a pins::Input,
+        all_follow: &'a BTreeMap<String, String>,
+        omit_inputs: &BTreeSet<String>,
+    ) -> Self {
         let into_self = format!("{}/", input.name);
-        let mut level = rules.clone();
-        level.retain(|_, target| !target.starts_with(&into_self));
-        level.extend(&input.follows);
+        let mut first = BTreeMap::new();
+        let mut deeper = BTreeMap::new();
+        let mut self_followed = BTreeSet::new();
+        for (alias, target) in all_follow {
+            let Some(name) = pins::rule_name(alias, Side::Flake) else {
+                continue;
+            };
+            let into = target.starts_with(&into_self);
+            if into {
+                self_followed.insert(name);
+            }
+            if pins::rules_match(&input.excludes, Side::Flake, name) {
+                continue;
+            }
+            deeper.insert(name, target.as_str());
+            if !into {
+                first.insert(name, target.as_str());
+            }
+        }
+        for (alias, target) in &input.follows {
+            if let Some(name) = pins::rule_name(alias, Side::Flake) {
+                first.insert(name, target.as_str());
+            }
+        }
         Self {
-            first:  Self::flake_side(level),
-            deeper: Self::flake_side(rules),
+            first,
+            deeper,
+            omitted: omit_inputs.union(&input.omit_inputs).cloned().collect(),
+            kept: &input.keep_inputs,
+            self_followed,
         }
     }
 
-    /// follows keyed `tack:` only reach an upstream's tack pins, not its flake
-    /// inputs. When `flake:x` and `x` both exist, the first in sorted order
-    /// wins, as with the resolver's `listToAttrs`
-    fn flake_side(follows: BTreeMap<&'a String, &'a String>) -> BTreeMap<&'a str, &'a str> {
-        let mut side = BTreeMap::new();
-        for (key, target) in follows {
-            if !key.starts_with("tack:") {
-                side.entry(key.strip_prefix("flake:").unwrap_or(key))
-                    .or_insert(target.as_str());
-            }
-        }
-        side
+    fn omits(&self, input: &str, depth: usize) -> bool {
+        !(depth == 0 && self.self_followed.contains(input))
+            && pins::rules_match(&self.omitted, Side::Flake, input)
+            && !pins::rules_match(self.kept, Side::Flake, input)
     }
 
     fn target(&self, input: &str, depth: usize) -> Option<&'a str> {
@@ -189,7 +214,7 @@ impl<'a> Follows<'a> {
 
 struct Walk<'a> {
     flake_lock: &'a FlakeLock,
-    follows:    Follows<'a>,
+    wiring:     Wiring<'a>,
     /// below the first level every node sees the same follows, so listing a
     /// node's inputs once is exact, and a lock sharing nodes between many
     /// parents stays linear instead of exponential
@@ -198,10 +223,10 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
-    fn new(flake_lock: &'a FlakeLock, follows: Follows<'a>) -> Self {
+    fn new(flake_lock: &'a FlakeLock, wiring: Wiring<'a>) -> Self {
         Self {
             flake_lock,
-            follows,
+            wiring,
             expanded: HashSet::from([flake_lock.root()]),
             truncated: false,
         }
@@ -212,8 +237,10 @@ impl<'a> Walk<'a> {
         flake_lock
             .inputs(node)
             .filter_map(|(name, input)| {
-                let target = if let Some(pin) = self.follows.target(name, depth) {
+                let target = if let Some(pin) = self.wiring.target(name, depth) {
                     TreeTarget::FollowsPin(pin.to_owned())
+                } else if self.wiring.omits(name, depth) {
+                    TreeTarget::Omitted
                 } else {
                     match *input {
                         FlakeInputRef::Follows(ref path) => TreeTarget::FollowsInput(path.clone()),
