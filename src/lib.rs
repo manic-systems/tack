@@ -17,6 +17,7 @@ mod report;
 mod scan_diagnostic;
 mod shorturl;
 mod source;
+mod style;
 mod ui;
 
 use std::process::ExitCode;

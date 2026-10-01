@@ -17,6 +17,10 @@ use crate::{
         Mark,
     },
     scan_diagnostic::ScanDiagnostic,
+    style::{
+        Sgr,
+        Style,
+    },
 };
 
 const MAX_SOURCES: usize = 5;
@@ -127,6 +131,7 @@ pub fn print_report(report: &DedupReport) {
         println!("no duplicate inputs found");
         return;
     }
+    let style = Style::stdout();
 
     for group in &report.groups {
         println!("\n{}  x{}", group.id, group.count);
@@ -146,7 +151,7 @@ pub fn print_report(report: &DedupReport) {
         let marks = group
             .revs
             .iter()
-            .map(|rev| RenderedMark::from(rev.mark))
+            .map(|rev| RenderedMark::new(rev.mark, style))
             .collect::<Vec<_>>();
         let mw = marks.iter().map(|mark| mark.width).max().unwrap_or(1);
 
@@ -222,33 +227,45 @@ struct RenderedMark {
     width: usize,
 }
 
-impl From<Mark> for RenderedMark {
-    fn from(mark: Mark) -> Self {
+impl RenderedMark {
+    fn new(mark: Mark, style: Style) -> Self {
         const APPROX: &str = "~";
-        let paint = |code: i32, body: &str| format!("\x1b[{code}m{body}\x1b[0m");
+        let paint = |sgr: Sgr, body: &str| style.paint(sgr, body);
         let (text, width) = match mark {
-            Mark::Base => (paint(36_i32, "="), 1),
-            Mark::Ahead => (paint(32_i32, "\u{2191}"), 1),
-            Mark::Behind => (paint(33_i32, "\u{2193}"), 1),
+            Mark::Base => (paint(Sgr::Cyan, "="), 1),
+            Mark::Ahead => (paint(Sgr::Green, "\u{2191}"), 1),
+            Mark::Behind => (paint(Sgr::Yellow, "\u{2193}"), 1),
             Mark::Diverged => {
                 (
-                    format!("{}{}", paint(32_i32, "\u{2191}"), paint(33_i32, "\u{2193}")),
+                    format!(
+                        "{}{}",
+                        paint(Sgr::Green, "\u{2191}"),
+                        paint(Sgr::Yellow, "\u{2193}")
+                    ),
                     2,
                 )
             },
             Mark::DatedNewer => {
                 (
-                    format!("{}{}", paint(32_i32, "\u{2191}"), paint(36_i32, APPROX)),
+                    format!(
+                        "{}{}",
+                        paint(Sgr::Green, "\u{2191}"),
+                        paint(Sgr::Cyan, APPROX)
+                    ),
                     2,
                 )
             },
             Mark::DatedOlder => {
                 (
-                    format!("{}{}", paint(33_i32, "\u{2193}"), paint(36_i32, APPROX)),
+                    format!(
+                        "{}{}",
+                        paint(Sgr::Yellow, "\u{2193}"),
+                        paint(Sgr::Cyan, APPROX)
+                    ),
                     2,
                 )
             },
-            Mark::DatedEqual => (paint(36_i32, APPROX), 1),
+            Mark::DatedEqual => (paint(Sgr::Cyan, APPROX), 1),
             Mark::Unknown => (" ".to_owned(), 1),
         };
         Self { text, width }

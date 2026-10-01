@@ -1,14 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{
-    collections::{
-        BTreeMap,
-        BTreeSet,
-    },
-    io::{
-        self,
-        IsTerminal as _,
-    },
+use std::collections::{
+    BTreeMap,
+    BTreeSet,
 };
 
 use crate::{
@@ -20,6 +14,10 @@ use crate::{
         TreeInput,
         TreeReport,
         TreeTarget,
+    },
+    style::{
+        Sgr,
+        Style,
     },
 };
 
@@ -59,9 +57,7 @@ impl<'a> TreeView<'a> {
             .max()
             .unwrap_or(0);
         Self {
-            style: Style {
-                tty: io::stdout().is_terminal(),
-            },
+            style: Style::stdout(),
             copies: Copies::of(&report.pins),
             grouped,
             indent,
@@ -77,7 +73,12 @@ impl<'a> TreeView<'a> {
                 if previous.is_some() {
                     println!();
                 }
-                println!("{}", self.style.header(group.unwrap_or("ungrouped")));
+                let label = group.unwrap_or("ungrouped");
+                if self.style.is_tty() {
+                    println!("{}", Sgr::Bold.wrap(label));
+                } else {
+                    println!("# {label}");
+                }
             }
             previous = Some(group);
             self.pin(pin);
@@ -87,7 +88,9 @@ impl<'a> TreeView<'a> {
     fn pin(&self, pin: &PinTree) {
         let indent = self.indent;
         let name_width = self.column - indent.len();
-        let name = self.style.bold(&format!("{:<name_width$}", pin.name));
+        let name = self
+            .style
+            .paint(Sgr::Bold, &format!("{:<name_width$}", pin.name));
         let locked = match pin.lock {
             PinLock::Locked(ref locked) => locked,
             PinLock::Missing => {
@@ -112,7 +115,7 @@ impl<'a> TreeView<'a> {
     fn node(&self, line: &str, inputs: &[TreeInput], prefix: &str, pin: &str) {
         let style = self.style;
         match followed_pins(inputs) {
-            Some(follows) => println!("{line}  {}", style.dim(&follows)),
+            Some(follows) => println!("{line}  {}", style.paint(Sgr::Dim, &follows)),
             None => println!("{line}"),
         }
 
@@ -137,14 +140,17 @@ impl<'a> TreeView<'a> {
                 TreeTarget::Repeated(ref source) => {
                     let child_line =
                         self.child_line(&format!("{prefix}{glyph}"), name, source, pin);
-                    println!("{child_line}  {}", style.dim("(inputs listed above)"));
+                    println!(
+                        "{child_line}  {}",
+                        style.paint(Sgr::Dim, "(inputs listed above)")
+                    );
                 },
                 TreeTarget::Unknown(ref kind) => {
                     let text = format!(
                         "{name}  locked as '{}', which this tack cannot read",
                         render::printable(kind)
                     );
-                    println!("{prefix}{glyph}{}", style.dim(&text));
+                    println!("{prefix}{glyph}{}", style.paint(Sgr::Dim, &text));
                 },
                 TreeTarget::FollowsInput(ref path) => {
                     let steps = path
@@ -152,7 +158,7 @@ impl<'a> TreeView<'a> {
                         .map(|step| render::printable(step))
                         .collect::<Vec<_>>();
                     let text = format!("{name} follows input '{}'", steps.join("/"));
-                    println!("{prefix}{glyph}{}", style.dim(&text));
+                    println!("{prefix}{glyph}{}", style.paint(Sgr::Dim, &text));
                 },
                 TreeTarget::FollowsPin(_) => {},
             }
@@ -165,12 +171,12 @@ impl<'a> TreeView<'a> {
         let also = if others.is_empty() {
             String::new()
         } else {
-            style.dim(&format!("  (also in {})", others.join(", ")))
+            style.paint(Sgr::Dim, &format!("  (also in {})", others.join(", ")))
         };
         let name_width = self.column.saturating_sub(lead.chars().count());
         format!(
             "{lead}{}  {}{also}",
-            style.yellow(&format!("{name:<name_width$}")),
+            style.paint(Sgr::Yellow, &format!("{name:<name_width$}")),
             self.source(source)
         )
     }
@@ -182,7 +188,7 @@ impl<'a> TreeView<'a> {
         let rev = render::printable(source.rev.as_deref().unwrap_or_default());
         format!(
             "{}  {rev:<7}  {}",
-            self.style.dim(&format!("{date:<10}")),
+            self.style.paint(Sgr::Dim, &format!("{date:<10}")),
             render::printable(&source.url)
         )
     }
@@ -268,40 +274,5 @@ impl<'a> Copies<'a> {
             .copied()
             .filter(|&other| other != pin)
             .collect()
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Style {
-    tty: bool,
-}
-
-impl Style {
-    fn paint(self, code: &str, text: &str) -> String {
-        if self.tty {
-            format!("\x1b[{code}m{text}\x1b[0m")
-        } else {
-            text.to_owned()
-        }
-    }
-
-    fn bold(self, text: &str) -> String {
-        self.paint("1", text)
-    }
-
-    fn dim(self, text: &str) -> String {
-        self.paint("2", text)
-    }
-
-    fn yellow(self, text: &str) -> String {
-        self.paint("33", text)
-    }
-
-    fn header(self, label: &str) -> String {
-        if self.tty {
-            self.bold(label)
-        } else {
-            format!("# {label}")
-        }
     }
 }

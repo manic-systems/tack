@@ -5,7 +5,6 @@ use std::{
     fmt::Write as _,
     io::{
         self,
-        IsTerminal as _,
         Write as _,
     },
     sync::{
@@ -38,6 +37,10 @@ use crate::{
         CompareStatus,
     },
     render::printable,
+    style::{
+        Sgr,
+        Style,
+    },
 };
 
 #[derive(Clone)]
@@ -79,7 +82,7 @@ struct GroupHeader {
 
 impl GroupHeader {
     fn tty(&self) -> String {
-        format!("{}\x1b[1m{}\x1b[0m", self.gap(), self.label)
+        format!("{}{}", self.gap(), Sgr::Bold.wrap(&self.label))
     }
 
     fn plain(&self) -> String {
@@ -104,7 +107,7 @@ impl Display {
     /// takes `(name, group)` pairs already clustered by group, and skips
     /// headers entirely when no pin has a group
     pub fn new(pins: Vec<(String, Option<String>)>) -> Self {
-        let tty = io::stdout().is_terminal();
+        let tty = Style::stdout().is_tty();
         let states = Arc::new(Mutex::new(vec![PinStatus::Pending; pins.len()]));
         let grouped = pins.iter().any(|&(_, ref group)| group.is_some());
         let mut previous = None;
@@ -555,7 +558,7 @@ impl<'a> StatusLine<'a> {
 }
 
 struct StatusGlyph {
-    color: i32,
+    color: Sgr,
     ch:    char,
 }
 
@@ -567,19 +570,19 @@ struct FramedStatus<'a> {
 impl From<&PinStatus> for StatusGlyph {
     fn from(status: &PinStatus) -> Self {
         let (color, ch) = match *status {
-            PinStatus::Fetching { frame } => (34_i32, FRAMES[frame % FRAMES.len()]),
-            PinStatus::NoChange => (32_i32, '\u{2713}'),
-            PinStatus::Updated { .. } => (33_i32, '*'),
+            PinStatus::Fetching { frame } => (Sgr::Blue, FRAMES[frame % FRAMES.len()]),
+            PinStatus::NoChange => (Sgr::Green, '\u{2713}'),
+            PinStatus::Updated { .. } => (Sgr::Yellow, '*'),
             PinStatus::Drift { accepted: true, .. }
-            | PinStatus::FixedDrift { accepted: true, .. } => (33_i32, '~'),
+            | PinStatus::FixedDrift { accepted: true, .. } => (Sgr::Yellow, '~'),
             PinStatus::Drift {
                 accepted: false, ..
             }
             | PinStatus::FixedDrift {
                 accepted: false, ..
-            } => (31_i32, '!'),
-            PinStatus::Pending | PinStatus::Skipped(_) => (2_i32, '\u{b7}'),
-            PinStatus::Failed(_) => (31_i32, '\u{2717}'),
+            } => (Sgr::Red, '!'),
+            PinStatus::Pending | PinStatus::Skipped(_) => (Sgr::Dim, '\u{b7}'),
+            PinStatus::Failed(_) => (Sgr::Red, '\u{2717}'),
         };
         Self { color, ch }
     }
@@ -590,7 +593,7 @@ impl From<FramedStatus<'_>> for StatusGlyph {
         match *value.status {
             PinStatus::Fetching { .. } => {
                 Self {
-                    color: 34_i32,
+                    color: Sgr::Blue,
                     ch:    FRAMES[value.frame % FRAMES.len()],
                 }
             },
@@ -607,7 +610,7 @@ impl From<FramedStatus<'_>> for StatusGlyph {
 
 impl StatusGlyph {
     fn ansi(&self) -> String {
-        format!("\x1b[{}m{}\x1b[0m", self.color, self.ch)
+        self.color.wrap(&self.ch.to_string())
     }
 }
 
