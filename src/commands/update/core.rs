@@ -360,7 +360,7 @@ fn classify(
         };
     }
 
-    let comparison = resolved
+    let planned = resolved
         .filter(|current| current.rev == new_identity)
         .map_or_else(
             || {
@@ -372,6 +372,12 @@ fn classify(
             },
             |current| current.comparison,
         );
+
+    let comparison = fetch::channel_repo(expanded)
+        .zip(comparable_rev(&node))
+        .map_or(planned, |(nixpkgs, new_rev)| {
+            compare_with_planner(session, &nixpkgs, old_compare_rev, new_rev)
+        });
 
     PinResolution {
         outcome: UpdateOutcome::Updated {
@@ -541,11 +547,14 @@ fn comparable_rev(node: &LockedNode) -> Option<&str> {
         }
         | LockedNode::Git {
             rev: Some(ref rev), ..
+        }
+        | LockedNode::Tarball {
+            rev: Some(ref rev), ..
         } => Some(rev),
         LockedNode::Github { rev: None, .. }
         | LockedNode::Gitlab { rev: None, .. }
         | LockedNode::Git { rev: None, .. }
-        | LockedNode::Tarball { .. }
+        | LockedNode::Tarball { rev: None, .. }
         | LockedNode::Fixed { .. }
         | LockedNode::Indirect { .. }
         | LockedNode::Path { .. } => None,
@@ -720,9 +729,19 @@ fn classify_look(
             (LookOutcome::Unchanged, None)
         },
         Ok(current) => {
+            let channel = matches!(source, Source::Tarball { .. })
+                .then(|| fetch::channel_repo(&current.rev).zip(fetch::channel_rev(&current.rev)))
+                .flatten();
+            let (history, head, comparison) = match channel {
+                Some((ref nixpkgs, ref rev)) => {
+                    let comparison = compare_with_planner(session, nixpkgs, old_compare_rev, rev);
+                    (nixpkgs, rev.as_str(), comparison)
+                },
+                None => (&source, current.rev.as_str(), current.comparison),
+            };
             let log = match (verbose, old_compare_rev) {
                 (true, Some(old_rev)) => {
-                    fetch::commits_between(&source, old_rev, &current.rev, LOG_LIMIT)
+                    fetch::commits_between(history, old_rev, head, LOG_LIMIT)
                         .ok()
                         .flatten()
                 },
@@ -730,9 +749,9 @@ fn classify_look(
             };
             (
                 LookOutcome::Updated {
-                    old:        old_identity.map(str::to_owned),
-                    new:        current.rev,
-                    comparison: current.comparison,
+                    old: old_identity.map(str::to_owned),
+                    new: current.rev,
+                    comparison,
                 },
                 log,
             )

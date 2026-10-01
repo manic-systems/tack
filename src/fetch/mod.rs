@@ -27,6 +27,8 @@ pub use error::{
 pub use resolve::{
     FetchedPin,
     FetchedTree,
+    channel_repo,
+    channel_rev,
     commit_object,
     commit_range,
     fetch_fixed_pin,

@@ -45,7 +45,14 @@ pub fn short(rev: &str) -> String {
         };
 
         if let Some(seg) = pick {
-            return seg.chars().take(16).collect();
+            // keep `nixos-26.11pre1079315` whole, the cut made every release alike
+            let release = seg
+                .rsplit_once('.')
+                .filter(|&(_, suffix)| {
+                    suffix.len() >= 7 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .map(|(name, _)| name);
+            return release.map_or_else(|| seg.chars().take(16).collect(), str::to_owned);
         }
     }
     if let Some(b64) = rev.strip_prefix("sha256-") {

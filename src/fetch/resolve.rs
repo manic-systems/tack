@@ -727,6 +727,32 @@ fn commit_url(node: &LockedNode) -> Option<(String, &str)> {
     Some((url, rev.as_str()))
 }
 
+/// the nixpkgs repo a NixOS channel tarball was built from, [`None`] for any
+/// other tarball
+pub fn channel_repo(url: &str) -> Option<Source> {
+    let host = url.strip_prefix("https://")?.split('/').next()?;
+    ["channels.nixos.org", "releases.nixos.org"]
+        .contains(&host)
+        .then(|| {
+            Source::Github {
+                owner: "NixOS".to_owned(),
+                repo:  "nixpkgs".to_owned(),
+                reff:  None,
+                rev:   None,
+            }
+        })
+}
+
+/// the nixpkgs commit behind a channel tarball, which the channel publishes as
+/// `git-revision` beside it
+pub fn channel_rev(url: &str) -> Option<String> {
+    channel_repo(url)?;
+    let (dir, _) = url.split(['?', '#']).next()?.rsplit_once('/')?;
+    let text = raw(&format!("{dir}/git-revision"), None).ok()?;
+    let rev = text.trim();
+    (rev.len() == 40 && rev.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| rev.to_owned())
+}
+
 /// whether tack holds a token for `host`, since forges answer a request for a
 /// private repo without one as if it didn't exist
 pub fn has_token(host: &str) -> bool {
