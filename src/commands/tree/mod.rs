@@ -153,7 +153,9 @@ impl<'a> Follows<'a> {
             .iter()
             .filter(|&(alias, _)| !input.excludes.contains(alias))
             .collect::<BTreeMap<_, _>>();
+        let into_self = format!("{}/", input.name);
         let mut level = rules.clone();
+        level.retain(|_, target| !target.starts_with(&into_self));
         level.extend(&input.follows);
         Self {
             first:  Self::flake_side(level),

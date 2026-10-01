@@ -12,6 +12,7 @@ let
     elem
     elemAt
     filter
+    foldl'
     fromJSON
     hashFile
     head
@@ -23,6 +24,8 @@ let
     match
     pathExists
     readFile
+    split
+    stringLength
     substring
     tail
     trace
@@ -235,17 +238,29 @@ let
             };
 
       followsFor =
-        pin:
+        { name, pin }:
         let
           rules = removeAttrs all_follow (pin.exclude_follow or [ ]);
+          # a rule into this pin's own inputs would make that input follow itself
+          prefix = name + "/";
+          intoSelf = filter (k: substring 0 (stringLength prefix) rules.${k} == prefix) (attrNames rules);
         in
         {
-          level = rules // (pin.follows or { });
+          level = removeAttrs rules intoSelf // (pin.follows or { });
           deep = rules;
         };
 
+      # `pin/input/...` walks the inputs that pin was evaluated with, as a flake.nix follows does
       resolveFollows = mapAttrs (
-        _: target: self.${target} or (throw "tack: follows target '${target}' is not a pin")
+        _: target:
+        let
+          path = filter isString (split "/" target);
+          pin = self.${head path} or (throw "tack: follows target '${head path}' is not a pin");
+        in
+        foldl' (
+          node: key:
+          (node.inputs or { }).${key} or (throw "tack: follows target '${target}' has no input '${key}'")
+        ) pin (tail path)
       );
 
       # follows key is `flake:name`, `tack:name`, or bare `name`
@@ -410,13 +425,17 @@ let
         };
 
       evalTopFlake =
-        { sourceInfo, pin }:
+        {
+          sourceInfo,
+          name,
+          pin,
+        }:
         let
           flakeDir = sourceInfo.outPath + (if pin ? dir then "/" + pin.dir else "");
           upLockPath = flakeDir + "/flake.lock";
           upLock = if pathExists upLockPath then fromJSON (readFile upLockPath) else null;
           rootNode = if upLock != null then upLock.root else null;
-          f = followsFor pin;
+          f = followsFor { inherit name pin; };
         in
         evalFlake {
           inherit sourceInfo flakeDir upLock;
@@ -428,6 +447,7 @@ let
       evalFetch =
         {
           sourceInfo,
+          name,
           pin,
           subdir,
         }:
@@ -436,7 +456,7 @@ let
           tackPinsPath = path + "/.tack/pins.toml";
           hasTack = pathExists tackPinsPath;
           upPins = if hasTack then fromTOML (readFile tackPinsPath) else { };
-          f = followsFor pin;
+          f = followsFor { inherit name pin; };
           # a fetch drill-in is tack-only
           tackOverrides = resolveFollows (
             intersectAttrs (upPins.inputs or { }) (followsForSide {
@@ -478,9 +498,16 @@ let
             subdir = if pin ? dir then "/" + pin.dir else "";
           in
           if pinType == "flake" then
-            evalTopFlake { inherit sourceInfo pin; }
+            evalTopFlake { inherit sourceInfo name pin; }
           else
-            evalFetch { inherit sourceInfo pin subdir; };
+            evalFetch {
+              inherit
+                sourceInfo
+                name
+                pin
+                subdir
+                ;
+            };
 
       # undeclared lock entries are synthesised into toplevels by auto-dedup
       # only when referenced as [all_follow] targets
@@ -498,7 +525,7 @@ let
         in
         if pathExists (sourceInfo.outPath + "/flake.nix") then
           evalTopFlake {
-            inherit sourceInfo;
+            inherit sourceInfo name;
             pin = { };
           }
         else

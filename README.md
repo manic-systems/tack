@@ -175,6 +175,14 @@ url = "gh:owner/foo"
 follows = { nixpkgs = "nixpkgs" }   # foo's nixpkgs -> your nixpkgs pin
 ```
 
+a target can also walk into another pin's inputs, like a flake.nix follows path
+
+```toml
+[inputs.hypridle]
+url = "gh:hyprwm/hypridle"
+follows = { hyprlang = "hyprland/hyprlang", nixpkgs = "hyprland/nixpkgs" }
+```
+
 `all_follow` applies a rule to every pin that has a matching input. two value
 shapes are accepted:
 

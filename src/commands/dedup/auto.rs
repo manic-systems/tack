@@ -59,7 +59,9 @@ impl AutoFollowAliases {
         Self {
             targets_by_alias: all_follow
                 .iter()
-                .filter(|&(_, target)| !input_names.contains(target.as_str()))
+                .filter(|&(_, target)| {
+                    !input_names.contains(target.as_str()) && !target.contains('/')
+                })
                 .filter_map(|(alias, target)| {
                     Some((
                         pins::FollowAlias::from(alias.as_str())
