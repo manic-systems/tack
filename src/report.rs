@@ -157,6 +157,48 @@ pub struct PinLook {
     pub name:    String,
     pub outcome: LookOutcome,
     pub log:     Option<CommitLog>,
+    pub pulls:   Vec<PullPatch>,
+}
+
+/// a vendored pull request that needs attention, open ones that haven't moved
+/// are left out
+#[derive(Clone, Debug)]
+pub struct PullPatch {
+    pub source:    String,
+    pub reference: PatchRef,
+    pub status:    PullStatus,
+}
+
+/// what a remote patch came from, written the way its forge writes it
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatchRef {
+    PullRequest(u64),
+    MergeRequest(u64),
+    Commit(String),
+}
+
+impl Display for PatchRef {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match *self {
+            Self::PullRequest(number) => write!(f, "PR #{number}"),
+            Self::MergeRequest(number) => write!(f, "MR !{number}"),
+            Self::Commit(ref rev) => write!(f, "commit {}", rev.get(..7).unwrap_or(rev)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PullStatus {
+    /// merged, and upstream's newest rev has it
+    Landed,
+    /// merged but not in the pin yet, or not checkable when the pin is a
+    /// tarball, a fork, or the forge names no merge commit
+    Merged {
+        checked: bool,
+    },
+    Closed,
+    /// open, and its head is not the one that was vendored
+    Changed,
 }
 
 #[derive(Clone, Debug, Default)]

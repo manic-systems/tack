@@ -43,6 +43,7 @@ use crate::{
         Project,
         write_atomic,
     },
+    report::PullPatch,
 };
 
 struct PatchFile {
@@ -50,11 +51,12 @@ struct PatchFile {
     url:        Option<String>,
     file:       String,
     bytes:      Vec<u8>,
+    head:       Option<String>,
     downloaded: bool,
 }
 
 impl PatchFile {
-    fn read(project: &Project, source: &str, file: &str) -> Result<Self> {
+    fn read(project: &Project, source: &str, file: &str, head: Option<String>) -> Result<Self> {
         let path = project.dir().join(file);
         match fs::read(&path) {
             Ok(bytes) => {
@@ -63,6 +65,7 @@ impl PatchFile {
                     url: None,
                     file: file.to_owned(),
                     bytes,
+                    head,
                     downloaded: false,
                 })
             },
@@ -78,6 +81,7 @@ impl From<&PatchFile> for PatchDigest {
             url:    patch.url.clone(),
             file:   patch.file.clone(),
             sha256: HEXLOWER.encode(&Sha256::hash(&patch.bytes)),
+            head:   patch.head.clone(),
         }
     }
 }
@@ -234,7 +238,7 @@ impl<'a> PatchedPin<'a> {
                 user_bail!("patch {source} is listed twice");
             }
             let patch = match *entry {
-                PatchSource::Local(ref file) => PatchFile::read(self.project, &source, file)?,
+                PatchSource::Local(ref file) => PatchFile::read(self.project, &source, file, None)?,
                 PatchSource::Remote(ref remote) => {
                     let file = remote.vendored_file(name);
                     if patches.iter().any(|patch| patch.file == file) {
@@ -245,18 +249,22 @@ impl<'a> PatchedPin<'a> {
                     }
                     // a vendored file the lock doesn't know is left over from an undo
                     let url = remote.url();
-                    let known = locked.is_some_and(|tree| {
-                        tree.patches.iter().any(|digest| {
+                    let known = locked
+                        .into_iter()
+                        .flat_map(|tree| &tree.patches)
+                        .find(|digest| {
                             digest.source == source && digest.url.as_deref() == Some(url)
-                        })
-                    });
-                    if mode != Mode::Refresh && known && self.project.dir().join(&file).exists() {
+                        });
+                    if mode != Mode::Refresh
+                        && let Some(digest) = known
+                        && self.project.dir().join(&file).exists()
+                    {
                         PatchFile {
                             url: Some(url.to_owned()),
-                            ..PatchFile::read(self.project, &source, &file)?
+                            ..PatchFile::read(self.project, &source, &file, digest.head.clone())?
                         }
                     } else {
-                        let bytes = remote.download()?;
+                        let (bytes, head) = remote.download()?;
                         if bytes.trim_ascii().is_empty() {
                             user_bail!("{source}: the patch is empty");
                         }
@@ -265,6 +273,7 @@ impl<'a> PatchedPin<'a> {
                             url: Some(url.to_owned()),
                             file,
                             bytes,
+                            head,
                             downloaded: true,
                         }
                     }
@@ -347,6 +356,46 @@ impl<'a> PatchedPin<'a> {
             patches: digests,
         })
     }
+}
+
+/// asks each forge what became of the pull requests among `sources`, with
+/// `upstream` the newest rev of the pin `node` locks, and names each source
+/// it couldn't ask with the reason
+pub fn pull_patches(
+    sources: &[PatchSource],
+    tree: &PatchedTree,
+    node: &LockedNode,
+    upstream: Option<&str>,
+) -> (Vec<PullPatch>, Vec<String>) {
+    let mut pulls = Vec::new();
+    let mut unchecked = Vec::new();
+    for source in sources {
+        let PatchSource::Remote(ref remote) = *source else {
+            continue;
+        };
+        let written = source.to_string();
+        let head = tree
+            .patches
+            .iter()
+            .find(|digest| digest.source == written)
+            .and_then(|digest| digest.head.as_deref());
+        match remote.pull_status(head, node, upstream) {
+            Ok(found) => pulls.extend(found),
+            Err(err) => unchecked.push(format!("{written}: {err:#}")),
+        }
+    }
+    (pulls, unchecked)
+}
+
+/// whether the patches pins.toml lists, or the files they read, no longer
+/// match the ones the locked tree was built from, which eval refuses
+pub fn drifted(project: &Project, sources: &[PatchSource], tree: &PatchedTree) -> bool {
+    let listed = sources.iter().map(ToString::to_string);
+    !listed.eq(tree.patches.iter().map(|digest| digest.source.clone()))
+        || tree.patches.iter().any(|digest| {
+            fs::read(project.dir().join(&digest.file))
+                .is_ok_and(|bytes| HEXLOWER.encode(&Sha256::hash(&bytes)) != digest.sha256)
+        })
 }
 
 /// what nix reports as a tarball's lastModified, since channel tarballs carry

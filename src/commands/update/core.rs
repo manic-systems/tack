@@ -747,24 +747,48 @@ pub(super) fn look(
             verbose,
             &session,
         );
+        let mut warnings = Vec::from_iter(localized.warning);
+        let pulls = match (lock.get(&input.name), lock.patched(&input.name)) {
+            (Some(node), Some(tree)) => {
+                if patched::drifted(project, &input.patches, tree) {
+                    warnings.push(format!(
+                        "{0}: its patches no longer match the lock, run `tack update {0}`",
+                        input.name
+                    ));
+                }
+                let upstream = match outcome {
+                    LookOutcome::Updated { ref new, .. } => Some(new.as_str()),
+                    LookOutcome::Unchanged => old_compare_rev,
+                    LookOutcome::Skipped(_) | LookOutcome::Failed(_) => None,
+                };
+                let (found, unchecked) =
+                    patched::pull_patches(&input.patches, tree, node, upstream);
+                warnings.extend(
+                    unchecked
+                        .into_iter()
+                        .map(|reason| format!("{}: could not check {reason}", input.name)),
+                );
+                found
+            },
+            _ => Vec::new(),
+        };
         progress.finished(index, &outcome);
         (
             PinLook {
                 name: input.name.clone(),
                 outcome,
                 log,
+                pulls,
             },
-            localized.warning,
+            warnings,
         )
     });
 
     let mut warnings = Vec::new();
     let pins = look_results
         .into_iter()
-        .map(|(pin, maybe_warning)| {
-            if let Some(message) = maybe_warning {
-                warnings.push(message);
-            }
+        .map(|(pin, pin_warnings)| {
+            warnings.extend(pin_warnings);
             pin
         })
         .collect::<Vec<PinLook>>();

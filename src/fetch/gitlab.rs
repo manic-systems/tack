@@ -170,6 +170,45 @@ pub(super) fn compare_status(
     GitlabClient::global().merge_base(host, owner, repo, base, head)
 }
 
+pub fn merge_request(host: &str, owner: &str, repo: &str, iid: u64) -> FetchResult<MergeRequest> {
+    let project = encoded_project(owner, repo);
+    let url = format!("https://{host}/api/v4/projects/{project}/merge_requests/{iid}");
+    HttpClient::global().gitlab_json(&url, host, Some(Duration::from_secs(5)))
+}
+
+/// whether `rev` already has `commit` in its history
+pub fn contains_commit(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    rev: &str,
+    commit: &str,
+) -> FetchResult<bool> {
+    let status = compare_status(host, owner, repo, commit, rev)?;
+    Ok(matches!(
+        status,
+        Some(CompareStatus::Ahead | CompareStatus::Identical)
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct MergeRequest {
+    pub state:             MergeState,
+    /// the head commit of the source branch
+    pub sha:               String,
+    pub merge_commit_sha:  Option<String>,
+    pub squash_commit_sha: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeState {
+    Opened,
+    Closed,
+    Locked,
+    Merged,
+}
+
 fn merge_base_url(host: &str, owner: &str, repo: &str, old: &str, new: &str) -> String {
     let project = encoded_project(owner, repo);
     let (old_ref, new_ref) = (percent_encode(old), percent_encode(new));

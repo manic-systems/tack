@@ -49,6 +49,8 @@ const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_DIFF_ACCEPT: &str = "application/vnd.github.diff";
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const GITHUB_GRAPHQL_TIMEOUT: Duration = Duration::from_secs(15);
+const DIFF_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 const APPLICATION_JSON: &str = "application/json";
 
 pub(super) fn agent() -> &'static Agent {
@@ -64,8 +66,19 @@ fn read_ok_body(resp: &mut Response<Body>, what: &str) -> FetchResult<String> {
         return Err(FetchError::from_response(resp, what));
     }
     resp.body_mut()
+        .with_config()
+        .limit(MAX_BODY_BYTES)
         .read_to_string()
-        .map_err(|err| FetchError::Transport(format!("read {what}: {err}")))
+        .map_err(|err| {
+            if matches!(err, ureq::Error::BodyExceedsLimit(_)) {
+                FetchError::Transport(format!(
+                    "{what}: body exceeds {} MiB",
+                    MAX_BODY_BYTES / (1024 * 1024)
+                ))
+            } else {
+                FetchError::Transport(format!("read {what}: {err}"))
+            }
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -154,6 +167,9 @@ impl HttpClient {
         with_credential_fallback("github.com", true, |credential| {
             let mut resp =
                 Self::with_credential(self.get(url).header(ACCEPT, GITHUB_DIFF_ACCEPT), credential)
+                    .config()
+                    .timeout_global(Some(DIFF_TIMEOUT))
+                    .build()
                     .call()
                     .map_err(|err| FetchError::from_ureq(err, url))?;
             read_ok_body(&mut resp, url)
@@ -239,16 +255,22 @@ impl HttpClient {
     }
 
     pub(super) fn raw_text(self, url: &str, credential_host: Option<&str>) -> FetchResult<String> {
-        let attempt = |credential| {
-            let mut resp = Self::with_credential(self.get(url), credential)
-                .call()
-                .map_err(|err| FetchError::from_ureq(err, url))?;
-            read_ok_body(&mut resp, url)
-        };
         credential_host.map_or_else(
-            || attempt(Credential::Anonymous),
-            |host| with_credential_fallback(host, true, attempt),
+            || self.text_with(url, Credential::Anonymous),
+            |host| {
+                with_credential_fallback(host, true, |credential| self.text_with(url, credential))
+            },
         )
+    }
+
+    fn text_with(self, url: &str, credential: Credential) -> FetchResult<String> {
+        let mut resp = Self::with_credential(self.get(url), credential)
+            .config()
+            .timeout_global(Some(DIFF_TIMEOUT))
+            .build()
+            .call()
+            .map_err(|err| FetchError::from_ureq(err, url))?;
+        read_ok_body(&mut resp, url)
     }
 }
 

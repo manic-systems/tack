@@ -176,10 +176,11 @@ impl Display {
     }
 
     pub fn finish(self) {
-        self.finish_verbose(&[]);
+        self.finish_with(&[], &[]);
     }
 
-    pub fn finish_verbose(mut self, logs: &[Option<CommitLog>]) {
+    /// `logs` print under updated rows, `notes` under any row
+    pub fn finish_with(mut self, logs: &[Option<CommitLog>], notes: &[Vec<String>]) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -194,11 +195,14 @@ impl Display {
                 }
                 let line = StatusLine::new(&row.name, status);
                 let _ = writeln!(rendered, "{}", line.tty());
+                let indent = " ".repeat(4 + row.name.len() + 2);
                 if line.is_updated()
                     && let Some(log) = logs.get(index).and_then(Option::as_ref)
                 {
-                    let indent = " ".repeat(4 + row.name.len() + 2);
                     CommitLogLines::new(&indent, log).write_to(&mut rendered);
+                }
+                for note in notes.get(index).into_iter().flatten() {
+                    let _ = writeln!(rendered, "{indent}{note}");
                 }
             }
 
@@ -221,6 +225,9 @@ impl Display {
                 {
                     let indent = " ".repeat(row.name.len() + 2);
                     CommitLogLines::new(&indent, log).write_to(&mut out);
+                }
+                for note in notes.get(index).into_iter().flatten() {
+                    let _ = writeln!(out, "{}: {note}", row.name);
                 }
             }
         }

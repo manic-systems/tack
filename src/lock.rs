@@ -258,6 +258,9 @@ pub struct PatchDigest {
     pub url:    Option<String>,
     pub file:   String,
     pub sha256: String,
+    /// the pull request's head commit when it was vendored
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head:   Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

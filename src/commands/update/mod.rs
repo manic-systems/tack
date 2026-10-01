@@ -18,6 +18,8 @@ use crate::{
     report::{
         LookOutcome,
         LookReport,
+        PullPatch,
+        PullStatus,
         Signed,
         UpdateOutcome,
         UpdateReport,
@@ -187,21 +189,65 @@ pub fn look_cli(project: &Project, selection: Selection<'_>, verbose: bool) -> R
         status:  look_status,
     })?;
     if let Some(display) = spinner.into_display() {
-        if verbose {
-            let logs = report
-                .pins
-                .iter()
-                .map(|pin| pin.log.clone())
-                .collect::<Vec<_>>();
-            display.finish_verbose(&logs);
-        } else {
-            display.finish();
-        }
+        let logs = report
+            .pins
+            .iter()
+            .map(|pin| pin.log.clone().filter(|_| verbose))
+            .collect::<Vec<_>>();
+        let notes = report
+            .pins
+            .iter()
+            .map(|pin| {
+                pin.pulls
+                    .iter()
+                    .map(|pull| pull_note(&pin.name, pull))
+                    .collect()
+            })
+            .collect::<Vec<_>>();
+        display.finish_with(&logs, &notes);
     } else {
         print_empty_selection(project, selection);
     }
     print_warnings(&report.warnings);
     Ok(())
+}
+
+fn pull_note(pin: &str, pull: &PullPatch) -> String {
+    let reference = &pull.reference;
+    let source = &pull.source;
+    match pull.status {
+        PullStatus::Landed => {
+            format!(
+                "{reference} is upstream now, drop it with `tack patch rm {pin} {}`",
+                shell_word(source)
+            )
+        },
+        PullStatus::Merged { checked: true } => {
+            format!("{reference} merged, but {pin} doesn't have it yet")
+        },
+        PullStatus::Merged { checked: false } => {
+            format!("{reference} merged, tack can't tell whether {pin} has it yet")
+        },
+        PullStatus::Closed => format!("{reference} was closed without merging"),
+        PullStatus::Changed => {
+            format!(
+                "{reference} changed since you vendored it, `tack patch update {pin}` takes the \
+                 new version"
+            )
+        },
+    }
+}
+
+/// `word` quoted for a shell when it carries anything a shell would act on
+fn shell_word(word: &str) -> String {
+    let plain = word
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_./:@%+=,".contains(&byte));
+    if plain {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
 }
 
 /// nothing ran, so say whether the project is empty or the selection emptied it

@@ -121,14 +121,14 @@ impl SourceId {
         }
     }
 
-    fn github(owner: &str, repo: &str) -> Self {
+    pub fn github(owner: &str, repo: &str) -> Self {
         Self::Github {
             owner: owner.to_ascii_lowercase(),
             repo:  repo.to_ascii_lowercase(),
         }
     }
 
-    fn gitlab(host: &str, owner: &str, repo: &str) -> Self {
+    pub fn gitlab(host: &str, owner: &str, repo: &str) -> Self {
         Self::Gitlab {
             host:  host::normalized(host),
             owner: owner.to_ascii_lowercase(),

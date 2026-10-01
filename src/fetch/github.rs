@@ -597,6 +597,42 @@ fn diff_with_fallback(api: &str, web: &str) -> FetchResult<String> {
         .or_else(|err| http.raw_text(web, Some("github.com")).map_err(|_| err))
 }
 
+pub fn pull_request(owner: &str, repo: &str, number: u64) -> FetchResult<PullRequest> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
+    GithubClient::global()
+        .http
+        .github_json(&url, Some(Duration::from_secs(5)))
+}
+
+/// whether `rev` already has `commit` in its history
+pub fn contains_commit(owner: &str, repo: &str, rev: &str, commit: &str) -> FetchResult<bool> {
+    let status = GithubClient::global().compare_status(owner, repo, commit, rev)?;
+    Ok(matches!(
+        status,
+        Some(CompareStatus::Ahead | CompareStatus::Identical)
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct PullRequest {
+    pub merged_at:        Option<String>,
+    pub merge_commit_sha: Option<String>,
+    pub state:            PullState,
+    pub head:             PullHead,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PullState {
+    Open,
+    Closed,
+}
+
+#[derive(Deserialize)]
+pub struct PullHead {
+    pub sha: String,
+}
+
 #[cfg(test)]
 #[path = "github_tests.rs"]
 mod tests;

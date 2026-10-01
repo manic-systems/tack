@@ -24,6 +24,10 @@ use super::{
     CompareStatus,
     FetchError,
     FetchResult,
+    auth::{
+        Credential,
+        with_credential_fallback,
+    },
     gitlab,
     http::HttpClient,
     percent_encode,
@@ -119,7 +123,7 @@ fn resolve_forgejo_gitea(
         url.push_str("&sha=");
         url.push_str(&percent_encode(target));
     }
-    json::<Vec<ForgeCommitRef>>(&url, COMPARE_TIMEOUT)?
+    json_for_host::<Vec<ForgeCommitRef>>(host, &url, COMPARE_TIMEOUT)?
         .into_iter()
         .next()
         .map(|commit| commit.sha)
@@ -153,6 +157,47 @@ fn compare_detected(
         },
         ForgeKind::Cgit | ForgeKind::Unknown => None,
     })
+}
+
+pub fn pull_request(host: &str, owner: &str, repo: &str, number: u64) -> FetchResult<GiteaPull> {
+    let url = format!("{}/pulls/{number}", forgejo_repo_api(host, owner, repo));
+    json_for_host::<GiteaPull>(host, &url, COMPARE_TIMEOUT)
+}
+
+/// whether `rev` already has `commit` in its history
+pub fn contains_commit(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    rev: &str,
+    commit: &str,
+) -> FetchResult<bool> {
+    let status = compare_forgejo_gitea(host, owner, repo, commit, rev)?;
+    Ok(matches!(
+        status,
+        CompareStatus::Ahead | CompareStatus::Identical
+    ))
+}
+
+/// a Forgejo or Gitea pull request, which share one api
+#[derive(Deserialize)]
+pub struct GiteaPull {
+    pub state:            GiteaPullState,
+    pub merged:           bool,
+    pub merge_commit_sha: Option<String>,
+    pub head:             GiteaPullHead,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GiteaPullState {
+    Open,
+    Closed,
+}
+
+#[derive(Deserialize)]
+pub struct GiteaPullHead {
+    pub sha: String,
 }
 
 fn compare_forgejo_gitea(
@@ -226,7 +271,7 @@ fn compare(
         percent_encode(base),
         percent_encode(head),
     );
-    json::<ForgeCompare>(&url, COMPARE_TIMEOUT)
+    json_for_host::<ForgeCompare>(host, &url, COMPARE_TIMEOUT)
 }
 
 fn detect_host(host: &str) -> ForgeKind {
@@ -317,14 +362,31 @@ fn json<T>(url: &str, timeout: Duration) -> FetchResult<T>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let mut resp = HttpClient::global()
-        .get(url)
-        .header(ACCEPT, APPLICATION_JSON)
-        .config()
-        .timeout_global(Some(timeout))
-        .build()
-        .call()
-        .map_err(|err| FetchError::from_ureq(err, url))?;
+    json_with(url, timeout, Credential::Anonymous)
+}
+
+fn json_for_host<T>(host: &str, url: &str, timeout: Duration) -> FetchResult<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    with_credential_fallback(host, true, |credential| json_with(url, timeout, credential))
+}
+
+fn json_with<T>(url: &str, timeout: Duration, credential: Credential) -> FetchResult<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let mut resp = HttpClient::with_credential(
+        HttpClient::global()
+            .get(url)
+            .header(ACCEPT, APPLICATION_JSON),
+        credential,
+    )
+    .config()
+    .timeout_global(Some(timeout))
+    .build()
+    .call()
+    .map_err(|err| FetchError::from_ureq(err, url))?;
     let status = resp.status();
     if status != 200 {
         return Err(FetchError::from_status(status.as_u16(), url));

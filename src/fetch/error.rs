@@ -18,6 +18,8 @@ use ureq::{
     },
 };
 
+use crate::render::printable;
+
 pub type FetchResult<T> = Result<T, FetchError>;
 
 #[derive(thiserror::Error, Debug)]
@@ -106,11 +108,11 @@ struct ApiErrorBody {
 impl ApiErrorBody {
     fn detail(self) -> Option<String> {
         let raw = self.message.or(self.error_description).or(self.error)?;
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
+        let clean = printable(raw.trim());
+        if clean.is_empty() {
             return None;
         }
-        Some(trimmed.chars().take(300).collect())
+        Some(clean.chars().take(300).collect())
     }
 }
 

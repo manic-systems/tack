@@ -718,6 +718,7 @@ pub fn forge_miss_untrusted(forge: &Forge) -> bool {
             .is_none_or(|host| token_for_host(host).is_none())
 }
 
+/// `url` must be on `host`, the only place its credential is sent
 /// [`None`] when the locked tree has no file at `path`
 pub fn locked_file(node: &LockedNode, path: &str) -> Result<Option<String>> {
     if let (Some(forge), Some(rev)) = (Forge::from_locked(node), node.forge_rev()) {

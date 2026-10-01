@@ -18,9 +18,24 @@ use misstep::{
 
 use crate::{
     error::user_bail,
-    fetch,
+    fetch::{
+        self,
+        forge::GiteaPullState,
+        github::PullState,
+        gitlab::MergeState,
+    },
+    lock::LockedNode,
+    report::{
+        PatchRef,
+        PullPatch,
+        PullStatus,
+    },
     shorturl::ShortUrls,
-    source::split_query_fragment,
+    source::{
+        git_url,
+        id::SourceId,
+        split_query_fragment,
+    },
 };
 
 /// one entry of a pin's `patches`, displayed as the text it was written as,
@@ -53,6 +68,18 @@ pub struct ForgeRepo {
     /// every path segment before the repo, so gitlab subgroups stay intact
     owner: String,
     repo:  String,
+}
+
+struct Pull {
+    head:    String,
+    outcome: PullOutcome,
+}
+
+enum PullOutcome {
+    Open,
+    Closed,
+    /// the merge commit, when the forge reports one
+    Merged(Option<String>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,7 +242,22 @@ impl Remote {
     }
 }
 
+impl Forge {
+    /// where tokens for this forge's downloads come from
+    fn host(&self) -> &str {
+        match *self {
+            Self::Github => "github.com",
+            Self::Gitlab { ref host } | Self::Gitea { ref host } => host,
+        }
+    }
+}
+
 impl ForgeRepo {
+    /// github's diffs go through its api, which also reaches private repos
+    fn serves_own_diff(&self, url: &str) -> bool {
+        !matches!(self.forge, Forge::Github) && serves_diff(url)
+    }
+
     fn new(forge: Forge, owner: &str, repo: &str) -> Self {
         Self {
             forge,
@@ -235,16 +277,108 @@ impl ForgeRepo {
             Forge::Gitlab { ref host } => {
                 fetch::raw(
                     &format!("https://{host}/{owner}/{repo}/-/merge_requests/{number}.diff"),
-                    None,
+                    Some(host),
                 )?
             },
             Forge::Gitea { ref host } => {
                 fetch::raw(
                     &format!("https://{host}/{owner}/{repo}/pulls/{number}.diff"),
-                    None,
+                    Some(host),
                 )?
             },
         })
+    }
+
+    fn pull(&self, number: u64) -> Result<Pull> {
+        let Self {
+            ref owner,
+            ref repo,
+            ..
+        } = *self;
+        Ok(match self.forge {
+            Forge::Github => {
+                let pull = fetch::github::pull_request(owner, repo, number)?;
+                let outcome = match (pull.merged_at, pull.state) {
+                    (Some(_), _) => PullOutcome::Merged(pull.merge_commit_sha),
+                    (None, PullState::Closed) => PullOutcome::Closed,
+                    (None, PullState::Open) => PullOutcome::Open,
+                };
+                Pull {
+                    head: pull.head.sha,
+                    outcome,
+                }
+            },
+            Forge::Gitlab { ref host } => {
+                let merge = fetch::gitlab::merge_request(host, owner, repo, number)?;
+                // a fast-forward merge makes no commit, its head lands as is
+                let outcome = match merge.state {
+                    MergeState::Merged => {
+                        let landed = merge.merge_commit_sha.or(merge.squash_commit_sha);
+                        PullOutcome::Merged(Some(landed.unwrap_or_else(|| merge.sha.clone())))
+                    },
+                    MergeState::Closed | MergeState::Locked => PullOutcome::Closed,
+                    MergeState::Opened => PullOutcome::Open,
+                };
+                Pull {
+                    head: merge.sha,
+                    outcome,
+                }
+            },
+            Forge::Gitea { ref host } => {
+                let pull = fetch::forge::pull_request(host, owner, repo, number)?;
+                let outcome = match (pull.merged, pull.state) {
+                    (true, _) => PullOutcome::Merged(pull.merge_commit_sha),
+                    (false, GiteaPullState::Closed) => PullOutcome::Closed,
+                    (false, GiteaPullState::Open) => PullOutcome::Open,
+                };
+                Pull {
+                    head: pull.head.sha,
+                    outcome,
+                }
+            },
+        })
+    }
+
+    fn contains(&self, rev: &str, commit: &str) -> Result<bool> {
+        let Self {
+            ref owner,
+            ref repo,
+            ..
+        } = *self;
+        Ok(match self.forge {
+            Forge::Github => fetch::github::contains_commit(owner, repo, rev, commit)?,
+            Forge::Gitlab { ref host } => {
+                fetch::gitlab::contains_commit(host, owner, repo, rev, commit)?
+            },
+            Forge::Gitea { ref host } => {
+                fetch::forge::contains_commit(host, owner, repo, rev, commit)?
+            },
+        })
+    }
+
+    /// whether `node` pins this repo, comparing Forgejo and Gitea urls by parts
+    /// since [`SourceId`] keeps plain git urls verbatim
+    fn pinned_by(&self, node: &LockedNode) -> bool {
+        let Self {
+            ref owner,
+            ref repo,
+            ..
+        } = *self;
+        let id = match self.forge {
+            Forge::Github => SourceId::github(owner, repo),
+            Forge::Gitlab { ref host } => SourceId::gitlab(host, owner, repo),
+            Forge::Gitea { ref host } => {
+                let LockedNode::Git { ref url, .. } = *node else {
+                    return false;
+                };
+                return git_url::parse(url).is_some_and(|pinned| {
+                    pinned.host.eq_ignore_ascii_case(host)
+                        && pinned.owner.eq_ignore_ascii_case(owner)
+                        && pinned.repo.eq_ignore_ascii_case(repo)
+                });
+            },
+        };
+        SourceId::from_locked(node) == Some(id)
     }
 
     fn commit_diff(&self, rev: &str) -> Result<String> {
@@ -258,13 +392,13 @@ impl ForgeRepo {
             Forge::Gitlab { ref host } => {
                 fetch::raw(
                     &format!("https://{host}/{owner}/{repo}/-/commit/{rev}.diff"),
-                    None,
+                    Some(host),
                 )?
             },
             Forge::Gitea { ref host } => {
                 fetch::raw(
                     &format!("https://{host}/{owner}/{repo}/commit/{rev}.diff"),
-                    None,
+                    Some(host),
                 )?
             },
         })
@@ -317,35 +451,115 @@ impl RemotePatch {
         format!("patches/{pin}/{}", self.file_name())
     }
 
-    pub fn download(&self) -> Result<Vec<u8>> {
-        let fetched = self.fetch();
+    /// the patch bytes, plus a pull request's head so `look` can tell when it
+    /// changes
+    pub fn download(&self) -> Result<(Vec<u8>, Option<String>)> {
+        self.private_hint(self.fetch())
+    }
+
+    /// github answers a private repo as missing when no token is set
+    fn private_hint<T>(&self, result: Result<T>) -> Result<T> {
         let anonymous = matches!(
             self.kind,
             Remote::Pull { ref repo, .. } | Remote::Commit { ref repo, .. }
                 if matches!(repo.forge, Forge::Github)
         ) && !fetch::has_token("github.com");
         if anonymous {
-            return fetched.context(
+            return result.context(
                 "github answers a private repo as missing without a token, set GITHUB_TOKEN or \
                  GH_TOKEN if it is one",
             );
         }
-        fetched
+        result
     }
 
-    fn fetch(&self) -> Result<Vec<u8>> {
-        let text = match self.kind {
+    fn fetch(&self) -> Result<(Vec<u8>, Option<String>)> {
+        let (text, head) = match self.kind {
             // a url that already serves a diff is fetched as written, since a
             // host that merely looks like gitea may not have its routes
-            Remote::Pull { ref repo, .. } | Remote::Commit { ref repo, .. }
-                if !matches!(repo.forge, Forge::Github) && serves_diff(&self.url) =>
-            {
-                fetch::raw(&self.url, None)?
+            Remote::Pull { ref repo, number } if repo.serves_own_diff(&self.url) => {
+                let head = repo.pull(number).ok().map(|pull| pull.head);
+                (fetch::raw(&self.url, Some(repo.forge.host()))?, head)
             },
-            Remote::Pull { ref repo, number } => repo.pull_diff(number)?,
-            Remote::Commit { ref repo, ref rev } => repo.commit_diff(rev)?,
-            Remote::Plain => fetch::raw(&self.url, None)?,
+            Remote::Commit { ref repo, .. } if repo.serves_own_diff(&self.url) => {
+                (fetch::raw(&self.url, Some(repo.forge.host()))?, None)
+            },
+            Remote::Pull { ref repo, number } => {
+                let head = repo.pull(number)?.head;
+                (repo.pull_diff(number)?, Some(head))
+            },
+            Remote::Commit { ref repo, ref rev } => (repo.commit_diff(rev)?, None),
+            Remote::Plain => (fetch::raw(&self.url, None)?, None),
         };
-        Ok(text.into_bytes())
+        Ok((text.into_bytes(), head))
+    }
+
+    /// what became of a vendored pull request or commit, [`None`] when it is
+    /// neither, or still open and unchanged since `head`, or a commit the pin
+    /// lacks, with `upstream` the newest rev of the pin `node` locks
+    pub fn pull_status(
+        &self,
+        head: Option<&str>,
+        node: &LockedNode,
+        upstream: Option<&str>,
+    ) -> Result<Option<PullPatch>> {
+        self.private_hint(self.status(head, node, upstream))
+    }
+
+    fn status(
+        &self,
+        head: Option<&str>,
+        node: &LockedNode,
+        upstream: Option<&str>,
+    ) -> Result<Option<PullPatch>> {
+        let (repo, number) = match self.kind {
+            Remote::Pull { ref repo, number } => (repo, number),
+            Remote::Commit { ref repo, ref rev } => {
+                let landed = match upstream {
+                    Some(newest) if repo.pinned_by(node) => repo.contains(newest, rev)?,
+                    Some(_) | None => false,
+                };
+                return Ok(landed.then(|| {
+                    PullPatch {
+                        source:    self.written.clone(),
+                        reference: PatchRef::Commit(rev.clone()),
+                        status:    PullStatus::Landed,
+                    }
+                }));
+            },
+            Remote::Plain => return Ok(None),
+        };
+        let pull = repo.pull(number)?;
+        let status = match pull.outcome {
+            PullOutcome::Merged(Some(ref merge)) => {
+                match upstream {
+                    Some(rev) if repo.pinned_by(node) => {
+                        if repo.contains(rev, merge)? {
+                            PullStatus::Landed
+                        } else {
+                            PullStatus::Merged { checked: true }
+                        }
+                    },
+                    Some(_) | None => PullStatus::Merged { checked: false },
+                }
+            },
+            PullOutcome::Merged(None) => PullStatus::Merged { checked: false },
+            PullOutcome::Closed => PullStatus::Closed,
+            PullOutcome::Open => {
+                if head.is_none_or(|vendored| vendored == pull.head) {
+                    return Ok(None);
+                }
+                PullStatus::Changed
+            },
+        };
+        let reference = match repo.forge {
+            Forge::Gitlab { .. } => PatchRef::MergeRequest(number),
+            Forge::Github | Forge::Gitea { .. } => PatchRef::PullRequest(number),
+        };
+        Ok(Some(PullPatch {
+            source: self.written.clone(),
+            reference,
+            status,
+        }))
     }
 }
