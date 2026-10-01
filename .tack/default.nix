@@ -86,11 +86,18 @@ let
     let
       pins = fromTOML (readFile (resolverDir + "/pins.toml"));
       lock = fromJSON (readFile (resolverDir + "/pins.lock.json"));
-      declared = pins.inputs or { };
+      declared =
+        if pins.inputs or { } ? _meta then
+          throw "tack: '_meta' is reserved by tack, rename that input"
+        else
+          pins.inputs or { };
       all_follow_raw = pins.all_follow or { };
       # tackOverrides carries this reserved entry across nested resolver boundaries
       inheritedPolicy = overrides.__tack_policy or { };
       inheritedFollows = inheritedPolicy.follows or { };
+      inheritedFollowMeta = inheritedPolicy.followMeta or { };
+      inheritedOverrideMeta = inheritedPolicy.meta or { };
+      inheritedOmitted = inheritedPolicy.omitted or [ ];
       inheritedOmitLayers = (inheritedPolicy.omit or { }).layers or [ ];
       pinOverrides = removeAttrs overrides [ "__tack_policy" ];
 
@@ -240,6 +247,81 @@ let
               { }
           );
 
+      metaFields = {
+        github = [
+          "owner"
+          "repo"
+          "host"
+          "tag"
+          "rev"
+          "narHash"
+          "lastModified"
+        ];
+        gitlab = [
+          "owner"
+          "repo"
+          "host"
+          "tag"
+          "rev"
+          "narHash"
+          "lastModified"
+        ];
+        git = [
+          "url"
+          "ref"
+          "tag"
+          "rev"
+          "narHash"
+          "lastModified"
+        ];
+        tarball = [
+          "url"
+          "rev"
+          "narHash"
+          "lastModified"
+        ];
+        indirect = [ "id" ];
+        path = [
+          "path"
+          "narHash"
+          "lastModified"
+        ];
+        fixed = [
+          "url"
+          "tag"
+          "sha256"
+          "unpack"
+        ];
+      };
+      metaDefaults = {
+        github.host = "github.com";
+        gitlab.host = "gitlab.com";
+        fixed.unpack = "file";
+      };
+      lockedFields = {
+        rev = null;
+        narHash = null;
+        lastModified = null;
+      };
+
+      # indirect entries lock only an id, so their revision comes from the registry fetch
+      pinMeta =
+        name:
+        let
+          entry = lock.${name} or (throw "tack: pin '${name}' has no lock entry; run tack update");
+          type = entry.type or "unknown";
+          fields = listToAttrs (
+            map (field: {
+              name = field;
+              value = null;
+            }) (metaFields.${type} or [ ])
+          );
+          fetched = if type == "indirect" then intersectAttrs lockedFields (fetchPin name) else { };
+        in
+        (metaDefaults.${type} or { }) // intersectAttrs fields entry // fetched // { inherit type; };
+
+      resolveFollowMeta = mapAttrs (_: target: selfMeta.${target} or { type = "upstream"; });
+
       resolveSpec =
         { upLock, spec }:
         if isList spec then
@@ -302,6 +384,7 @@ let
             localLocation = "inputs.${name}.follows";
             excluded = pin.exclude_follow or [ ];
             inherited = inheritedFollows;
+            inheritedMeta = inheritedFollowMeta;
           };
           deep = {
             global = all_follow;
@@ -309,6 +392,7 @@ let
             localLocation = "inputs.${name}.follows";
             excluded = pin.exclude_follow or [ ];
             inherited = inheritedFollows;
+            inheritedMeta = inheritedFollowMeta;
           };
         };
 
@@ -439,23 +523,44 @@ let
           ) (attrNames checked)
         );
 
-      followOverridesForSide =
-        { side, policy }:
-        resolveFollows (projectFollows {
+      followLayersForSide =
+        {
+          side,
+          policy,
+          resolve,
+          inherited,
+        }:
+        resolve (projectFollows {
           inherit side;
           follows = policy.global;
           location = "all_follow";
           excluded = policy.excluded;
         })
-        // resolveFollows (projectFollows {
+        // resolve (projectFollows {
           inherit side;
           follows = policy.local;
           location = policy.localLocation;
         })
         // projectFollows {
           inherit side;
-          follows = policy.inherited;
+          follows = inherited;
           location = "inherited follows";
+        };
+
+      followOverridesForSide =
+        { side, policy }:
+        followLayersForSide {
+          inherit side policy;
+          resolve = resolveFollows;
+          inherited = policy.inherited;
+        };
+
+      followMetaForSide =
+        { side, policy }:
+        followLayersForSide {
+          inherit side policy;
+          resolve = resolveFollowMeta;
+          inherited = policy.inheritedMeta;
         };
 
       scopedFollowValues =
@@ -472,6 +577,7 @@ let
           omit,
           follows,
           omitted,
+          meta,
         }:
         let
           followValues =
@@ -489,8 +595,12 @@ let
           inherit active;
           override = {
             __tack_policy = {
-              inherit omit omitted;
+              inherit omit omitted meta;
               follows = followValues;
+              followMeta = scopedFollowValues "tack" (followMetaForSide {
+                side = "tack";
+                policy = follows;
+              });
             };
           };
         };
@@ -534,6 +644,10 @@ let
             inherit omit;
             follows = deepFollows;
             omitted = attrNames (removeAttrs tackOmitOverrides (attrNames tackOverrides));
+            meta = intersectAttrs tackInputs (followMetaForSide {
+              side = "tack";
+              policy = levelFollows;
+            });
           };
           supportsOverrides = (upPins.tack or { }).recomposable or false;
           direct = effectiveTackOverrides != { };
@@ -862,12 +976,25 @@ let
           }) autoNames
         )
         // pinOverrides;
+
+      selfMeta = removeAttrs (
+        mapAttrs (name: _: pinMeta name) (removeAttrs self (attrNames pinOverrides))
+        // mapAttrs (name: _: inheritedOverrideMeta.${name} or { type = "upstream"; }) pinOverrides
+      ) inheritedOmitted;
     in
     builtins.seq all_omit_inputs (
-      builtins.seq (checkFollowKeys {
-        follows = all_follow;
-        location = "all_follow";
-      }) (self // { __functor = _: args: call ({ inherit resolverDir; } // args); })
+      builtins.seq
+        (checkFollowKeys {
+          follows = all_follow;
+          location = "all_follow";
+        })
+        (
+          self
+          // {
+            _meta = selfMeta;
+            __functor = _: args: call ({ inherit resolverDir; } // args);
+          }
+        )
     );
 in
 call { }

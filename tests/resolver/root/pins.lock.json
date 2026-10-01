@@ -22,5 +22,18 @@
   "badlocal": {
     "type": "path",
     "path": "../original"
+  },
+  "fixedpin": {
+    "type": "fixed",
+    "url": "https://example.invalid/fixed.txt",
+    "sha256": "0000000000000000000000000000000000000000000000000000"
+  },
+  "ghpin": {
+    "type": "github",
+    "owner": "example",
+    "repo": "repo",
+    "rev": "0123456789abcdef0123456789abcdef01234567",
+    "narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "lastModified": 1700000000
   }
 }

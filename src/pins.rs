@@ -46,6 +46,14 @@ use crate::{
     },
 };
 
+/// the resolver exposes pin metadata under this root attr
+const META_KEY: &str = "_meta";
+
+/// names the lock and the resolver keep for themselves
+pub fn is_reserved(name: &str) -> bool {
+    name == DECLARED_KEY || name == META_KEY
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PinType {
     Flake,
@@ -151,8 +159,8 @@ pub struct Input {
 
 impl Input {
     fn from_item(name: &str, input_item: &Item, shorturls: &ShortUrls<'_>) -> Result<Self> {
-        if name == DECLARED_KEY {
-            user_bail!("'{name}' is reserved for the lock file");
+        if is_reserved(name) {
+            user_bail!("'{name}' is reserved by tack, rename that input");
         }
         let entry = input_item
             .as_table_like()

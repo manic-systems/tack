@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 use crate::{
     pins::{
+        self,
         AddInputOpts,
         PinType,
     },
@@ -30,6 +31,10 @@ pub(super) fn convert(project: &Project, flake_path: &Path) -> Result<usize> {
     let mut doc = project.load_pins()?;
     let mut added = 0;
     for (name, input) in inputs {
+        if pins::is_reserved(&name) {
+            eprintln!("tack: input '{name}' is reserved by tack, skipped");
+            continue;
+        }
         if doc.has_input(&name) {
             eprintln!("tack: input '{name}' already in pins.toml, skipped");
             continue;

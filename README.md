@@ -409,6 +409,41 @@ omits and follows reach an upstream's tack pins only when it is
 [recomposable](#publishing), and the consumer wins. your `keep_inputs` can undo
 an upstream's omit, but an upstream's can't undo yours.
 
+## pin metadata
+
+the resolver exposes each pin's lock metadata under `_meta`, keyed by pin name.
+building it fetches nothing, except to fill in the revision of an `indirect`
+pin.
+
+```nix
+let
+  inputs = import ./.tack;
+in
+inputs._meta.nixpkgs.rev
+```
+
+every entry has a `type`, and the other fields depend on it. `?` marks fields
+that may be absent, and `tag` is only there on pins that follow one.
+
+| type | fields |
+|---|---|
+| `github`, `gitlab` | `owner`, `repo`, `host`, `tag`?, `rev`, `narHash`, `lastModified` |
+| `git` | `url`, `ref`?, `tag`?, `rev`, `narHash`, `lastModified` |
+| `tarball` | `url`, `rev`?, `narHash`, `lastModified` |
+| `indirect` | `id`, `rev`, `narHash`, `lastModified` |
+| `path` | `path`, `narHash`?, `lastModified`? |
+| `fixed` | `url`, `tag`?, `sha256`, `unpack` |
+| `upstream` | none |
+
+`host` defaults to `github.com` or `gitlab.com`, and `unpack` to `file`. a pin a
+downstream project replaces through follows takes that project's entry, or
+`{ type = "upstream"; }` when it isn't known. omitted pins have no entry.
+
+a `fetch` pin that overrides or policy reach carries the upstream project's own
+`_meta` as `inputs.<pin>._meta`. upstream resolvers older than this have none,
+so read those through `inputs.<pin>._meta or { }`. `_meta` can't be used as a
+pin name.
+
 ## publishing
 
 if third parties consume your project as a tack pin, wire your flake so

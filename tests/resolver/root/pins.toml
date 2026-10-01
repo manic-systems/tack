@@ -33,3 +33,10 @@ url     = "path:../original"
 exclude_follow = "dep"
 type           = "fetch"
 url            = "path:../original"
+
+[inputs.fixedpin]
+type = "fixed"
+url  = "https://example.invalid/fixed.txt"
+
+[inputs.ghpin]
+url = "github:example/repo"

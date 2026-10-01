@@ -34,4 +34,23 @@ assert !(builtins.tryEval inputs.topflake.inputs.scoped).success;
 assert (builtins.tryEval inputs.topflake.nested.scoped).success;
 assert !(builtins.tryEval inputs.topflake.nested.drop).success;
 assert toString inputs.topflake.nested.dep == replacement;
+assert
+  inputs._meta.replacement == {
+    type = "path";
+    path = "../replacement";
+  };
+assert
+  inputs._meta.fixedpin == {
+    type = "fixed";
+    url = "https://example.invalid/fixed.txt";
+    sha256 = "0000000000000000000000000000000000000000000000000000";
+    unpack = "file";
+  };
+assert inputs._meta.ghpin.host == "github.com";
+assert inputs._meta.ghpin.rev == "0123456789abcdef0123456789abcdef01234567";
+assert inputs.top._meta.immediate == inputs._meta.replacement;
+assert inputs.top._meta.mid.type == "path";
+assert inputs.top.mid._meta.dep == inputs._meta.replacement;
+assert !(inputs.top.mid._meta ? drop);
+assert inputs.top.mid._meta ? keepme;
 true
