@@ -31,6 +31,7 @@ use super::{
     FetchResult,
     archive::{
         detect_tar_format,
+        sniff_reader,
         unpack_tar_stream,
     },
     auth::{
@@ -228,8 +229,12 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
                 .get(url)
                 .call()
                 .with_context(|| format!("GET {url}"))?;
-            let format = detect_tar_format(url).with_context(|| format!("tarball {url}"))?;
-            unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
+            // the lock keeps the immutable url, which often drops the extension
+            let (sniffed, body) = sniff_reader(resp.body_mut().as_reader())?;
+            let Some(format) = sniffed.or_else(|| detect_tar_format(url).ok()) else {
+                user_bail!("{url} doesn't serve a gzip, xz, zstd or tar archive");
+            };
+            unpack_tar_stream(body, format, dir)
         },
         LockedNode::Gitlab {
             ref host,

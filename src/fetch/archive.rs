@@ -2,7 +2,11 @@
 
 use std::{
     fs,
-    io::Read,
+    io::{
+        self,
+        Cursor,
+        Read,
+    },
     path::{
         Path,
         PathBuf,
@@ -42,6 +46,25 @@ pub(super) fn detect_tar_format(url: &str) -> Result<TarFormat> {
         .into_iter()
         .find_map(|(suffix, format)| ends_with_ci(path, suffix).then_some(format))
         .ok_or_else(|| report!("unknown tar format for URL: {url}"))
+}
+
+/// [`None`] for anything that isn't a tar archive, compressed or not, such as
+/// an html error page
+pub(super) fn sniff_tar_format(head: &[u8]) -> Option<TarFormat> {
+    match *head {
+        [0x1F, 0x8B, ..] => Some(TarFormat::Gz),
+        [0xFD, b'7', b'z', b'X', b'Z', 0x00, ..] => Some(TarFormat::Xz),
+        [0x28, 0xB5, 0x2F, 0xFD, ..] => Some(TarFormat::Zstd),
+        _ => (head.get(257..262) == Some(b"ustar")).then_some(TarFormat::Plain),
+    }
+}
+
+const SNIFF_LEN: u64 = 262;
+
+pub(super) fn sniff_reader<R: Read>(mut reader: R) -> io::Result<(Option<TarFormat>, impl Read)> {
+    let mut head = Vec::new();
+    reader.by_ref().take(SNIFF_LEN).read_to_end(&mut head)?;
+    Ok((sniff_tar_format(&head), Cursor::new(head).chain(reader)))
 }
 
 #[inline]
