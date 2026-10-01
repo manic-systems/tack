@@ -47,6 +47,7 @@ use crate::{
     project::Project,
     render,
     report::{
+        Dates,
         LookOutcome,
         LookReport,
         PinLook,
@@ -377,6 +378,7 @@ fn classify(
             old: old_identity,
             new: new_identity,
             comparison,
+            dates: Dates::between(old, &node),
             signed_by: None,
         },
         node: Some(node),

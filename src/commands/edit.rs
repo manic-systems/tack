@@ -27,6 +27,7 @@ use crate::{
     },
     project::Project,
     render,
+    report::Dates,
     resolver,
     source,
     tag,
@@ -86,6 +87,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     match fetched {
         Ok((fetched_pin, chosen)) => {
             let (node, identity) = fetched_pin.into_parts();
+            let date = Dates::between(None, &node).new.map(render::date);
             let mut lk = project.load_lock()?;
             lk.insert(name.to_owned(), node);
             lk.set_declared(name, &expanded);
@@ -95,7 +97,10 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
             );
             lk.set_tag(name, chosen);
             project.save_lock(&lk)?;
-            println!("added {name}  {shown}");
+            match date {
+                Some(day) if !day.is_empty() => println!("added {name}  {shown} ({day})"),
+                Some(_) | None => println!("added {name}  {shown}"),
+            }
         },
         Err(err) => {
             println!("added {name} to pins.toml, but locking failed: {err:#}");

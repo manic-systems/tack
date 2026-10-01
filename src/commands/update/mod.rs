@@ -16,6 +16,7 @@ use crate::{
     project::Project,
     render,
     report::{
+        Dates,
         LookOutcome,
         LookReport,
         PullPatch,
@@ -33,10 +34,19 @@ use crate::{
 
 const LOG_LIMIT: usize = 5;
 
+/// a side of a move with its commit date, the way `nix flake update` prints it
+fn dated(label: String, date: Option<u64>) -> String {
+    match date.map(render::date) {
+        Some(day) if !day.is_empty() => format!("{label} ({day})"),
+        Some(_) | None => label,
+    }
+}
+
 fn updated_status(
     old: Option<&str>,
     new: &str,
     comparison: BranchComparison,
+    dates: Dates,
     signed: Option<&Signed>,
 ) -> PinStatus {
     let signed_by = signed.cloned();
@@ -49,8 +59,11 @@ fn updated_status(
         };
     }
     PinStatus::Updated {
-        old: old.map_or_else(|| "NEW".to_owned(), render::display_identity),
-        new: render::display_identity(new),
+        old: dated(
+            old.map_or_else(|| "NEW".to_owned(), render::display_identity),
+            dates.old,
+        ),
+        new: dated(render::display_identity(new), dates.new),
         comparison,
         signed_by,
     }
@@ -58,8 +71,11 @@ fn updated_status(
 
 fn tagged_status(moved: &TagMove) -> PinStatus {
     PinStatus::Updated {
-        old:        moved.old.clone().unwrap_or_else(|| "NEW".to_owned()),
-        new:        moved.new.clone(),
+        old:        dated(
+            moved.old.clone().unwrap_or_else(|| "NEW".to_owned()),
+            moved.dates.old,
+        ),
+        new:        dated(moved.new.clone(), moved.dates.new),
         comparison: moved.comparison,
         signed_by:  moved.signed_by.clone(),
     }
@@ -73,8 +89,9 @@ impl From<&UpdateOutcome> for PinStatus {
                 ref old,
                 ref new,
                 comparison,
+                dates,
                 ref signed_by,
-            } => updated_status(old.as_deref(), new, comparison, signed_by.as_ref()),
+            } => updated_status(old.as_deref(), new, comparison, dates, signed_by.as_ref()),
             UpdateOutcome::Tagged(ref moved) => tagged_status(moved),
             UpdateOutcome::Drift { ref rev, accepted } => {
                 Self::Drift {
@@ -107,7 +124,7 @@ impl From<&LookOutcome> for PinStatus {
                 ref old,
                 ref new,
                 comparison,
-            } => updated_status(old.as_deref(), new, comparison, None),
+            } => updated_status(old.as_deref(), new, comparison, Dates::default(), None),
             LookOutcome::Tagged(ref moved) => tagged_status(moved),
             LookOutcome::Skipped(ref note) => Self::Skipped(note.clone()),
             LookOutcome::Failed(ref msg) => Self::Failed(msg.clone()),

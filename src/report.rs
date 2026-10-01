@@ -21,6 +21,24 @@ use crate::{
     render,
 };
 
+/// when each side of a move was committed, in unix seconds, left out where the
+/// lock has no real date, as for channel tarballs
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dates {
+    pub old: Option<u64>,
+    pub new: Option<u64>,
+}
+
+impl Dates {
+    pub fn between(old: Option<&LockedNode>, new: &LockedNode) -> Self {
+        let known = |node: &LockedNode| node.last_modified().filter(|&secs| secs > 0);
+        Self {
+            old: old.and_then(known),
+            new: known(new),
+        }
+    }
+}
+
 /// a tag pin's move, which reads as tag names, with the old side keeping its
 /// rev until a tag has been recorded for it
 #[derive(Clone, Debug)]
@@ -28,6 +46,7 @@ pub struct TagMove {
     pub old:        Option<String>,
     pub new:        String,
     pub comparison: BranchComparison,
+    pub dates:      Dates,
     pub signed_by:  Option<Signed>,
 }
 
@@ -35,6 +54,7 @@ impl TagMove {
     fn new(
         old: Option<&str>,
         comparison: BranchComparison,
+        dates: Dates,
         previous: Option<&str>,
         chosen: &str,
     ) -> Self {
@@ -45,6 +65,7 @@ impl TagMove {
             ),
             new: chosen.to_owned(),
             comparison,
+            dates,
             signed_by: None,
         }
     }
@@ -57,6 +78,7 @@ pub enum UpdateOutcome {
         old:        Option<String>,
         new:        String,
         comparison: BranchComparison,
+        dates:      Dates,
         /// the signer of the new rev, for pins with `signers`
         signed_by:  Option<Signed>,
     },
@@ -79,10 +101,17 @@ impl UpdateOutcome {
         if let Self::Updated {
             ref old,
             comparison,
+            dates,
             ..
         } = *self
         {
-            *self = Self::Tagged(TagMove::new(old.as_deref(), comparison, previous, chosen));
+            *self = Self::Tagged(TagMove::new(
+                old.as_deref(),
+                comparison,
+                dates,
+                previous,
+                chosen,
+            ));
         }
     }
 
@@ -219,7 +248,13 @@ impl LookOutcome {
             ..
         } = *self
         {
-            *self = Self::Tagged(TagMove::new(old.as_deref(), comparison, previous, chosen));
+            *self = Self::Tagged(TagMove::new(
+                old.as_deref(),
+                comparison,
+                Dates::default(),
+                previous,
+                chosen,
+            ));
         }
     }
 }
