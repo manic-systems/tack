@@ -21,6 +21,7 @@ use misstep::Result as MisstepResult;
 use crate::{
     lock,
     pins,
+    resolver,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -184,6 +185,7 @@ impl Project {
     }
 
     pub fn save_lock(&self, lk: &lock::LockFile) -> MisstepResult<()> {
+        resolver::ensure_lock(self, lk)?;
         lk.save(&self.lock_path())
     }
 }

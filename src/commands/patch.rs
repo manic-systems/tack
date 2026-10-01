@@ -33,6 +33,7 @@ use crate::{
         PinsDoc,
     },
     project::Project,
+    resolver,
 };
 
 pub fn run(project: &Project, action: &PatchAction) -> Result<()> {
@@ -61,6 +62,7 @@ fn add(project: &Project, name: &str, raw_source: &str) -> Result<()> {
     if raw_source.trim().is_empty() {
         user_bail!("no patch given for {name}");
     }
+    resolver::ensure(project, &[(name, resolver::PATCHED)])?;
     let shorturls = doc.shorturls();
     let (source, copied) = if PatchSource::remote_url(raw_source, &shorturls)?.is_some() {
         (PatchSource::parse(raw_source, &shorturls)?, None)

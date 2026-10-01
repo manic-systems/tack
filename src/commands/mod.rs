@@ -25,12 +25,14 @@ use crate::{
         UpdateReport,
         VerifyReport,
     },
+    resolver::{
+        MARKER,
+        RESOLVER_NIX,
+    },
 };
 
 const STARTER_TOML: &str = include_str!("../../assets/pins.toml");
-const RESOLVER_NIX: &str = include_str!("../../.tack/default.nix");
 const SCAFFOLD_FLAKE: &str = include_str!("../../templates/default/flake.nix");
-const MARKER: &str = "# tack-managed resolver.";
 
 pub fn warn_stale_resolver(project: &Project) {
     if !stale_resolver(project) {

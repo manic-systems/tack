@@ -27,6 +27,7 @@ use crate::{
     },
     project::Project,
     render,
+    resolver,
     source,
     tag,
 };
@@ -62,6 +63,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     let expanded = doc.shorturls().expand(url)?;
     if template.is_some() {
         tag::followable(name, &expanded)?;
+        resolver::ensure(project, &[(name, resolver::TAG)])?;
     }
     doc.add_input(name, url, &pins::AddInputOpts {
         pin_type,
