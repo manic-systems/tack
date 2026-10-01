@@ -217,6 +217,7 @@ impl<'a> Tack<'a> {
     }
 
     fn recorded<T>(&self, label: &str, run: impl FnOnce() -> Result<T>) -> Result<Recorded<T>> {
+        let _held = HistoryStore::for_project(self.project).exclusive()?;
         let pre = Snapshot::capture(self.project);
         let result = run();
         let post = Snapshot::capture(self.project);

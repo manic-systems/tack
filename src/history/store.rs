@@ -3,7 +3,11 @@
 use std::{
     collections::HashSet,
     env,
-    fs,
+    fs::{
+        self,
+        File,
+        TryLockError,
+    },
     path::{
         Path,
         PathBuf,
@@ -69,10 +73,34 @@ impl HistoryStore {
         self.record_inner(label, pre, post)
     }
 
+    /// held for a whole command, since two runs reading and writing the same
+    /// pins.toml and lock would each drop the other's edits
+    pub fn exclusive(&self) -> Result<File> {
+        fs::create_dir_all(&self.dir)?;
+        let file = File::create(self.dir.join("lock"))?;
+        match file.try_lock() {
+            Ok(()) => {},
+            Err(TryLockError::WouldBlock) => {
+                eprintln!("tack: waiting for another tack command on this project");
+                file.lock()?;
+            },
+            Err(TryLockError::Error(err)) => return Err(err.into()),
+        }
+        Ok(file)
+    }
+
     pub fn record_run<F>(&self, project: &Project, label: &str, run: F) -> RecordedRun
     where
         F: FnOnce() -> Result<()>,
     {
+        let held = self.exclusive();
+        if let Err(err) = held {
+            return RecordedRun {
+                result:            Err(err),
+                captured_external: false,
+                history_error:     None,
+            };
+        }
         let pre = Snapshot::capture(project);
         let result = run();
         let post = Snapshot::capture(project);
@@ -118,6 +146,7 @@ impl HistoryStore {
     }
 
     pub fn undo(&self, project: &Project) -> Result<Option<View>> {
+        let _held = self.exclusive()?;
         let mut history = self.load();
         let captured = capture_external(&mut history, &Snapshot::capture(project), now());
         if !captured && history.cursor == 0 {
@@ -132,6 +161,7 @@ impl HistoryStore {
     }
 
     pub fn redo(&self, project: &Project) -> Result<Option<View>> {
+        let _held = self.exclusive()?;
         let mut history = self.load();
         if capture_external(&mut history, &Snapshot::capture(project), now()) {
             self.save(&history)?;
