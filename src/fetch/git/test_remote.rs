@@ -21,6 +21,12 @@ use gix::{
     },
 };
 
+pub(super) enum Node<'a> {
+    Blob(&'a str),
+    Link(&'a str),
+    Dir(Vec<(&'a str, Self)>),
+}
+
 pub(super) struct LocalRemote {
     _tmp:   tempfile::TempDir,
     repo:   gix::Repository,
@@ -49,6 +55,10 @@ impl LocalRemote {
 
     pub(super) fn commit(&mut self, body: &str, message: &str) -> String {
         let tree = self.tree(body);
+        self.commit_tree(tree, message)
+    }
+
+    fn commit_tree(&mut self, tree: gix::ObjectId, message: &str) -> String {
         let signature_text = format!("tack <tack@example.invalid> {} +0000", self.time);
         self.time += 1;
         let signature = gix::actor::SignatureRef::from_bytes(signature_text.as_bytes()).unwrap();
@@ -62,6 +72,11 @@ impl LocalRemote {
         self.tip = Some(commit);
         self.set_ref(&self.branch, commit);
         commit.to_string()
+    }
+
+    pub(super) fn commit_nodes(&mut self, entries: Vec<(&str, Node<'_>)>, message: &str) -> String {
+        let tree = self.write_dir(entries);
+        self.commit_tree(tree, message)
     }
 
     pub(super) fn branch_from_current(&mut self, branch: &str) {
@@ -79,6 +94,39 @@ impl LocalRemote {
 
     pub(super) fn url(&self) -> String {
         format!("file://{}", self.remote.display())
+    }
+
+    fn write_dir(&self, entries: Vec<(&str, Node<'_>)>) -> gix::ObjectId {
+        let mut written = entries
+            .into_iter()
+            .map(|(name, node)| {
+                let (kind, oid) = match node {
+                    Node::Blob(body) => {
+                        (
+                            EntryKind::Blob,
+                            self.repo.write_blob(body.as_bytes()).unwrap().detach(),
+                        )
+                    },
+                    Node::Link(target) => {
+                        (
+                            EntryKind::Link,
+                            self.repo.write_blob(target.as_bytes()).unwrap().detach(),
+                        )
+                    },
+                    Node::Dir(children) => (EntryKind::Tree, self.write_dir(children)),
+                };
+                Entry {
+                    mode: kind.into(),
+                    filename: name.into(),
+                    oid,
+                }
+            })
+            .collect::<Vec<_>>();
+        written.sort();
+        self.repo
+            .write_object(Tree { entries: written })
+            .unwrap()
+            .detach()
     }
 
     fn tree(&self, body: &str) -> gix::ObjectId {

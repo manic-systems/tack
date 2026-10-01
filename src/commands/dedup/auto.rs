@@ -238,7 +238,8 @@ fn scan_input(
     let node = lock.get(&input.name)?;
     let path = vec![input.name.clone()];
     let mut batch = ScanBatch::default();
-    let (maybe_raw, maybe_cause) = tolerate(fetch::raw_file(node, ScanFile::FlakeLock.as_path()));
+    let (mut maybe_raw, maybe_cause) =
+        tolerate(fetch::raw_file(node, ScanFile::FlakeLock.as_path()));
     if let Some(cause) = maybe_cause {
         batch
             .diagnostics
@@ -247,11 +248,19 @@ fn scan_input(
         && let Some(forge) = Forge::from_locked(node)
         && fetch::forge_miss_untrusted(&forge)
     {
-        batch.diagnostics.insert(ScanDiagnostic::private_repo(
-            &path,
-            ScanFile::FlakeLock,
-            forge.base(),
-        ));
+        let sparse = fetch::fetch_locked_scan_files(node, &[ScanFile::FlakeLock.as_path()])
+            .ok()
+            .flatten()
+            .and_then(|files| files.into_iter().next());
+        if sparse.is_some() {
+            maybe_raw = sparse;
+        } else {
+            batch.diagnostics.insert(ScanDiagnostic::private_repo(
+                &path,
+                ScanFile::FlakeLock,
+                forge.base(),
+            ));
+        }
     }
     let Some(raw_body) = maybe_raw.flatten() else {
         return (!batch.diagnostics.is_empty()).then_some(batch);

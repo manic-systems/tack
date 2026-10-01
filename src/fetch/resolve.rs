@@ -247,6 +247,17 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
     }
 }
 
+/// [`None`] when `node` has no git remote to read from
+pub fn fetch_locked_scan_files(
+    node: &LockedNode,
+    paths: &[&str],
+) -> FetchResult<Option<Vec<Option<String>>>> {
+    let Some((url, rev)) = commit_url(node) else {
+        return Ok(None);
+    };
+    git::fetch_scan_files(&url, rev, paths).map(Some)
+}
+
 pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<PathBuf> {
     let resolved = downgrade_forge_for_submodules(source, submodules);
     match *resolved {

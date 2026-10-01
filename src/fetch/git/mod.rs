@@ -103,6 +103,14 @@ pub(super) fn commit_range(url: &str, base: &str, head: &str) -> FetchResult<Com
     dag::commit_range(url, base, head)
 }
 
+pub(super) fn fetch_scan_files(
+    url: &str,
+    rev: &str,
+    paths: &[&str],
+) -> FetchResult<Vec<Option<String>>> {
+    dag::fetch_scan_files(url, rev, paths)
+}
+
 pub(super) fn fetch_tree_into(
     url: &str,
     reff: Option<&str>,

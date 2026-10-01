@@ -29,6 +29,7 @@ pub use resolve::{
     commit_object,
     commit_range,
     fetch_fixed_pin,
+    fetch_locked_scan_files,
     fetch_locked_tree_into,
     fetch_pin,
     fetch_tree_into,

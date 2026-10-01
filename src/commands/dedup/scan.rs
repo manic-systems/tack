@@ -63,17 +63,27 @@ pub(super) struct ScanTarget {
 
 impl ScanTarget {
     pub(super) fn fetch_and_scan(&self) -> Result<ScanResult> {
-        let probe_diagnostics = if let SourceRef::Locked(ref node) = self.source {
-            let (maybe_documents, diagnostics) = RawProbe::documents(node, &self.path).into_parts();
-            if let Some(documents) = maybe_documents {
+        let mut probe_diagnostics = Vec::new();
+        if let SourceRef::Locked(ref node) = self.source {
+            let probe = RawProbe::documents(node, &self.path);
+            probe_diagnostics.extend(probe.diagnostics);
+            if let Some(documents) = probe.documents {
                 let mut result = documents.scan(&self.path);
-                result.diagnostics.extend(diagnostics);
+                result.diagnostics.extend(probe_diagnostics);
                 return Ok(result);
             }
-            diagnostics
-        } else {
-            Vec::new()
-        };
+            if let Some(documents) = ScanDocuments::sparse(node) {
+                let mut result = documents.scan(&self.path);
+                result.diagnostics.extend(probe_diagnostics);
+                return Ok(result);
+            }
+            if let Some(private_repo) = probe.private_repo {
+                let mut result = ScanDocuments::empty().scan(&self.path);
+                result.diagnostics.extend(probe_diagnostics);
+                result.diagnostics.push(private_repo);
+                return Ok(result);
+            }
+        }
 
         let tmp = tempfile::tempdir()?;
         let root = self.fetch_tree(tmp.path())?;
@@ -138,20 +148,18 @@ struct ScanDocuments {
 }
 
 struct RawProbeOutcome {
-    documents:   Option<ScanDocuments>,
-    diagnostics: BTreeSet<ScanDiagnostic>,
+    documents:    Option<ScanDocuments>,
+    diagnostics:  BTreeSet<ScanDiagnostic>,
+    private_repo: Option<ScanDiagnostic>,
 }
 
 impl RawProbeOutcome {
     const fn empty() -> Self {
         Self {
-            documents:   None,
-            diagnostics: BTreeSet::new(),
+            documents:    None,
+            diagnostics:  BTreeSet::new(),
+            private_repo: None,
         }
-    }
-
-    fn into_parts(self) -> (Option<ScanDocuments>, Vec<ScanDiagnostic>) {
-        (self.documents, self.diagnostics.into_iter().collect())
     }
 }
 
@@ -197,18 +205,23 @@ impl<'a> RawProbe<'a> {
             RawProbeOutcome {
                 documents: None,
                 diagnostics,
+                private_repo: None,
             }
-        } else {
-            if all_missing && fetch::forge_miss_untrusted(&self.forge) {
-                diagnostics.insert(ScanDiagnostic::private_repo(
+        } else if all_missing && fetch::forge_miss_untrusted(&self.forge) {
+            RawProbeOutcome {
+                documents: None,
+                diagnostics,
+                private_repo: Some(ScanDiagnostic::private_repo(
                     path,
                     ScanFile::FlakeLock,
                     self.forge.base(),
-                ));
+                )),
             }
+        } else {
             RawProbeOutcome {
                 documents: Some(documents),
                 diagnostics,
+                private_repo: None,
             }
         }
     }
@@ -219,6 +232,27 @@ impl<'a> RawProbe<'a> {
 }
 
 impl ScanDocuments {
+    const fn empty() -> Self {
+        Self {
+            flake_lock: None,
+            tack_pins:  None,
+            tack_lock:  None,
+        }
+    }
+
+    fn sparse(node: &LockedNode) -> Option<Self> {
+        let files = [ScanFile::FlakeLock, ScanFile::TackPins, ScanFile::TackLock];
+        let paths = files.map(ScanFile::as_path);
+        let mut contents = fetch::fetch_locked_scan_files(node, &paths)
+            .ok()??
+            .into_iter();
+        Some(Self {
+            flake_lock: contents.next()?,
+            tack_pins:  contents.next()?,
+            tack_lock:  contents.next()?,
+        })
+    }
+
     fn from_tree(root: &Path) -> Self {
         let flake_lock = fs::read_to_string(root.join("flake.lock")).ok();
         let td = root.join(".tack");

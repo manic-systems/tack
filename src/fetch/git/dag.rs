@@ -27,6 +27,7 @@ use gix::{
     objs::{
         self,
         Write as _,
+        tree::EntryKind,
     },
     progress::Discard,
     url::Scheme,
@@ -58,6 +59,8 @@ use crate::fetch::{
 };
 
 const PACK_BYTE_LIMIT: u64 = 64 * 1024 * 1024;
+const SPARSE_PACK_BYTE_LIMIT: u64 = 16 * 1024 * 1024;
+const SCAN_FILE_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const DEFAULT_DEEPEN_ROUNDS: usize = 3;
 const MAX_DEEPEN_ROUNDS: usize = 10;
 const DEEPEN_ROUNDS_ENV: &str = "TACK_GIT_DAG_ROUNDS";
@@ -300,24 +303,210 @@ fn list_refs(
     .map_err(|err| FetchError::Transport(format!("git ls-refs {url}: {err}")))
 }
 
+struct FetchShape<'a> {
+    filter:     Option<&'a str>,
+    depth:      Option<usize>,
+    byte_limit: u64,
+}
+
+pub(super) fn fetch_scan_files(
+    url: &str,
+    rev: &str,
+    paths: &[&str],
+) -> FetchResult<Vec<Option<String>>> {
+    let commit = parse_object_id(rev)?;
+    let parsed_url = parse_git_url(url)?;
+    if let Some(path) = super::local_file_url_path(&parsed_url) {
+        return read_scan_files(&open_local(&path)?, commit, paths);
+    }
+    // ssh servers usually refuse wants for tree and blob ids, and the ssh child
+    // prints that refusal straight to the terminal
+    if !matches!(parsed_url.scheme, Scheme::Https | Scheme::Http) {
+        return Err(FetchError::Transport(format!(
+            "sparse scan needs an http remote, not {url}"
+        )));
+    }
+
+    let dir = tempfile::tempdir()
+        .map_err(|err| FetchError::Transport(format!("create sparse scan repo: {err}")))?;
+    let mut repo = gix::init_bare(dir.path())
+        .map_err(|err| FetchError::Transport(format!("init sparse scan repo: {err}")))?;
+    // github only accepts tree:0, which sends just the wanted object, so the root
+    // tree and then the entries under it are fetched one round at a time
+    let commit_shape = FetchShape {
+        filter:     Some("tree:0"),
+        depth:      Some(1),
+        byte_limit: SPARSE_PACK_BYTE_LIMIT,
+    };
+    fetch_pack(&repo, url, parsed_url.clone(), &[commit], &commit_shape)?;
+    repo = reopen(dir.path())?;
+    let root_shape = FetchShape {
+        filter:     Some("tree:0"),
+        depth:      None,
+        byte_limit: SPARSE_PACK_BYTE_LIMIT,
+    };
+    fetch_pack(
+        &repo,
+        url,
+        parsed_url.clone(),
+        &[root_tree(&repo, commit)?],
+        &root_shape,
+    )?;
+    repo = reopen(dir.path())?;
+    let wants = root_wants(&repo, commit, paths)?;
+    if !wants.is_empty() {
+        let entry_shape = FetchShape {
+            filter:     None,
+            depth:      None,
+            byte_limit: SPARSE_PACK_BYTE_LIMIT,
+        };
+        fetch_pack(&repo, url, parsed_url, &wants, &entry_shape)?;
+        repo = reopen(dir.path())?;
+    }
+    read_scan_files(&repo, commit, paths)
+}
+
+fn reopen(path: &Path) -> FetchResult<gix::Repository> {
+    gix::open(path).map_err(|err| FetchError::Transport(format!("reopen sparse scan repo: {err}")))
+}
+
+fn open_local(path: &Path) -> FetchResult<gix::Repository> {
+    gix::open(path).map_err(|err| {
+        FetchError::Transport(format!(
+            "open local git repository {}: {err}",
+            path.display()
+        ))
+    })
+}
+
+fn root_tree(repo: &gix::Repository, commit: gix::ObjectId) -> FetchResult<gix::ObjectId> {
+    let found = repo
+        .find_commit(commit)
+        .map_err(|err| FetchError::Transport(format!("read git commit {commit}: {err}")))?;
+    found
+        .tree_id()
+        .map(gix::Id::detach)
+        .map_err(|err| FetchError::Transport(format!("read tree of git commit {commit}: {err}")))
+}
+
+fn tree_entry(
+    repo: &gix::Repository,
+    tree: gix::ObjectId,
+    name: &str,
+) -> FetchResult<Option<(EntryKind, gix::ObjectId)>> {
+    let object = repo
+        .find_object(tree)
+        .map_err(|err| FetchError::Transport(format!("read git tree {tree}: {err}")))?;
+    let parsed = object
+        .try_into_tree()
+        .map_err(|_| FetchError::Transport(format!("git object {tree} is not a tree")))?;
+    let decoded = parsed
+        .decode()
+        .map_err(|err| FetchError::Transport(format!("decode git tree {tree}: {err}")))?;
+    Ok(decoded
+        .entries
+        .iter()
+        .find(|entry| entry.filename == name.as_bytes())
+        .map(|entry| (entry.mode.kind(), entry.oid.to_owned())))
+}
+
+fn is_expected_kind(kind: EntryKind, directory: bool) -> bool {
+    if directory {
+        kind == EntryKind::Tree
+    } else {
+        matches!(kind, EntryKind::Blob | EntryKind::BlobExecutable)
+    }
+}
+
+fn root_wants(
+    repo: &gix::Repository,
+    commit: gix::ObjectId,
+    paths: &[&str],
+) -> FetchResult<BTreeSet<gix::ObjectId>> {
+    let root = root_tree(repo, commit)?;
+    let mut wants = BTreeSet::new();
+    for path in paths {
+        let (top, directory) = path
+            .split_once('/')
+            .map_or((*path, false), |(dir, _)| (dir, true));
+        if let Some((kind, id)) = tree_entry(repo, root, top)?
+            && is_expected_kind(kind, directory)
+        {
+            wants.insert(id);
+        }
+    }
+    Ok(wants)
+}
+
+fn read_scan_files(
+    repo: &gix::Repository,
+    commit: gix::ObjectId,
+    paths: &[&str],
+) -> FetchResult<Vec<Option<String>>> {
+    let root = root_tree(repo, commit)?;
+    paths
+        .iter()
+        .map(|path| read_scan_file(repo, root, path))
+        .collect()
+}
+
+fn read_scan_file(
+    repo: &gix::Repository,
+    root: gix::ObjectId,
+    path: &str,
+) -> FetchResult<Option<String>> {
+    let (tree, name) = match path.split_once('/') {
+        Some((dir, name)) => {
+            match tree_entry(repo, root, dir)? {
+                Some((kind, id)) if is_expected_kind(kind, true) => (id, name),
+                Some(_) | None => return Ok(None),
+            }
+        },
+        None => (root, path),
+    };
+    let Some((kind, id)) = tree_entry(repo, tree, name)? else {
+        return Ok(None);
+    };
+    if !is_expected_kind(kind, false) {
+        return Ok(None);
+    }
+    let blob = repo
+        .find_object(id)
+        .map_err(|err| FetchError::Transport(format!("read git blob {id}: {err}")))?;
+    if blob.data.len() > SCAN_FILE_BYTE_LIMIT {
+        return Err(FetchError::Transport(format!(
+            "git blob {id} for {path} exceeds {SCAN_FILE_BYTE_LIMIT} bytes"
+        )));
+    }
+    Ok(String::from_utf8(blob.data.clone()).ok())
+}
+
 fn filtered_commit_fetch(
     repo: &gix::Repository,
     url: &str,
     wants: &[gix::ObjectId],
     depth: usize,
 ) -> FetchResult<()> {
-    let mut progress = Discard;
     let parsed_url = parse_git_url(url)?;
     if let Some(path) = super::local_file_url_path(&parsed_url) {
-        let source = gix::open(&path).map_err(|err| {
-            FetchError::Transport(format!(
-                "open local git repository {}: {err}",
-                path.display()
-            ))
-        })?;
-        return copy_local_commit_graph(&source, repo, wants, depth);
+        return copy_local_commit_graph(&open_local(&path)?, repo, wants, depth);
     }
+    let shape = FetchShape {
+        filter:     Some("tree:0"),
+        depth:      Some(depth),
+        byte_limit: PACK_BYTE_LIMIT,
+    };
+    fetch_pack(repo, url, parsed_url, wants, &shape)
+}
 
+fn fetch_pack<'a>(
+    repo: &gix::Repository,
+    url: &str,
+    parsed_url: gix::Url,
+    wants: impl IntoIterator<Item = &'a gix::ObjectId>,
+    shape: &FetchShape<'_>,
+) -> FetchResult<()> {
+    let mut progress = Discard;
     let allow_unfiltered = matches!(parsed_url.scheme, Scheme::File);
     let mut authenticate = configured_credentials(repo, parsed_url.clone())?;
     let mut transport = low_level_transport(parsed_url, url)?;
@@ -335,19 +524,23 @@ fn filtered_commit_fetch(
     features.push(("agent", Some(Cow::Borrowed("tack"))));
     let sideband_all = features.iter().any(|&(name, _)| name == "sideband-all");
     let mut args = Arguments::new(handshake.server_protocol_version, features, false);
-    if args.can_use_filter() {
-        args.filter("tree:0");
-    } else if !allow_unfiltered {
-        return Err(FetchError::Transport(format!(
-            "git remote does not support filtered fetch: {url}"
-        )));
+    if let Some(filter) = shape.filter {
+        if args.can_use_filter() {
+            args.filter(filter);
+        } else if !allow_unfiltered {
+            return Err(FetchError::Transport(format!(
+                "git remote does not support filtered fetch: {url}"
+            )));
+        }
     }
-    if args.can_use_deepen() {
-        args.deepen(depth);
-    } else if !allow_unfiltered {
-        return Err(FetchError::Transport(format!(
-            "git remote does not support shallow fetch: {url}"
-        )));
+    if let Some(depth) = shape.depth {
+        if args.can_use_deepen() {
+            args.deepen(depth);
+        } else if !allow_unfiltered {
+            return Err(FetchError::Transport(format!(
+                "git remote does not support shallow fetch: {url}"
+            )));
+        }
     }
     for want in wants {
         args.want(want);
@@ -374,7 +567,7 @@ fn filtered_commit_fetch(
     fs::create_dir_all(&pack_dir)
         .map_err(|err| FetchError::Transport(format!("create pack dir: {err}")))?;
     let interrupt = AtomicBool::new(false);
-    let mut capped_reader = CappedBufRead::new(&mut reader, PACK_BYTE_LIMIT);
+    let mut capped_reader = CappedBufRead::new(&mut reader, shape.byte_limit);
     let outcome = gix_pack::Bundle::write_to_directory(
         &mut capped_reader,
         Some(&pack_dir),
