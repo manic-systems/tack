@@ -179,10 +179,7 @@ pub fn set_frozen(project: &Project, names: &[String], frozen: bool) -> Result<(
     }
     let mut doc = project.load_pins()?;
     let all = doc.inputs()?;
-    let targets = select(&all, Selection {
-        names,
-        exclude: &[],
-    });
+    let targets = select(&all, Selection::new(names, &[]))?;
     let (verb, unchanged) = if frozen {
         ("froze", "is already frozen")
     } else {

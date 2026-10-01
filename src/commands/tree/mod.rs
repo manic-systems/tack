@@ -53,7 +53,7 @@ pub fn tree(project: &Project, selection: Selection<'_>) -> Result<TreeReport> {
     let all = doc.inputs()?;
     let all_follow = doc.all_follows()?;
     let lock = project.load_lock()?;
-    let selected = select(&all, selection);
+    let selected = select(&all, selection)?;
     let trees = dispatcher::ordered(selected, TREE_IN_FLIGHT, |_, input| {
         pin_tree(input, &all_follow, &lock)
     });

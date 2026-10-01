@@ -14,6 +14,7 @@ use crate::{
         PatchAction,
         SignerAction,
     },
+    error::user_bail,
     fetch::FetchError,
     history::View,
     pins,
@@ -194,8 +195,8 @@ impl<'a> Selection<'a> {
 
 /// clusters pins by `group` in first-seen order, ungrouped pins last, so each
 /// group header in `look` and `update` prints once
-fn select<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pins::Input> {
-    let mut out = pick(inputs, selection);
+fn select<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Result<Vec<&'a pins::Input>> {
+    let mut out = pick(inputs, selection)?;
     let mut groups = Vec::new();
     for group in out.iter().filter_map(|input| input.group.as_deref()) {
         if !groups.contains(&group) {
@@ -209,12 +210,12 @@ fn select<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pi
             .and_then(|group| groups.iter().position(|seen| *seen == group))
             .unwrap_or(groups.len())
     });
-    out
+    Ok(out)
 }
 
 /// a name selects the input it names or every member of the group it names,
 /// which [`PinsDoc::inputs`](crate::PinsDoc::inputs) keeps from overlapping
-fn pick<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pins::Input> {
+fn pick<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Result<Vec<&'a pins::Input>> {
     let Selection { names, exclude } = selection;
     let members = |name: &str| {
         inputs
@@ -233,17 +234,17 @@ fn pick<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pins
     }
 
     if names.is_empty() {
-        return inputs
+        return Ok(inputs
             .iter()
             .filter(|input| !excluded.contains(input.name.as_str()))
-            .collect();
+            .collect());
     }
 
     let mut out = Vec::<&pins::Input>::new();
     for name in names {
         let matched = members(name);
         if matched.is_empty() {
-            eprintln!("tack: no input or group '{name}'");
+            user_bail!("no input or group '{name}'");
         } else if excluded.contains(name.as_str()) {
             eprintln!("tack: input '{name}' is both named and excluded, leaving it alone");
         } else {
@@ -256,7 +257,7 @@ fn pick<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Vec<&'a pins
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -299,6 +300,7 @@ mod tests {
             names:   &names,
             exclude: &exclude,
         })
+        .unwrap()
         .iter()
         .map(|input| input.name.clone())
         .collect()

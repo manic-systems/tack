@@ -195,14 +195,7 @@ fn settle_selected(project: &Project, names: &[String], mode: Mode) -> Result<()
     let mut lock = project.load_lock()?;
     let mut changed = false;
     let mut failed = 0_usize;
-    if let Some(unknown) = names.iter().find(|name| {
-        !inputs
-            .iter()
-            .any(|input| input.name == **name || input.group.as_deref() == Some(name.as_str()))
-    }) {
-        user_bail!("no input or group '{unknown}'");
-    }
-    for input in select(&inputs, Selection::new(names, &[])) {
+    for input in select(&inputs, Selection::new(names, &[]))? {
         let Some(node) = lock.get(&input.name) else {
             continue;
         };
