@@ -218,18 +218,7 @@ impl Input {
         if pin_type == PinType::Fixed && !patches.is_empty() {
             user_bail!("input '{name}': patches are not valid for type = \"fixed\"");
         }
-        let tag = str_field("tag")?
-            .map(|tag| {
-                tag.parse::<TagTemplate>()
-                    .with_context(|| format!("input '{name}'"))
-            })
-            .transpose()?;
-        if pin_type == PinType::Fixed && tag.is_some() {
-            user_bail!("input '{name}': tag is not valid for type = \"fixed\"");
-        }
-        if tag.is_some() {
-            tag::followable(name, &shorturls.expand(url)?)?;
-        }
+        let tag = tag_field(name, str_field("tag")?, pin_type, url, shorturls)?;
         let group = str_field("group")?;
         let frozen = bool_field("frozen")?.unwrap_or(false);
         let submodules = bool_field("submodules")?.unwrap_or(false);
@@ -249,6 +238,32 @@ impl Input {
             frozen,
         })
     }
+}
+
+/// a pin's tag template, checked against the url it follows
+fn tag_field(
+    name: &str,
+    raw: Option<&str>,
+    pin_type: PinType,
+    url: &str,
+    shorturls: &ShortUrls<'_>,
+) -> Result<Option<TagTemplate>> {
+    let Some(template) = raw else {
+        if pin_type == PinType::Fixed && tag::names_asset(url) {
+            user_bail!("input '{name}': {{tag}} in a fixed pin's url needs a `tag` template");
+        }
+        return Ok(None);
+    };
+    let parsed = template
+        .parse::<TagTemplate>()
+        .with_context(|| format!("input '{name}'"))?;
+    let expanded = shorturls.expand(url)?;
+    if pin_type == PinType::Fixed {
+        tag::asset_repo(name, &expanded)?;
+    } else {
+        tag::followable(name, &expanded)?;
+    }
+    Ok(Some(parsed))
 }
 
 fn follows_table(name: &str, item: Option<&Item>) -> Result<BTreeMap<String, String>> {

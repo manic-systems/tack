@@ -34,5 +34,6 @@
 #   tag             follow the newest tag like "v{version}", where {version} is numbers
 #                   joined by one separator, `.` `-` or `_`, used consistently so mixed
 #                   tags are skipped, needs a github, gitlab or network git url with
-#                   no ref or rev, not file://
+#                   no ref or rev, not file://, or for a fixed pin a release
+#                   download url naming the asset with {tag} or {version}
 [inputs]

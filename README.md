@@ -144,6 +144,22 @@ tags over the git protocol, so any github, gitlab or network git url works, as
 long as it names no ref or rev of its own. local `file://` urls are not
 supported. the chosen tag is kept in the lock and shown by `tack look` and `tack update`.
 
+a fixed pin follows the tag's release asset instead, named in its url with
+`{tag}` and `{version}`, where `{version}` is the tag from its first digit
+
+```toml
+[inputs.proton-ge]
+url = "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/{tag}/{tag}.tar.gz"
+type = "fixed"
+unpack = "tarball"
+tag = "GE-Proton{version}"
+```
+
+the url must be a GitHub, Forgejo, Gitea or GitLab release download, since its
+tags come from that repo. tack takes the newest matching tag whose release
+already has the asset, so a release tagged before its uploads finish is
+skipped.
+
 ## groups
 
 tag pins with a `group` to print them under headers in `tack look` and

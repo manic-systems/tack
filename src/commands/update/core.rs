@@ -773,6 +773,47 @@ pub(super) fn update(
     })
 }
 
+/// what the lock holds for a pin `look` checks
+struct Current<'lock> {
+    old:         Option<&'lock str>,
+    compare_rev: Option<&'lock str>,
+    tag:         Option<&'lock str>,
+    stale:       bool,
+}
+
+fn look_followed(
+    input: &pins::Input,
+    followed: Followed<'_>,
+    current: &Current<'_>,
+    verbose: bool,
+    session: &CompareSession,
+) -> (LookOutcome, Option<CommitLog>, Option<String>) {
+    // a fixed pin's asset only changes with its tag, so naming the newer tag is
+    // enough without downloading it
+    if input.pin_type == PinType::Fixed && followed.tag.is_some() {
+        let outcome = if followed.tag.as_deref() == current.tag {
+            LookOutcome::Unchanged
+        } else {
+            LookOutcome::Updated {
+                old:        current.old.map(str::to_owned),
+                new:        followed.url.into_owned(),
+                comparison: BranchComparison::default(),
+            }
+        };
+        return (outcome, None, followed.tag);
+    }
+    let (outcome, log) = classify_look(
+        input,
+        &followed.url,
+        current.old,
+        current.compare_rev,
+        current.stale,
+        verbose,
+        session,
+    );
+    (outcome, log, followed.tag)
+}
+
 fn classify_look(
     input: &pins::Input,
     expanded: &str,
@@ -871,16 +912,13 @@ pub(super) fn look(
         let (mut outcome, log, chosen) =
             match tag::follow(&input.name, input.tag.as_ref(), &localized.url) {
                 Ok(followed) => {
-                    let (outcome, log) = classify_look(
-                        input,
-                        &followed.url,
-                        old.as_deref(),
-                        old_compare_rev,
+                    let current = Current {
+                        old: old.as_deref(),
+                        compare_rev: old_compare_rev,
+                        tag: lock.tag(&input.name),
                         stale,
-                        verbose,
-                        &session,
-                    );
-                    (outcome, log, followed.tag)
+                    };
+                    look_followed(input, followed, &current, verbose, &session)
                 },
                 Err(err) => (LookOutcome::Failed(format!("{err:#}")), None, None),
             };

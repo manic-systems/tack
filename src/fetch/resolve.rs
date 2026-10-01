@@ -566,12 +566,18 @@ fn immutable_url_of(resp: &ureq_http::Response<Body>, fallback: &str) -> String 
         .and_then(parse_link_immutable)
         .unwrap_or_else(|| {
             let uri = resp.get_uri().to_string();
-            if uri.is_empty() {
+            // a redirect to another host is usually a signed download link that
+            // expires, as GitHub release assets are, so keep what was asked for
+            if uri.is_empty() || host_of(&uri) != host_of(fallback) {
                 fallback.to_owned()
             } else {
                 uri
             }
         })
+}
+
+fn host_of(url: &str) -> Option<&str> {
+    url.split_once("://")?.1.split(['/', '?', '#']).next()
 }
 
 fn parse_link_immutable(header: &str) -> Option<String> {
@@ -751,6 +757,14 @@ pub fn channel_rev(url: &str) -> Option<String> {
     let text = raw(&format!("{dir}/git-revision"), None).ok()?;
     let rev = text.trim();
     (rev.len() == 40 && rev.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| rev.to_owned())
+}
+
+/// whether `url` answers a HEAD request with success, after redirects
+pub fn serves(url: &str) -> bool {
+    HttpClient::global()
+        .head(url)
+        .call()
+        .is_ok_and(|resp| resp.status().is_success())
 }
 
 /// whether tack holds a token for `host`, since forges answer a request for a

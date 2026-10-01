@@ -44,6 +44,7 @@ pub use resolve::{
     locked_file,
     raw,
     raw_file,
+    serves,
 };
 pub use topology::{
     BranchComparison,

@@ -50,9 +50,6 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     if unpack.is_some() && pin_type != PinType::Fixed {
         user_bail!("--unpack is only valid with --fixed");
     }
-    if template.is_some() && pin_type == PinType::Fixed {
-        user_bail!("--tag is not valid with --fixed");
-    }
     let mut doc = project.load_pins()?;
     if doc.has_input(name) {
         user_bail!("input '{name}' already exists");
@@ -68,8 +65,16 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     if let Ok(parsed) = Source::parse_unchecked(&expanded) {
         parsed.full_rev(&expanded)?;
     }
+    if pin_type == PinType::Fixed && (template.is_some() || tag::names_asset(&expanded)) {
+        if template.is_none() {
+            user_bail!("{{tag}} in a fixed pin's url needs --tag to fill it");
+        }
+        tag::asset_repo(name, &expanded)?;
+    }
     if template.is_some() {
-        tag::followable(name, &expanded)?;
+        if pin_type != PinType::Fixed {
+            tag::followable(name, &expanded)?;
+        }
         resolver::ensure(project, &[(name, resolver::TAG)])?;
     }
     doc.add_input(name, url, &pins::AddInputOpts {
