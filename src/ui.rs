@@ -37,6 +37,7 @@ use crate::{
         CompareStatus,
     },
     render::printable,
+    report::Signed,
     style::{
         Sgr,
         Style,
@@ -54,6 +55,7 @@ pub enum PinStatus {
         old:        String,
         new:        String,
         comparison: BranchComparison,
+        signed_by:  Option<Signed>,
     },
     Drift {
         rev:      String,
@@ -459,8 +461,16 @@ impl<'a> StatusLine<'a> {
                 ref old,
                 ref new,
                 comparison,
+                ref signed_by,
             } => {
-                format!("  {old} -> {new}{}", ComparisonLabel::new(comparison))
+                let signed = signed_by
+                    .as_ref()
+                    .map(|signed| format!("  {}", Sgr::Dim.wrap(&signed.to_string())))
+                    .unwrap_or_default();
+                format!(
+                    "  {old} -> {new}{}{signed}",
+                    ComparisonLabel::new(comparison)
+                )
             },
             PinStatus::Drift {
                 ref rev,
@@ -503,9 +513,14 @@ impl<'a> StatusLine<'a> {
                 ref old,
                 ref new,
                 comparison,
+                ref signed_by,
             } => {
+                let signed = signed_by
+                    .as_ref()
+                    .map(|signed| format!("  {signed}"))
+                    .unwrap_or_default();
                 Some(format!(
-                    "{}: {old} -> {new}{}",
+                    "{}: {old} -> {new}{}{signed}",
                     self.name,
                     ComparisonLabel::new(comparison)
                 ))

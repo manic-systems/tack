@@ -12,6 +12,7 @@ mod forge;
 mod git;
 mod git_http;
 pub mod github;
+mod github_commits;
 mod gitlab;
 mod http;
 mod resolve;
@@ -25,6 +26,8 @@ pub use error::{
 };
 pub use resolve::{
     FetchedPin,
+    commit_object,
+    commit_range,
     fetch_fixed_pin,
     fetch_locked_tree_into,
     fetch_pin,
@@ -36,6 +39,8 @@ pub use resolve::{
 pub use topology::{
     BranchComparison,
     CommitLog,
+    CommitObject,
+    CommitRange,
     CompareStatus,
     CurrentRev,
 };

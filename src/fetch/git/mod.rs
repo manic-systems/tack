@@ -61,6 +61,8 @@ use misstep::{
 };
 
 use super::{
+    CommitObject,
+    CommitRange,
     CompareStatus,
     FetchResult,
     git_http,
@@ -91,6 +93,14 @@ pub(super) fn compare_status(
     head: &str,
 ) -> FetchResult<Option<CompareStatus>> {
     dag::compare_status(url, base, head)
+}
+
+pub(super) fn commit_object(url: &str, rev: &str) -> FetchResult<CommitObject> {
+    dag::commit_object(url, rev)
+}
+
+pub(super) fn commit_range(url: &str, base: &str, head: &str) -> FetchResult<CommitRange> {
+    dag::commit_range(url, base, head)
 }
 
 pub(super) fn fetch_tree_into(

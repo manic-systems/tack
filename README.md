@@ -54,6 +54,7 @@ tack look [names|groups...] [--verbose|-v] [--exclude <names>]...
                                       report pins with newer upstream revs
 tack tree [names|groups...] [--exclude <names>]...
                                       show each pin's locked inputs and follows
+tack verify [--base <git-ref>]       check locked commits against declared signers
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                       [--dir <d>] [--submodules] [--follows c=p]...
 tack rm <name>
@@ -61,6 +62,10 @@ tack freeze <names|groups...>        hold pins at their locked rev
 tack unfreeze <names|groups...>      let update move them again
 tack alias <name> <template>         define a shorturl scheme
 tack alias --rm <name>               remove one
+tack signer add <name> <key-or-file> | --github <user>
+                                      trust a signer's keys
+tack signer rm <name>                drop a signer no pin lists
+tack signer list                     show signers and the pins that list them
 tack dedup                           report inputs reachable from multiple pins
 ```
 
@@ -188,6 +193,59 @@ follows = { "flake:systems" = "systems", "tack:nixpkgs" = "nixpkgs" }
 fold onto one line per pin, so what stands out are the inputs that bring their
 own copy, along with any other pins that pull in that same copy, which are the
 candidates for an `[all_follow]` rule.
+
+## signers
+
+require a pin's commits to be signed by keys you trust
+
+```toml
+[signers]
+alice = "ssh-ed25519 AAAA..."
+bob = ["keys/bob.keys", "keys/bob.asc"]
+
+[inputs.tool]
+url = "gh:alice/tool"
+signers = ["alice", "bob"]
+```
+
+a signer is an SSH public key line, an ASCII-armored PGP public key, or a path
+under `.tack` to a file holding either, and an array gives one signer several
+keys. `tack signer add bob --github bob` fetches the signing keys a GitHub user
+publishes into `keys/`, `tack signer add alice <key-or-file>` takes one you
+already have, and `tack signer rm alice` drops a signer no pin lists anymore,
+deleting its files under `keys/` that no other signer uses. `tack signer list`
+shows each signer and the pins that list it. add and list both print a
+fingerprint per key, to check against the signer's own `ssh-add -L` or `gpg -K`.
+
+the first time `tack update` locks a pin with signers, it checks only the locked
+commit, so the history before it is taken on trust, and records who signed it
+beside the lock entry, along with a digest of that signer's keys and the first
+commit it verified. dropping that signer from the pin starts over the same way,
+and so does changing the signer's keys under the same name, with a warning. from
+then on that commit is the anchor, and moving the pin requires every commit
+after it to be signed, not just the new tip, so one signed commit can't vouch
+for unsigned ones before it. a commit that fails, or a new rev that no longer
+descends from the anchor, keeps the pin where it was, except that moving back
+to a commit between the first verified one and the anchor is accepted, since
+the chain already checked it. going back past the first verified commit is
+refused. the update line names the signer, and `signed by github` deserves a
+second look, since GitHub signs every merge made in its web UI with the key at
+`https://github.com/web-flow.gpg`.
+
+checks run the way git does, with `ssh-keygen` for SSH signatures and `gpg` for
+PGP ones, so the matching tool must be on `PATH`. github, gitlab, and git pins
+can take signers.
+
+signers gate `tack update` only, and the `signedBy` in the lock is plain JSON
+that nothing authenticates, so a pull request can hand-edit it. run `tack verify
+--base origin/main` as a required CI check. it ignores the lock's `signedBy`,
+reads the base lock from git, verifies every commit from the base rev to the
+locked one for pins that stay on the same source, and checks the tip alone for
+new pins. without `--base` it checks each locked tip. it also reads the base
+`pins.toml`, fails a pin whose signers were removed since the base, and notes a
+pin removed outright. every `ok` line says when only the tip was checked and
+why, and when the trusted signers or their keys changed, as in `ok  signed by
+alice (keys changed: alice, tip only, signers added: mallory)`.
 
 ## laziness
 

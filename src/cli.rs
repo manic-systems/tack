@@ -2,9 +2,13 @@
 
 use pound::Parse;
 
-use crate::pins::{
-    PinType,
-    Unpack,
+use crate::{
+    fetch::github::GithubUser,
+    pins::{
+        PinType,
+        Unpack,
+    },
+    signers::SignerName,
 };
 
 /// the parsed subcommand, in the shape the rest of tack consumes
@@ -30,6 +34,9 @@ pub enum Command {
         exclude: Vec<String>,
         names:   Vec<String>,
     },
+    Verify {
+        base: Option<String>,
+    },
     Add(AddArgs),
     Rm {
         name: String,
@@ -43,6 +50,7 @@ pub enum Command {
         names:  Vec<String>,
         frozen: bool,
     },
+    Signer(SignerAction),
     Dedup,
     Undo {
         list: bool,
@@ -59,6 +67,29 @@ pub struct AddArgs {
     pub dir:        Option<String>,
     pub submodules: bool,
     pub follows:    Vec<(String, String)>,
+}
+
+pound::from_str!(SignerName, GithubUser);
+
+#[derive(Debug, PartialEq, Eq, Parse)]
+pub enum SignerAction {
+    /// trust a signer's keys, fetched from GitHub or given as a key or file
+    Add {
+        /// signer name, as pins list it under signers
+        name:   SignerName,
+        /// a public key, or a file holding one
+        key:    Option<String>,
+        /// fetch the signing keys this GitHub user publishes
+        #[pound(long)]
+        github: Option<GithubUser>,
+    },
+    /// stop trusting a signer that no pin lists
+    Rm {
+        /// signer name
+        name: SignerName,
+    },
+    /// show each signer's keys and the pins that list it
+    List,
 }
 
 /// flake-like toml nix pins, lazily fetched and transformed
@@ -101,6 +132,13 @@ enum Cli {
         exclude: Vec<String>,
         /// pins or groups to inspect (default: all)
         names:   Vec<String>,
+    },
+    /// check that locked commits are signed by their pins' declared signers
+    Verify {
+        /// trusted git ref to read the previous lock from, so only new commits
+        /// need checking
+        #[pound(long)]
+        base: Option<String>,
     },
     /// show each pin's locked inputs and what they follow
     Tree {
@@ -160,6 +198,11 @@ enum Cli {
         /// pins or groups to unfreeze
         names: Vec<String>,
     },
+    /// manage the keys pins can require commits to be signed by
+    Signer {
+        #[pound(subcommand)]
+        action: SignerAction,
+    },
     /// collapse duplicate pins onto a single source
     Dedup,
     /// revert the last tack edit
@@ -215,6 +258,8 @@ impl Command {
                 let verb = if frozen { "freeze" } else { "unfreeze" };
                 format!("{verb} {}", names.join(" "))
             },
+            Self::Signer(SignerAction::Add { ref name, .. }) => format!("signer add {name}"),
+            Self::Signer(SignerAction::Rm { ref name }) => format!("signer rm {name}"),
             Self::Rm { ref name } => format!("rm {name}"),
             Self::Alias { ref name, rm, .. } => {
                 if rm {
@@ -225,6 +270,8 @@ impl Command {
             },
             Self::Look { .. }
             | Self::Tree { .. }
+            | Self::Verify { .. }
+            | Self::Signer(SignerAction::List)
             | Self::Dedup
             | Self::Undo { .. }
             | Self::Redo => String::new(),
@@ -276,6 +323,7 @@ impl From<Cli> for Command {
                     exclude: split_list(&exclude),
                 }
             },
+            Cli::Verify { base } => Self::Verify { base },
             Cli::Add {
                 name,
                 url,
@@ -317,6 +365,7 @@ impl From<Cli> for Command {
                     frozen: false,
                 }
             },
+            Cli::Signer { action } => Self::Signer(action),
             Cli::Dedup => Self::Dedup,
             Cli::Undo { list } => Self::Undo { list },
             Cli::Redo => Self::Redo,

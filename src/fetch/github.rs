@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
+    fmt::{
+        Display,
+        Formatter,
+        Result as FmtResult,
+    },
     path::{
         Path,
         PathBuf,
     },
+    str::FromStr,
     time::Duration,
 };
 
@@ -12,6 +18,7 @@ use misstep::Result;
 use serde::{
     Deserialize,
     Serialize,
+    de::DeserializeOwned,
 };
 
 use super::{
@@ -31,6 +38,7 @@ use super::{
     },
 };
 use crate::{
+    error::user_bail,
     lock::LockedNode,
     nar,
 };
@@ -479,6 +487,93 @@ pub(super) fn commits_between(
     limit: usize,
 ) -> FetchResult<CommitLog> {
     GithubClient::global().commits_between(owner, repo, old, new, limit)
+}
+
+const GITHUB_API: &str = "https://api.github.com/";
+const GITHUB_PAGE_LIMIT: usize = 10;
+
+/// follows `rel="next"` links within api.github.com, failing rather than
+/// truncating once the page cap is hit
+fn paged<T>(first: &str) -> FetchResult<Vec<T>>
+where
+    T: DeserializeOwned,
+{
+    let mut items = Vec::new();
+    let mut url = first.to_owned();
+    for _ in 0..GITHUB_PAGE_LIMIT {
+        let (page, next) = GithubClient::global()
+            .http
+            .github_json_page::<Vec<T>>(&url, None)?;
+        items.extend(page);
+        match next {
+            Some(link) if link.starts_with(GITHUB_API) => url = link,
+            _ => return Ok(items),
+        }
+    }
+    Err(FetchError::Github(format!(
+        "{first} lists more than {GITHUB_PAGE_LIMIT} pages"
+    )))
+}
+
+pub fn ssh_signing_keys(user: &GithubUser) -> FetchResult<Vec<String>> {
+    let url = format!("{GITHUB_API}users/{user}/ssh_signing_keys?per_page=100");
+    let keys = paged::<GithubSshKey>(&url)?;
+    Ok(keys.into_iter().map(|key| key.key).collect())
+}
+
+/// armored keys, and how many entries came without one
+pub struct GpgKeys {
+    pub armored: Vec<String>,
+    pub dropped: usize,
+}
+
+pub fn gpg_keys(user: &GithubUser) -> FetchResult<GpgKeys> {
+    let url = format!("{GITHUB_API}users/{user}/gpg_keys?per_page=100");
+    let keys = paged::<GithubGpgKey>(&url)?;
+    let total = keys.len();
+    let armored = keys
+        .into_iter()
+        .filter_map(|key| key.raw_key)
+        .collect::<Vec<_>>();
+    Ok(GpgKeys {
+        dropped: total.saturating_sub(armored.len()),
+        armored,
+    })
+}
+
+/// a GitHub login, checked before it lands in an API path
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GithubUser(String);
+
+impl FromStr for GithubUser {
+    type Err = misstep::Report;
+
+    fn from_str(raw: &str) -> Result<Self> {
+        let valid = !raw.is_empty()
+            && raw
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+        if !valid {
+            user_bail!("'{raw}' is not a GitHub user name");
+        }
+        Ok(Self(raw.to_owned()))
+    }
+}
+
+impl Display for GithubUser {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Deserialize)]
+struct GithubSshKey {
+    key: String,
+}
+
+#[derive(Deserialize)]
+struct GithubGpgKey {
+    raw_key: Option<String>,
 }
 
 #[cfg(test)]

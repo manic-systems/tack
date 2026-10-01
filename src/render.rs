@@ -66,10 +66,25 @@ pub fn date(epoch: u64) -> String {
         .unwrap_or_default()
 }
 
-/// strips control characters, so text an upstream controls cannot carry
-/// escapes a terminal would act on
+/// strips control, bidi and invisible format characters, so text an upstream
+/// controls cannot carry escapes a terminal would act on or reorder what
+/// follows it
 pub fn printable(text: &str) -> String {
-    text.replace(char::is_control, "")
+    text.replace(
+        |ch: char| {
+            ch.is_control()
+                || matches!(
+                    ch,
+                    '\u{061C}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'..='\u{2064}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{FEFF}'
+                )
+        },
+        "",
+    )
 }
 
 pub fn added_identity(identity: &str) -> String {

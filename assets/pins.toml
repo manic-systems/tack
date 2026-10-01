@@ -14,6 +14,12 @@
 # nixpkgs = "nixpkgs"
 # nixpkgs = ["nixpkgs-stable", "nixpkgs-unstable"]
 
+# signers name the public keys pins can require, as an ssh key line, an
+# armored pgp key, a file under .tack holding either, or an array of those.
+# `tack signer add <name> --github <user>` fills one in from GitHub
+[signers]
+# alice = "ssh-ed25519 AAAA..."
+
 # inputs.<name> fields
 #   url             required, shorturl ok, ?rev=<sha> pins an exact commit
 #   type            flake (default), fetch, or fixed
@@ -23,4 +29,5 @@
 #   dir             subdir holding flake.nix
 #   submodules      fetch git submodules
 #   unpack          fixed-only tarball or file
+#   signers         names from [signers], one of whom must have signed the locked commit
 [inputs]

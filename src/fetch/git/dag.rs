@@ -7,6 +7,7 @@ use std::{
         VecDeque,
     },
     env,
+    error::Error,
     fs,
     io::{
         self,
@@ -47,6 +48,8 @@ use gix_transport::client::blocking_io::{
 };
 
 use crate::fetch::{
+    CommitObject,
+    CommitRange,
     CompareStatus,
     FetchError,
     FetchResult,
@@ -59,6 +62,7 @@ const DEFAULT_DEEPEN_ROUNDS: usize = 3;
 const MAX_DEEPEN_ROUNDS: usize = 10;
 const DEEPEN_ROUNDS_ENV: &str = "TACK_GIT_DAG_ROUNDS";
 const PACK_LIMIT_MARKER: &str = "git DAG pack exceeded";
+const RANGE_DEPTHS: [usize; 4] = [1 << 5, 1 << 8, 1 << 11, 1 << 14];
 
 pub(super) fn compare_status(
     url: &str,
@@ -66,6 +70,38 @@ pub(super) fn compare_status(
     head: &str,
 ) -> FetchResult<Option<CompareStatus>> {
     DagGraph::compare(url, parse_object_id(base)?, parse_object_id(head)?)
+}
+
+/// the raw commit object, fetched without its tree or history
+pub(super) fn commit_object(url: &str, rev: &str) -> FetchResult<CommitObject> {
+    let id = parse_object_id(rev)?;
+    let mut graph = DagGraph::new(url)?;
+    graph.fetch(&[id], 1)?;
+    graph
+        .commit(id)?
+        .map(|(object, _)| object)
+        .ok_or_else(|| FetchError::Transport(format!("git commit {id} missing from {url}")))
+}
+
+pub(super) fn commit_range(url: &str, base_rev: &str, head_rev: &str) -> FetchResult<CommitRange> {
+    let base = parse_object_id(base_rev)?;
+    let head = parse_object_id(head_rev)?;
+    if base == head {
+        return Ok(CommitRange::Commits(Vec::new()));
+    }
+    for depth in RANGE_DEPTHS {
+        let mut graph = DagGraph::new(url)?;
+        if let Err(err) = graph.fetch(&[base, head], depth) {
+            if is_pack_limit(&err) {
+                return Ok(CommitRange::TooLarge);
+            }
+            return Err(err);
+        }
+        if let Some(range) = graph.range(base, head)? {
+            return Ok(range);
+        }
+    }
+    Ok(CommitRange::TooLarge)
 }
 
 pub(super) fn resolve_tip(url: &str, reff: Option<&str>) -> FetchResult<String> {
@@ -143,6 +179,72 @@ impl DagGraph {
         self.repo = gix::open(self.dir.path())
             .map_err(|err| FetchError::Transport(format!("reopen dag probe repo: {err}")))?;
         Ok(())
+    }
+
+    /// [`None`] while the fetched graph is too shallow to tell, since the
+    /// anchor's own ancestry is only known as deep as it was fetched
+    fn range(&self, base: gix::ObjectId, head: gix::ObjectId) -> FetchResult<Option<CommitRange>> {
+        let mut hidden = BTreeSet::new();
+        let mut pending = vec![base];
+        while let Some(id) = pending.pop() {
+            if hidden.insert(id)
+                && let Some((_, parents)) = self.commit(id)?
+            {
+                pending.extend(parents);
+            }
+        }
+
+        if hidden.contains(&head) {
+            return Ok(Some(CommitRange::Ancestor));
+        }
+
+        let mut commits = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut reached = false;
+        let mut walk = vec![head];
+        while let Some(id) = walk.pop() {
+            if id == base {
+                reached = true;
+                continue;
+            }
+            if hidden.contains(&id) || !seen.insert(id) {
+                continue;
+            }
+            let Some((object, parents)) = self.commit(id)? else {
+                return Ok(None);
+            };
+            walk.extend(parents);
+            commits.push(object);
+        }
+        Ok(Some(if reached {
+            CommitRange::Commits(commits)
+        } else {
+            CommitRange::Diverged
+        }))
+    }
+
+    /// [`None`] when the commit wasn't part of the fetch
+    fn commit(&self, id: gix::ObjectId) -> FetchResult<Option<(CommitObject, Vec<gix::ObjectId>)>> {
+        let found = self
+            .repo
+            .try_find_object(id)
+            .map_err(|err| FetchError::Transport(format!("read git commit {id}: {err}")))?;
+        let Some(object) = found else {
+            return Ok(None);
+        };
+        if object.kind != objs::Kind::Commit {
+            return Err(FetchError::Transport(format!(
+                "git object {id} is not a commit"
+            )));
+        }
+        let parents = objs::CommitRefIter::from_bytes(&object.data, self.repo.object_hash())
+            .parent_ids()
+            .collect::<Vec<_>>();
+        let commit = CommitObject {
+            id:   id.to_string(),
+            data: object.data.clone(),
+        };
+        Ok(Some((commit, parents)))
     }
 
     fn local_status(
@@ -284,7 +386,12 @@ fn filtered_commit_fetch(
             ..Default::default()
         },
     )
-    .map_err(|err| FetchError::Transport(format!("write git filtered pack {url}: {err}")))?;
+    .map_err(|err| {
+        FetchError::Transport(format!(
+            "write git filtered pack {url}: {}",
+            error_chain(&err)
+        ))
+    })?;
     if let Some(keep_path) = outcome.keep_path {
         let _ = fs::remove_file(keep_path);
     }
@@ -501,6 +608,19 @@ const fn deepen_depth(round: usize) -> usize {
         1 => 8,
         _ => 1 << (round + 2),
     }
+}
+
+/// gix wraps the capped reader's io error in variants whose Display drops the
+/// cause
+fn error_chain(err: &dyn Error) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }
 
 fn is_pack_limit(err: &FetchError) -> bool {

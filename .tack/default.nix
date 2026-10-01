@@ -92,7 +92,7 @@ let
           else if !(elem (node.type or "") knownTypes) then
             throw "tack: unknown lock type '${node.type or "?"}' for pin '${name}'"
           else
-            fetchTree node;
+            fetchTree (removeAttrs node [ "signedBy" ]);
 
       fetchFixed =
         { name, entry }:

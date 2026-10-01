@@ -22,8 +22,10 @@ use crate::{
         },
     },
     lock::{
+        LockFile,
         LockIdentity,
         LockedNode,
+        SignedBy,
     },
     pins::{
         self,
@@ -37,12 +39,19 @@ use crate::{
         LookReport,
         PinLook,
         PinUpdate,
+        Signed,
         UpdateOutcome,
         UpdateReport,
+    },
+    signers::{
+        Anchor,
+        Keyring,
+        Verdict,
     },
     source::{
         self,
         Source,
+        id::SourceId,
     },
 };
 
@@ -87,6 +96,116 @@ struct PinResolution {
     node:    Option<LockedNode>,
     drift:   bool,
     warning: Option<String>,
+}
+
+enum SignerMark {
+    Keep,
+    Set(SignedBy),
+    Clear,
+}
+
+impl SignerMark {
+    fn record_into(self, lock: &mut LockFile, pin: &str) -> bool {
+        match self {
+            Self::Keep => false,
+            Self::Set(signed_by) => lock.set_signed_by(pin, Some(signed_by)),
+            Self::Clear => lock.set_signed_by(pin, None),
+        }
+    }
+}
+
+/// a pin with signers only lands on a commit they signed, and every commit
+/// since its verified anchor must be signed too, unless the pin rolls back to a
+/// commit that chain already covered
+fn check_signers(
+    input: &pins::Input,
+    old: Option<&LockedNode>,
+    recorded: Option<&SignedBy>,
+    keyring: &Keyring,
+    resolution: &mut PinResolution,
+) -> SignerMark {
+    if input.signers.is_empty() {
+        return if recorded.is_some() {
+            SignerMark::Clear
+        } else {
+            SignerMark::Keep
+        };
+    }
+    if matches!(resolution.outcome, UpdateOutcome::Failed(_)) {
+        return SignerMark::Keep;
+    }
+    let Some(node) = resolution.node.as_ref().or(old) else {
+        return SignerMark::Keep;
+    };
+    let listed = recorded.and_then(|record| {
+        input
+            .signers
+            .iter()
+            .find(|name| name.as_str() == record.signer)
+            .map(|name| (record, name))
+    });
+    let trusted = listed.filter(|&(record, name)| {
+        record.keys.is_some() && record.keys == keyring.keys_digest(name)
+    });
+    if let Some((_, name)) = listed
+        && trusted.is_none()
+    {
+        let warning = format!("{name}'s keys changed since the last verified commit");
+        resolution.warning = Some(
+            resolution
+                .warning
+                .take()
+                .map_or_else(|| warning.clone(), |prev| format!("{prev} {warning}")),
+        );
+    }
+    let anchor = old
+        .filter(|prev| {
+            trusted.is_some() && SourceId::from_locked(prev) == SourceId::from_locked(node)
+        })
+        .and_then(LockedNode::forge_rev);
+    let anchored = trusted.zip(anchor);
+    if let Some(((record, _), rev)) = anchored
+        && node.forge_rev() == Some(rev)
+    {
+        return SignerMark::Set(record.clone());
+    }
+
+    let start = anchored.map(|((record, _), rev)| {
+        Anchor {
+            rev,
+            since: record.since.as_deref(),
+        }
+    });
+    match keyring.verify(&input.signers, start, node) {
+        Ok(Verdict {
+            signer,
+            rolled_back,
+        }) => {
+            if let UpdateOutcome::Updated {
+                ref mut signed_by, ..
+            } = resolution.outcome
+            {
+                *signed_by = Some(Signed {
+                    signer: signer.to_string(),
+                    rolled_back,
+                });
+            }
+            let since = anchored
+                .and_then(|((record, _), _)| record.since.clone())
+                .or_else(|| node.forge_rev().map(str::to_owned));
+            SignerMark::Set(SignedBy {
+                signer: signer.to_string(),
+                keys: keyring.keys_digest(signer),
+                since,
+            })
+        },
+        Err(err) => {
+            resolution.outcome = UpdateOutcome::Failed(render::printable(&format!("{err:#}")));
+            resolution.node = None;
+            resolution.drift = false;
+            SignerMark::Keep
+        },
+    }
 }
 
 fn classify(
@@ -183,6 +302,7 @@ fn classify(
             old: old_identity,
             new: new_identity,
             comparison,
+            signed_by: None,
         },
         node: Some(node),
         drift: false,
@@ -294,6 +414,13 @@ pub(super) fn update(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut lock = project.load_lock()?;
+    let keyring = Keyring::load(
+        doc.signers()?
+            .into_iter()
+            .filter(|&(ref name, _)| selected.iter().any(|input| input.signers.contains(name)))
+            .collect(),
+        project.dir(),
+    )?;
     progress.begin(&selected);
 
     let session = CompareSession::new();
@@ -307,12 +434,12 @@ pub(super) fn update(
                 warning: None,
             };
             progress.finished(index, &resolution.outcome);
-            return resolution;
+            return (resolution, SignerMark::Keep);
         }
         progress.fetching(index);
         let localized = source::localize_path_url_with_warning(&url, project.dir());
         let old = lock.get(&input.name);
-        let resolution = classify(
+        let mut resolution = classify(
             input,
             &localized.url,
             old,
@@ -320,8 +447,10 @@ pub(super) fn update(
             localized.warning,
             &session,
         );
+        let recorded = lock.signed_by(&input.name);
+        let mark = check_signers(input, old, recorded, &keyring, &mut resolution);
         progress.finished(index, &resolution.outcome);
-        resolution
+        (resolution, mark)
     });
 
     let mut changed = false;
@@ -329,7 +458,7 @@ pub(super) fn update(
     let mut pins = Vec::with_capacity(resolutions.len());
     let mut warnings = Vec::new();
     let mut changed_names = Vec::new();
-    for (input, resolution) in selected.iter().zip(resolutions) {
+    for (input, (resolution, mark)) in selected.iter().zip(resolutions) {
         if let Some(warning) = resolution.warning {
             warnings.push(warning);
         }
@@ -338,6 +467,7 @@ pub(super) fn update(
             changed = true;
             changed_names.push(input.name.clone());
         }
+        changed |= mark.record_into(&mut lock, &input.name);
         if resolution.drift {
             drift += 1;
         }

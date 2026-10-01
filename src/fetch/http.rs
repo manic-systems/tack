@@ -20,6 +20,7 @@ use ureq::{
             ACCEPT,
             AUTHORIZATION,
             CONTENT_TYPE,
+            LINK,
             USER_AGENT,
         },
     },
@@ -116,6 +117,19 @@ impl HttpClient {
     where
         T: DeserializeOwned,
     {
+        self.github_json_page(url, timeout_limit)
+            .map(|(parsed, _)| parsed)
+    }
+
+    /// the parsed body with the `rel="next"` URL of a paginated listing
+    pub(super) fn github_json_page<T>(
+        self,
+        url: &str,
+        timeout_limit: Option<Duration>,
+    ) -> FetchResult<(T, Option<String>)>
+    where
+        T: DeserializeOwned,
+    {
         with_credential_fallback("github.com", true, |credential| {
             let mut req =
                 Self::with_credential(Self::with_github_headers(self.get(url)), credential);
@@ -123,8 +137,14 @@ impl HttpClient {
                 req = req.config().timeout_global(Some(timeout)).build();
             }
             let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
+            let next = resp
+                .headers()
+                .get(LINK)
+                .and_then(|header| header.to_str().ok())
+                .and_then(|header| link_with_rel(header, &["next"]));
             let body = read_ok_body(&mut resp, url)?;
             serde_json::from_str::<T>(&body)
+                .map(|parsed| (parsed, next))
                 .map_err(|err| FetchError::Github(format!("api {url}: invalid json: {err}")))
         })
     }
@@ -257,4 +277,32 @@ impl GraphqlError {
                     || lower.contains("unauthorized")
             }
     }
+}
+
+/// the target of the first `Link` header entry carrying one of `rels`
+pub(super) fn link_with_rel(header: &str, rels: &[&str]) -> Option<String> {
+    for raw_part in header.split(',') {
+        let part = raw_part.trim();
+        let Some((url_part, params)) = part.split_once(';') else {
+            continue;
+        };
+        let Some(url) = url_part
+            .trim()
+            .strip_prefix('<')
+            .and_then(|inner| inner.strip_suffix('>'))
+        else {
+            continue;
+        };
+        for param in params.split(';') {
+            let Some((key, raw_value)) = param.trim().split_once('=') else {
+                continue;
+            };
+            if key.trim().eq_ignore_ascii_case("rel")
+                && rels.contains(&raw_value.trim().trim_matches('"'))
+            {
+                return Some(url.to_owned());
+            }
+        }
+    }
+    None
 }

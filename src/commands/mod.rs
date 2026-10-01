@@ -9,7 +9,10 @@ use std::{
 use misstep::Result;
 
 use crate::{
-    cli::AddArgs,
+    cli::{
+        AddArgs,
+        SignerAction,
+    },
     fetch::FetchError,
     history::View,
     pins,
@@ -19,6 +22,7 @@ use crate::{
         LookReport,
         TreeReport,
         UpdateReport,
+        VerifyReport,
     },
 };
 
@@ -47,9 +51,11 @@ mod convert;
 mod dedup;
 mod edit;
 mod init;
+mod signer;
 mod tree;
 mod undo;
 mod update;
+mod verify;
 
 #[derive(Clone, Copy)]
 #[expect(
@@ -83,6 +89,10 @@ pub fn set_frozen(project: &Project, names: &[String], frozen: bool) -> Result<(
     edit::set_frozen(project, names, frozen)
 }
 
+pub fn signer(project: &Project, action: &SignerAction) -> Result<()> {
+    signer::run(project, action)
+}
+
 pub fn update(project: &Project, selection: Selection<'_>, accept: bool) -> Result<UpdateReport> {
     update::update(project, selection, accept)
 }
@@ -105,6 +115,14 @@ pub fn tree(project: &Project, selection: Selection<'_>) -> Result<TreeReport> {
 
 pub fn tree_cli(project: &Project, selection: Selection<'_>) -> Result<()> {
     tree::tree_cli(project, selection)
+}
+
+pub fn verify(project: &Project, base: Option<&str>) -> Result<VerifyReport> {
+    verify::verify(project, base)
+}
+
+pub fn verify_cli(project: &Project, base: Option<&str>) -> Result<()> {
+    verify::verify_cli(project, base)
 }
 
 pub fn dedup(project: &Project) -> Result<()> {
@@ -248,6 +266,7 @@ mod tests {
                     dir:        None,
                     follows:    BTreeMap::new(),
                     excludes:   BTreeSet::new(),
+                    signers:    Vec::new(),
                     group:      None,
                     frozen:     false,
                 }

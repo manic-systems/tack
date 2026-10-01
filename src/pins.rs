@@ -21,6 +21,7 @@ use misstep::{
 };
 use pound::ValueEnum;
 use toml_edit::{
+    Array,
     DocumentMut,
     Item,
     Table,
@@ -31,6 +32,11 @@ use crate::{
     error::user_bail,
     project::write_atomic,
     shorturl::ShortUrls,
+    signers::{
+        SignerKey,
+        SignerName,
+        key_file,
+    },
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -127,6 +133,7 @@ pub struct Input {
     pub dir:        Option<String>,
     pub follows:    BTreeMap<String, String>,
     pub excludes:   BTreeSet<String>,
+    pub signers:    Vec<SignerName>,
     pub group:      Option<String>,
     pub frozen:     bool,
 }
@@ -197,6 +204,14 @@ impl Input {
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
         let dir = str_field("dir")?;
+        let signers = string_array(name, "signers", entry.get("signers"))?
+            .into_iter()
+            .map(str::parse::<SignerName>)
+            .collect::<Result<Vec<_>>>()
+            .with_context(|| format!("input '{name}'"))?;
+        if pin_type == PinType::Fixed && !signers.is_empty() {
+            user_bail!("input '{name}': signers are not valid for type = \"fixed\"");
+        }
         let group = str_field("group")?;
         let frozen = bool_field("frozen")?.unwrap_or(false);
         let submodules = bool_field("submodules")?.unwrap_or(false);
@@ -209,6 +224,7 @@ impl Input {
             dir: dir.map(str::to_owned),
             follows,
             excludes,
+            signers,
             group: group.map(str::to_owned),
             frozen,
         })
@@ -234,6 +250,16 @@ fn string_array<'item>(
                 .with_context(|| format!("input '{name}': {key}[{index}] must be a string"))
         })
         .collect::<Result<Vec<_>>>()
+}
+
+fn signer_values(item: &Item) -> Option<Vec<&str>> {
+    if let Some(value) = item.as_str() {
+        return Some(vec![value]);
+    }
+    item.as_array()?
+        .iter()
+        .map(toml_edit::Value::as_str)
+        .collect()
 }
 
 #[derive(Debug)]
@@ -274,7 +300,14 @@ impl PinsDoc {
         for (name, item) in table.iter() {
             out.push(Input::from_item(name, item)?);
         }
+        self.signers()?;
+        let declared = self.doc.get("signers").and_then(Item::as_table_like);
         for input in &out {
+            if let Some(signer) = input.signers.iter().find(|signer| {
+                !declared.is_some_and(|signers| signers.contains_key(signer.as_str()))
+            }) {
+                user_bail!("input '{}': no signer '{signer}' in [signers]", input.name);
+            }
             if let Some(ref group) = input.group
                 && out.iter().any(|other| other.name == *group)
             {
@@ -285,6 +318,65 @@ impl PinsDoc {
             }
         }
         Ok(out)
+    }
+
+    /// each signer's values, every one a key or a path under `.tack` to one
+    pub fn signers(&self) -> Result<Vec<(SignerName, Vec<&str>)>> {
+        let Some(table) = self.doc.get("signers").and_then(Item::as_table_like) else {
+            return Ok(Vec::new());
+        };
+        table
+            .iter()
+            .map(|(name, item)| {
+                let signer = name.parse::<SignerName>()?;
+                let values = signer_values(item).with_context(|| {
+                    format!("signer '{signer}' must be a string or an array of strings")
+                })?;
+                for value in &values {
+                    if value.parse::<SignerKey>().is_err() {
+                        key_file(value).with_context(|| format!("signer '{signer}'"))?;
+                    }
+                }
+                Ok((signer, values))
+            })
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn has_signer(&self, name: &SignerName) -> bool {
+        self.doc
+            .get("signers")
+            .and_then(Item::as_table_like)
+            .is_some_and(|signers| signers.contains_key(name.as_str()))
+    }
+
+    /// files under `.tack` that the signer's value names
+    pub fn signer_files(&self, name: &SignerName) -> Vec<String> {
+        self.doc
+            .get("signers")
+            .and_then(Item::as_table_like)
+            .and_then(|signers| signers.get(name.as_str()))
+            .and_then(signer_values)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|value| value.parse::<SignerKey>().is_err())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    pub fn add_signer(&mut self, name: &SignerName, values: &[&str]) {
+        let item = match *values {
+            [single] => value(single),
+            _ => value(values.iter().copied().collect::<Array>()),
+        };
+        self.ensure_table("signers").insert(name.as_str(), item);
+    }
+
+    pub fn remove_signer(&mut self, name: &SignerName) -> bool {
+        self.doc
+            .get_mut("signers")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|signers| signers.remove(name.as_str()))
+            .is_some()
     }
 
     pub fn has_input(&self, name: &str) -> bool {

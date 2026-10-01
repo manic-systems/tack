@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use crate::{
-    cli::Command,
+    cli::{
+        Command,
+        SignerAction,
+    },
     commands,
     history::HistoryStore,
     project::Project,
@@ -55,6 +58,7 @@ pub fn run(cmd: Command) -> misstep::Result<()> {
                 exclude: &exclude,
             })
         },
+        Command::Verify { base } => commands::verify_cli(&project, base.as_deref()),
         Command::Dedup => commands::dedup(&project),
         Command::Undo { list } => commands::undo(&project, list),
         Command::Redo => commands::redo(&project),
@@ -85,6 +89,10 @@ pub fn run(cmd: Command) -> misstep::Result<()> {
             recorded(&project, &label, || {
                 commands::set_frozen(&project, &names, frozen)
             })
+        },
+        Command::Signer(SignerAction::List) => commands::signer(&project, &SignerAction::List),
+        Command::Signer(action) => {
+            recorded(&project, &label, || commands::signer(&project, &action))
         },
     };
 

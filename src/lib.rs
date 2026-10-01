@@ -16,6 +16,7 @@ mod render;
 mod report;
 mod scan_diagnostic;
 mod shorturl;
+mod signers;
 mod source;
 mod style;
 mod ui;
@@ -31,6 +32,7 @@ pub use api::{
 pub use cli::{
     AddArgs,
     Command,
+    SignerAction,
 };
 pub use commands::InitRequest;
 pub use fetch::{

@@ -16,6 +16,7 @@ use crate::{
         LookReport,
         TreeReport,
         UpdateReport,
+        VerifyReport,
     },
 };
 
@@ -50,10 +51,12 @@ pub enum CommandOutcome {
     Update(UpdateReport),
     Look(LookReport),
     Tree(TreeReport),
+    Verify(VerifyReport),
     Add,
     Rm,
     Alias,
     SetFrozen,
+    Signer,
     Dedup(DedupReport),
     History(Option<HistoryView>),
     Undo(Option<HistoryView>),
@@ -152,6 +155,10 @@ impl<'a> Tack<'a> {
                 })?;
                 Ok(unrecorded(CommandOutcome::Tree(report)))
             },
+            Command::Verify { base } => {
+                let report = commands::verify(self.project, base.as_deref())?;
+                Ok(unrecorded(CommandOutcome::Verify(report)))
+            },
             Command::Add(args) => {
                 self.recorded_as(label, CommandOutcome::Add, || {
                     commands::add(self.project, &args)
@@ -170,6 +177,11 @@ impl<'a> Tack<'a> {
             Command::SetFrozen { names, frozen } => {
                 self.recorded_as(label, CommandOutcome::SetFrozen, || {
                     commands::set_frozen(self.project, &names, frozen)
+                })
+            },
+            Command::Signer(action) => {
+                self.recorded_as(label, CommandOutcome::Signer, || {
+                    commands::signer(self.project, &action)
                 })
             },
             Command::Dedup => {
@@ -222,6 +234,11 @@ impl<'a> Tack<'a> {
 fn status_for(outcome: &CommandOutcome) -> CommandStatus {
     match *outcome {
         CommandOutcome::Update(ref report) => update_status(report),
+        CommandOutcome::Verify(ref report) => {
+            report
+                .user_error()
+                .map_or(CommandStatus::Success, CommandStatus::UserError)
+        },
         CommandOutcome::Init
         | CommandOutcome::Look(_)
         | CommandOutcome::Tree(_)
@@ -229,6 +246,7 @@ fn status_for(outcome: &CommandOutcome) -> CommandStatus {
         | CommandOutcome::Rm
         | CommandOutcome::Alias
         | CommandOutcome::SetFrozen
+        | CommandOutcome::Signer
         | CommandOutcome::Dedup(_)
         | CommandOutcome::History(_)
         | CommandOutcome::Undo(_)

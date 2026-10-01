@@ -12,6 +12,25 @@ pub struct CommitLog {
     pub behind: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct CommitObject {
+    pub id:   String,
+    pub data: Vec<u8>,
+}
+
+/// the commits a pin moves across, from a verified anchor to its new rev
+#[derive(Clone, Debug)]
+pub enum CommitRange {
+    /// every commit reachable from the new rev but not from the anchor
+    Commits(Vec<CommitObject>),
+    /// the anchor is not an ancestor of the new rev
+    Diverged,
+    /// the new rev is the anchor's own ancestor, so the pin moves back
+    Ancestor,
+    /// the range doesn't fit in the fetch limits
+    TooLarge,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompareStatus {
     Ahead,

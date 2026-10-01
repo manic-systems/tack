@@ -23,25 +23,74 @@ use crate::{
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockFile {
-    nodes:       BTreeMap<String, LockedNode>,
+    entries:     BTreeMap<String, Entry>,
     /// unknown nodes survive saves
     passthrough: BTreeMap<String, Value>,
+}
+
+/// tack's own fields sit beside the node, and the resolver strips them before
+/// fetchTree sees it
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+struct Entry {
+    #[serde(flatten)]
+    node:      LockedNode,
+    /// who signed the locked rev, which makes it the anchor later updates
+    /// verify from
+    #[serde(
+        rename = "signedBy",
+        default,
+        deserialize_with = "lenient_signed_by",
+        skip_serializing_if = "Option::is_none"
+    )]
+    signed_by: Option<SignedBy>,
+}
+
+/// a record that doesn't parse reads as unsigned, so the node stays typed and
+/// the next update verifies from scratch
+fn lenient_signed_by<'de, D>(deserializer: D) -> Result<Option<SignedBy>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Value>::deserialize(deserializer)?
+        .and_then(|value| SignedBy::deserialize(value).ok()))
+}
+
+/// the signer behind a pin's anchor, and what to check before trusting it again
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SignedBy {
+    pub signer: String,
+    /// digest of the signer's keys when the anchor was verified
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys:   Option<String>,
+    /// the first rev verified under this anchor chain, so rollbacks to anything
+    /// after it are known to be checked
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since:  Option<String>,
+}
+
+impl From<LockedNode> for Entry {
+    fn from(node: LockedNode) -> Self {
+        Self {
+            node,
+            signed_by: None,
+        }
+    }
 }
 
 impl LockFile {
     pub const fn new() -> Self {
         Self {
-            nodes:       BTreeMap::new(),
+            entries:     BTreeMap::new(),
             passthrough: BTreeMap::new(),
         }
     }
 
     pub fn parse(raw: &str) -> Result<Self, serde_json::Error> {
-        let entries = serde_json::from_str::<BTreeMap<String, Value>>(raw)?;
+        let values = serde_json::from_str::<BTreeMap<String, Value>>(raw)?;
         let mut lock = Self::new();
-        for (name, value) in entries {
-            if let Ok(node) = LockedNode::from_value(value.clone()) {
-                lock.nodes.insert(name, node);
+        for (name, value) in values {
+            if let Ok(entry) = Entry::deserialize(&value) {
+                lock.entries.insert(name, entry);
             } else {
                 lock.passthrough.insert(name, value);
             }
@@ -57,9 +106,9 @@ impl LockFile {
 
     fn merged(&self) -> BTreeMap<&str, NodeRepr<'_>> {
         let typed = self
-            .nodes
+            .entries
             .iter()
-            .map(|(name, node)| (name.as_str(), NodeRepr::Typed(node)));
+            .map(|(name, entry)| (name.as_str(), NodeRepr::Typed(entry)));
         let kept = self
             .passthrough
             .iter()
@@ -68,26 +117,42 @@ impl LockFile {
     }
 
     pub fn get(&self, name: &str) -> Option<&LockedNode> {
-        self.nodes.get(name)
+        self.entries.get(name).map(|entry| &entry.node)
     }
 
+    /// a new node drops the signer, since nothing has verified it yet
     pub fn insert(&mut self, name: String, node: LockedNode) -> Option<LockedNode> {
         self.passthrough.remove(&name);
-        self.nodes.insert(name, node)
+        self.entries
+            .insert(name, Entry::from(node))
+            .map(|entry| entry.node)
+    }
+
+    pub fn signed_by(&self, name: &str) -> Option<&SignedBy> {
+        self.entries.get(name)?.signed_by.as_ref()
+    }
+
+    pub fn set_signed_by(&mut self, name: &str, signer: Option<SignedBy>) -> bool {
+        let Some(entry) = self.entries.get_mut(name) else {
+            return false;
+        };
+        let changed = entry.signed_by != signer;
+        entry.signed_by = signer;
+        changed
     }
 
     pub fn remove(&mut self, name: &str) -> bool {
-        let typed = self.nodes.remove(name).is_some();
+        let typed = self.entries.remove(name).is_some();
         let kept = self.passthrough.remove(name).is_some();
         typed || kept
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &String> {
-        self.nodes.keys()
+        self.entries.keys()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &LockedNode)> {
-        self.nodes.iter()
+        self.entries.iter().map(|(name, entry)| (name, &entry.node))
     }
 
     pub fn unknown_nodes(&self) -> impl Iterator<Item = &str> {
@@ -106,7 +171,7 @@ impl LockFile {
 }
 
 enum NodeRepr<'a> {
-    Typed(&'a LockedNode),
+    Typed(&'a Entry),
     Kept(&'a Value),
 }
 
@@ -116,7 +181,7 @@ impl Serialize for NodeRepr<'_> {
         S: serde::Serializer,
     {
         match *self {
-            Self::Typed(node) => node.serialize(serializer),
+            Self::Typed(entry) => entry.serialize(serializer),
             Self::Kept(value) => value.serialize(serializer),
         }
     }

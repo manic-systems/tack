@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::collections::{
-    BTreeMap,
-    BTreeSet,
+use std::{
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
+    fmt::{
+        Display,
+        Formatter,
+        Result as FmtResult,
+    },
 };
 
 use crate::{
@@ -21,6 +28,8 @@ pub enum UpdateOutcome {
         old:        Option<String>,
         new:        String,
         comparison: BranchComparison,
+        /// the signer of the new rev, for pins with `signers`
+        signed_by:  Option<Signed>,
     },
     Drift {
         rev:      String,
@@ -63,6 +72,71 @@ impl UpdateReport {
              --accept to relock)"
                 .to_owned()
         })
+    }
+}
+
+/// who signed a pin's new rev, and whether the pin moved back to a commit its
+/// verified chain already covered
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Signed {
+    pub signer:      String,
+    pub rolled_back: bool,
+}
+
+impl Display for Signed {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "signed by {}", self.signer)?;
+        if self.rolled_back {
+            f.write_str(" (rolled back to an earlier verified commit)")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    Signed {
+        signer: String,
+        notes:  Vec<VerifyNote>,
+    },
+    /// the pin is gone and had signers at the base, so nothing is built from it
+    Removed,
+    Failed(String),
+}
+
+/// what made a passing check weaker than the full range from the base, or
+/// changed who is trusted
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifyNote {
+    NewPin,
+    SourceChanged,
+    NoAnchor,
+    NoBase,
+    KeysChanged(Vec<String>),
+    TipOnly,
+    SignersAdded(Vec<String>),
+    RolledBack,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinVerify {
+    pub name:    String,
+    pub outcome: VerifyOutcome,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VerifyReport {
+    pub pins: Vec<PinVerify>,
+}
+
+impl VerifyReport {
+    pub fn user_error(&self) -> Option<String> {
+        let failed = self
+            .pins
+            .iter()
+            .filter(|pin| matches!(pin.outcome, VerifyOutcome::Failed(_)))
+            .count();
+        (failed > 0).then(|| format!("{failed} pin(s) failed signature checks"))
     }
 }
 

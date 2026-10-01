@@ -18,6 +18,7 @@ use crate::{
     report::{
         LookOutcome,
         LookReport,
+        Signed,
         UpdateOutcome,
         UpdateReport,
     },
@@ -29,18 +30,26 @@ use crate::{
 
 const LOG_LIMIT: usize = 5;
 
-fn updated_status(old: Option<&str>, new: &str, comparison: BranchComparison) -> PinStatus {
+fn updated_status(
+    old: Option<&str>,
+    new: &str,
+    comparison: BranchComparison,
+    signed: Option<&Signed>,
+) -> PinStatus {
+    let signed_by = signed.cloned();
     if let Some(path) = render::local_path_identity(new) {
         return PinStatus::Updated {
             old: "LOCAL".to_owned(),
             new: path.to_owned(),
             comparison,
+            signed_by,
         };
     }
     PinStatus::Updated {
         old: old.map_or_else(|| "NEW".to_owned(), render::display_identity),
         new: render::display_identity(new),
         comparison,
+        signed_by,
     }
 }
 
@@ -52,7 +61,8 @@ impl From<&UpdateOutcome> for PinStatus {
                 ref old,
                 ref new,
                 comparison,
-            } => updated_status(old.as_deref(), new, comparison),
+                ref signed_by,
+            } => updated_status(old.as_deref(), new, comparison, signed_by.as_ref()),
             UpdateOutcome::Drift { ref rev, accepted } => {
                 Self::Drift {
                     rev: render::short(rev),
@@ -84,7 +94,7 @@ impl From<&LookOutcome> for PinStatus {
                 ref old,
                 ref new,
                 comparison,
-            } => updated_status(old.as_deref(), new, comparison),
+            } => updated_status(old.as_deref(), new, comparison, None),
             LookOutcome::Skipped(ref note) => Self::Skipped(note.clone()),
             LookOutcome::Failed(ref msg) => Self::Failed(msg.clone()),
         }

@@ -9,6 +9,7 @@ use std::{
         Path,
         PathBuf,
     },
+    slice::from_ref,
 };
 
 use misstep::{
@@ -24,18 +25,27 @@ use ureq::{
 };
 
 use super::{
+    CommitObject,
+    CommitRange,
     FetchError,
     FetchResult,
     archive::{
         detect_tar_format,
         unpack_tar_stream,
     },
-    auth::record_fetch_warning,
+    auth::{
+        record_fetch_warning,
+        token_for_host,
+    },
     forge,
     git,
     github,
+    github_commits,
     gitlab,
-    http::HttpClient,
+    http::{
+        HttpClient,
+        link_with_rel,
+    },
     time::epoch_from_http_date,
 };
 use crate::{
@@ -46,6 +56,7 @@ use crate::{
     },
     nar,
     pins::Unpack,
+    render::printable,
     source::{
         Source,
         clone_url,
@@ -489,31 +500,7 @@ fn immutable_url_of(resp: &ureq_http::Response<Body>, fallback: &str) -> String 
 }
 
 fn parse_link_immutable(header: &str) -> Option<String> {
-    for raw_part in header.split(',') {
-        let part = raw_part.trim();
-        let Some((url_part, params)) = part.split_once(';') else {
-            continue;
-        };
-        let Some(url) = url_part
-            .trim()
-            .strip_prefix('<')
-            .and_then(|inner| inner.strip_suffix('>'))
-        else {
-            continue;
-        };
-        for param in params.split(';') {
-            let Some((key, raw_value)) = param.trim().split_once('=') else {
-                continue;
-            };
-            if key.trim().eq_ignore_ascii_case("rel") {
-                let rel = raw_value.trim().trim_matches('"');
-                if rel == "immutable" || rel == "immutable_link" {
-                    return Some(url.to_owned());
-                }
-            }
-        }
-    }
-    None
+    link_with_rel(header, &["immutable", "immutable_link"])
 }
 
 /// embedded `.git-revision`, if present and a plausible git object id
@@ -523,6 +510,146 @@ fn git_revision_of(root: &Path) -> Option<String> {
     let looks_like_rev =
         (7..=64).contains(&rev.len()) && rev.bytes().all(|byte| byte.is_ascii_hexdigit());
     looks_like_rev.then(|| rev.to_owned())
+}
+
+/// [`None`] when the node isn't a git commit, so it has nothing to be signed
+pub fn commit_object(node: &LockedNode) -> Result<Option<CommitObject>> {
+    if let LockedNode::Github {
+        ref owner,
+        ref repo,
+        rev: Some(ref rev),
+        ..
+    } = *node
+        && token_for_host("github.com").is_some()
+        && let Some(commit) =
+            api_commits(owner, repo, from_ref(rev))?.and_then(|mut commits| commits.pop())
+    {
+        return Ok(Some(commit));
+    }
+    let Some((url, rev)) = commit_url(node) else {
+        return Ok(None);
+    };
+    Ok(Some(git::commit_object(&url, rev)?))
+}
+
+/// [`None`] when the node isn't a git commit
+pub fn commit_range(anchor: &str, node: &LockedNode) -> Result<Option<CommitRange>> {
+    if let LockedNode::Github {
+        ref owner,
+        ref repo,
+        rev: Some(ref rev),
+        ..
+    } = *node
+        && let Some(range) = api_range(owner, repo, anchor, rev)?
+    {
+        return Ok(Some(range));
+    }
+    let Some((url, rev)) = commit_url(node) else {
+        return Ok(None);
+    };
+    Ok(Some(git::commit_range(&url, anchor, rev)?))
+}
+
+fn api_unavailable(owner: &str, repo: &str, err: &FetchError) {
+    record_fetch_warning(format!(
+        "github api could not list or read commits of {owner}/{repo} ({}); falling back to git",
+        printable(&err.to_string())
+    ));
+}
+
+/// [`None`] when the api can't answer and git should be asked instead, while
+/// contents github gets wrong or leaves unsigned are errors
+fn api_commits(owner: &str, repo: &str, oids: &[String]) -> Result<Option<Vec<CommitObject>>> {
+    let found = match github_commits::signed_commits(HttpClient::global(), owner, repo, oids) {
+        Ok(found) => found,
+        Err(err) => {
+            api_unavailable(owner, repo, &err);
+            return Ok(None);
+        },
+    };
+    found
+        .into_iter()
+        .map(|(oid, signature)| {
+            let Some(signed) = signature else {
+                user_bail!(
+                    "commit {} is not signed",
+                    printable(oid.get(..7).unwrap_or(&oid))
+                );
+            };
+            Ok(github_commits::commit_object(&oid, &signed))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .collect::<FetchResult<Vec<_>>>()
+        .map_or_else(
+            |err| {
+                api_unavailable(owner, repo, &err);
+                Ok(None)
+            },
+            |commits| Ok(Some(commits)),
+        )
+}
+
+fn api_range(owner: &str, repo: &str, anchor: &str, rev: &str) -> Result<Option<CommitRange>> {
+    if token_for_host("github.com").is_none() {
+        record_fetch_warning(
+            "no GitHub token; checking signatures over git, which fails on large ranges (set \
+             GITHUB_TOKEN or GH_TOKEN, or opt into nix.conf access-tokens with \
+             TACK_NIX_CONF_TOKENS=1)"
+                .to_owned(),
+        );
+        return Ok(None);
+    }
+    let listed = match github_commits::compare_range(HttpClient::global(), owner, repo, anchor, rev)
+    {
+        Ok(listed) => listed,
+        Err(err) => {
+            api_unavailable(owner, repo, &err);
+            return Ok(None);
+        },
+    };
+    Ok(match listed {
+        github_commits::ApiRange::Commits(oids) => {
+            match api_commits(owner, repo, &oids)? {
+                Some(commits) => Some(CommitRange::Commits(commits)),
+                None => return Ok(None),
+            }
+        },
+        github_commits::ApiRange::Ancestor => Some(CommitRange::Ancestor),
+        github_commits::ApiRange::Diverged => Some(CommitRange::Diverged),
+        github_commits::ApiRange::TooLarge => Some(CommitRange::TooLarge),
+    })
+}
+
+fn commit_url(node: &LockedNode) -> Option<(String, &str)> {
+    let (url, rev) = match *node {
+        LockedNode::Github {
+            ref owner,
+            ref repo,
+            rev: Some(ref rev),
+            ..
+        } => (clone_url("github.com", owner, repo), rev),
+        LockedNode::Gitlab {
+            ref host,
+            ref owner,
+            ref repo,
+            rev: Some(ref rev),
+            ..
+        } => (clone_url(host, owner, repo), rev),
+        LockedNode::Git {
+            ref url,
+            rev: Some(ref rev),
+            ..
+        } => (url.clone(), rev),
+        LockedNode::Github { rev: None, .. }
+        | LockedNode::Gitlab { rev: None, .. }
+        | LockedNode::Git { rev: None, .. }
+        | LockedNode::Tarball { .. }
+        | LockedNode::Fixed { .. }
+        | LockedNode::Indirect { .. }
+        | LockedNode::Path { .. } => return None,
+    };
+    Some((url, rev.as_str()))
 }
 
 pub fn raw(url: &str) -> FetchResult<String> {
