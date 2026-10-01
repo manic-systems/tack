@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
+    borrow::Cow,
     collections::BTreeSet,
     mem,
 };
@@ -66,7 +67,10 @@ use crate::{
         Source,
         id::SourceId,
     },
-    tag,
+    tag::{
+        self,
+        Followed,
+    },
 };
 
 const UPDATE_IN_FLIGHT: usize = 16;
@@ -396,6 +400,78 @@ fn classify(
     }
 }
 
+/// what every pin's update reads and nothing writes until all have resolved
+struct PinRun<'run> {
+    project: &'run Project,
+    lock:    &'run LockFile,
+    keyring: &'run Keyring,
+    session: &'run CompareSession,
+    named:   &'run [String],
+    accept:  bool,
+}
+
+impl PinRun<'_> {
+    fn resolve(
+        &self,
+        input: &pins::Input,
+        url: &str,
+        fetching: impl FnOnce(),
+    ) -> (PinResolution, SignerMark) {
+        let lock = self.lock;
+        let localized = source::localize_path_url_with_warning(url, self.project.dir());
+        let old = lock.get(&input.name);
+        let stale = declared_changed(input, lock, url, &localized.url);
+        let frozen = input.frozen && !self.named.contains(&input.name) && old.is_some();
+        // a frozen pin whose url was respelled relocks at the rev it holds
+        let hold = old
+            .and_then(LockedNode::forge_rev)
+            .filter(|_| frozen && stale);
+        if frozen && hold.is_none() {
+            let mut resolution = PinResolution::frozen();
+            if stale {
+                resolution.warning = Some(format!(
+                    "{0}: its url changed but it is frozen with no rev to relock at, run `tack \
+                     update {0}` to move it",
+                    input.name
+                ));
+            }
+            return (resolution, SignerMark::Keep);
+        }
+        fetching();
+        let target = match hold {
+            Some(rev) => {
+                Ok(Followed {
+                    url: Cow::Owned(at_rev(&localized.url, rev)),
+                    tag: lock.tag(&input.name).map(str::to_owned),
+                })
+            },
+            None => tag::follow(&input.name, input.tag.as_ref(), &localized.url),
+        };
+        let mut resolution = match target {
+            Ok(followed) => {
+                classify(
+                    input,
+                    &followed.url,
+                    stale,
+                    old,
+                    self.accept,
+                    localized.warning,
+                    self.session,
+                )
+                .tagged(lock.tag(&input.name), followed.tag)
+            },
+            Err(err) => PinResolution::failed(&err, localized.warning),
+        };
+        let recorded = lock.signed_by(&input.name);
+        let mut mark = check_signers(input, old, recorded, self.keyring, &mut resolution);
+        settle_patches(self.project, input, lock, &mut resolution);
+        if matches!(resolution.outcome, UpdateOutcome::Failed(_)) {
+            mark = SignerMark::Keep;
+        }
+        (resolution, mark)
+    }
+}
+
 /// writes what a pin's update settled into the lock, returning whether the lock
 /// changed and whether the pin moved to a new node
 fn record_pin(
@@ -537,6 +613,24 @@ fn settle_patches(
     }
 }
 
+/// `url` pinned to `rev`, unless it already names a rev of its own
+fn at_rev(url: &str, rev: &str) -> String {
+    let named = url.parse::<Source>().is_ok_and(|source| {
+        matches!(
+            source,
+            Source::Github { rev: Some(_), .. }
+                | Source::Gitlab { rev: Some(_), .. }
+                | Source::Git { rev: Some(_), .. }
+        )
+    });
+    if named {
+        return url.to_owned();
+    }
+    let (base, fragment) = url.find('#').map_or((url, ""), |at| url.split_at(at));
+    let separator = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{separator}rev={rev}{fragment}")
+}
+
 fn comparable_rev(node: &LockedNode) -> Option<&str> {
     match *node {
         LockedNode::Github {
@@ -616,39 +710,16 @@ pub(super) fn update(
     progress.begin(&selected);
 
     let session = CompareSession::new();
+    let run = PinRun {
+        project,
+        lock: &lock,
+        keyring: &keyring,
+        session: &session,
+        named: selection.names,
+        accept,
+    };
     let resolutions = dispatcher::ordered(jobs, UPDATE_IN_FLIGHT, |index, (input, url)| {
-        let localized = source::localize_path_url_with_warning(&url, project.dir());
-        let old = lock.get(&input.name);
-        let stale = declared_changed(input, &lock, &url, &localized.url);
-        let held =
-            input.frozen && !selection.names.contains(&input.name) && old.is_some() && !stale;
-        if held {
-            let resolution = PinResolution::frozen();
-            progress.finished(index, &resolution.outcome);
-            return (resolution, SignerMark::Keep, url);
-        }
-        progress.fetching(index);
-        let mut resolution = match tag::follow(&input.name, input.tag.as_ref(), &localized.url) {
-            Ok(followed) => {
-                classify(
-                    input,
-                    &followed.url,
-                    stale,
-                    old,
-                    accept,
-                    localized.warning,
-                    &session,
-                )
-                .tagged(lock.tag(&input.name), followed.tag)
-            },
-            Err(err) => PinResolution::failed(&err, localized.warning),
-        };
-        let recorded = lock.signed_by(&input.name);
-        let mut mark = check_signers(input, old, recorded, &keyring, &mut resolution);
-        settle_patches(project, input, &lock, &mut resolution);
-        if matches!(resolution.outcome, UpdateOutcome::Failed(_)) {
-            mark = SignerMark::Keep;
-        }
+        let (resolution, mark) = run.resolve(input, &url, || progress.fetching(index));
         progress.finished(index, &resolution.outcome);
         (resolution, mark, url)
     });
