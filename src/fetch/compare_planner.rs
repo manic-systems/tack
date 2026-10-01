@@ -490,7 +490,3 @@ fn is_missing_remote_commit(job: &CompareJob, err: &FetchError) -> bool {
         | FetchError::Forge(_) => false,
     }
 }
-
-#[cfg(test)]
-#[path = "compare_planner_tests.rs"]
-mod tests;

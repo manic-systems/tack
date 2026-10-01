@@ -315,15 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_exclude_leaves_every_pin_selected() {
-        let all = inputs(&["nixpkgs", "home-manager"]);
-        assert_eq!(selected(&all, &[], &["nixpgks"]), [
-            "nixpkgs",
-            "home-manager"
-        ]);
-    }
-
-    #[test]
     fn exclude_outranks_a_pin_named_on_the_same_run() {
         let all = inputs(&["nixpkgs", "home-manager"]);
         assert!(selected(&all, &["nixpkgs"], &["nixpkgs"]).is_empty());

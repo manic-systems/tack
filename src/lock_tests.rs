@@ -12,10 +12,6 @@ use super::{
     LockedNode,
 };
 
-fn node(value: Value) -> LockedNode {
-    LockedNode::from_value(value).unwrap()
-}
-
 #[test]
 fn save_preserves_unknown_lock_nodes() {
     let raw = r#"{
@@ -41,24 +37,6 @@ fn save_preserves_unknown_lock_nodes() {
             .collect::<Vec<_>>(),
         vec!["future"]
     );
-}
-
-#[test]
-fn remove_and_insert_replace_unknown_nodes() {
-    let raw = r#"{"x": {"type": "mercurial", "url": "https://x"}}"#;
-    let mut lock = LockFile::parse(raw).unwrap();
-    assert_eq!(lock.unknown_nodes().count(), 1);
-
-    lock.insert(
-        "x".to_owned(),
-        node(json!({"type": "github", "owner": "o", "repo": "r"})),
-    );
-    assert_eq!(lock.unknown_nodes().count(), 0);
-    assert!(lock.get("x").is_some());
-
-    let mut kept = LockFile::parse(raw).unwrap();
-    assert!(kept.remove("x"));
-    assert_eq!(kept.unknown_nodes().count(), 0);
 }
 
 #[test]

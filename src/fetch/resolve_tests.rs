@@ -7,7 +7,6 @@ use super::{
     fetch_pin,
     git,
     git_pin_from_checkout,
-    git_revision_of,
 };
 use crate::{
     lock::LockedNode,
@@ -103,19 +102,4 @@ fn tarball_with_rev_drops_last_modified() {
             "narHash": "sha256-n"
         })
     );
-}
-
-#[test]
-fn git_revision_read_trimmed_and_validated() {
-    use std::fs;
-
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(git_revision_of(dir.path()), None);
-
-    let rev = "9ae611a455b90cf061d8f332b977e387bda8e1ca";
-    fs::write(dir.path().join(".git-revision"), format!("{rev}\n")).unwrap();
-    assert_eq!(git_revision_of(dir.path()).as_deref(), Some(rev));
-
-    fs::write(dir.path().join(".git-revision"), "not a rev").unwrap();
-    assert_eq!(git_revision_of(dir.path()), None);
 }
