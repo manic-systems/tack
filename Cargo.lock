@@ -1647,6 +1647,7 @@ dependencies = [
  "gix-protocol",
  "gix-transport",
  "hmac-sha256",
+ "jiff",
  "misstep",
  "percent-encoding",
  "pound",

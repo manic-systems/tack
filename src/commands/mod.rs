@@ -17,6 +17,7 @@ use crate::{
     report::{
         DedupReport,
         LookReport,
+        TreeReport,
         UpdateReport,
     },
 };
@@ -46,6 +47,7 @@ mod convert;
 mod dedup;
 mod edit;
 mod init;
+mod tree;
 mod undo;
 mod update;
 
@@ -95,6 +97,14 @@ pub fn update_cli(project: &Project, selection: Selection<'_>, accept: bool) -> 
 
 pub fn look_cli(project: &Project, selection: Selection<'_>, verbose: bool) -> Result<()> {
     update::look_cli(project, selection, verbose)
+}
+
+pub fn tree(project: &Project, selection: Selection<'_>) -> Result<TreeReport> {
+    tree::tree(project, selection)
+}
+
+pub fn tree_cli(project: &Project, selection: Selection<'_>) -> Result<()> {
+    tree::tree_cli(project, selection)
 }
 
 pub fn dedup(project: &Project) -> Result<()> {
@@ -235,6 +245,7 @@ mod tests {
                     submodules: false,
                     pin_type:   PinType::Flake,
                     unpack:     None,
+                    dir:        None,
                     follows:    BTreeMap::new(),
                     excludes:   BTreeSet::new(),
                     group:      None,

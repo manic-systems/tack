@@ -31,10 +31,13 @@ use terminal_size::{
 };
 use unicode_width::UnicodeWidthChar as _;
 
-use crate::fetch::{
-    BranchComparison,
-    CommitLog,
-    CompareStatus,
+use crate::{
+    fetch::{
+        BranchComparison,
+        CommitLog,
+        CompareStatus,
+    },
+    render::printable,
 };
 
 #[derive(Clone)]
@@ -259,7 +262,7 @@ impl<'a> CommitLogLines<'a> {
                 "{}{}    {}",
                 self.indent,
                 CommitHash::new(hash).short(),
-                subject.replace(char::is_control, "")
+                printable(subject)
             );
         }
 

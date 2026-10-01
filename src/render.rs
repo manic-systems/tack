@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use jiff::Timestamp;
 use toml_edit::{
     Array,
     Key,
@@ -50,6 +51,21 @@ pub fn short(rev: &str) -> String {
         return rev.to_owned();
     }
     rev.chars().take(7).collect()
+}
+
+/// `YYYY-MM-DD` in UTC, empty for an epoch [`Timestamp`] can't represent
+pub fn date(epoch: u64) -> String {
+    i64::try_from(epoch)
+        .ok()
+        .and_then(|seconds| Timestamp::from_second(seconds).ok())
+        .map(|timestamp| timestamp.strftime("%F").to_string())
+        .unwrap_or_default()
+}
+
+/// strips control characters, so text an upstream controls cannot carry
+/// escapes a terminal would act on
+pub fn printable(text: &str) -> String {
+    text.replace(char::is_control, "")
 }
 
 pub fn added_identity(identity: &str) -> String {

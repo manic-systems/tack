@@ -207,19 +207,7 @@ impl<'a> RawProbe<'a> {
     }
 
     fn fetch(&self, file: ScanFile) -> Result<String, FetchError> {
-        let raw = self.forge.raw_file_url(self.rev, file.as_path());
-        let body = fetch::raw(&raw.url)?;
-        match raw.decoder {
-            Some(decode) => {
-                decode(&body).map_err(|source| {
-                    FetchError::Decode {
-                        what: file.as_path().to_owned(),
-                        source,
-                    }
-                })
-            },
-            None => Ok(body),
-        }
+        fetch::forge_raw_file(&self.forge, self.rev, file.as_path())
     }
 }
 
@@ -383,16 +371,6 @@ impl ScanDocuments {
             submodules: input.submodules,
         });
     }
-}
-
-pub(super) fn try_raw_file(
-    node: &LockedNode,
-    file: ScanFile,
-) -> Result<Option<String>, FetchError> {
-    let Some(probe) = RawProbe::from_locked(node) else {
-        return Ok(None);
-    };
-    probe.fetch(file).map(Some)
 }
 
 /// flake.lock disambiguates same-named nodes as `name_2`

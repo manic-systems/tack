@@ -5,9 +5,13 @@ use std::collections::{
     BTreeSet,
 };
 
-use crate::fetch::{
-    BranchComparison,
-    CommitLog,
+use crate::{
+    fetch::{
+        BranchComparison,
+        CommitLog,
+    },
+    lock::LockedNode,
+    render,
 };
 
 #[derive(Clone, Debug)]
@@ -85,6 +89,85 @@ pub struct PinLook {
 pub struct LookReport {
     pub pins:     Vec<PinLook>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TreeReport {
+    pub pins:     Vec<PinTree>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PinTree {
+    pub name:   String,
+    pub group:  Option<String>,
+    pub lock:   PinLock,
+    pub inputs: Vec<TreeInput>,
+}
+
+#[derive(Clone, Debug)]
+pub enum PinLock {
+    /// until `tack update` locks the pin
+    Missing,
+    Locked(LockedSource),
+    /// a lock type this tack cannot read, by name
+    Unknown(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeInput {
+    pub name:   String,
+    pub target: TreeTarget,
+}
+
+#[derive(Clone, Debug)]
+pub enum TreeTarget {
+    Locked {
+        source: LockedSource,
+        inputs: Vec<TreeInput>,
+    },
+    /// a node whose inputs were already listed under its first appearance
+    Repeated(LockedSource),
+    /// a lock type this tack cannot read, by name
+    Unknown(String),
+    /// a path of input names from the root of the pin's flake.lock
+    FollowsInput(Vec<String>),
+    FollowsPin(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LockedSource {
+    pub url:           String,
+    pub rev:           Option<String>,
+    pub last_modified: Option<u64>,
+}
+
+impl From<&LockedNode> for LockedSource {
+    fn from(node: &LockedNode) -> Self {
+        let url = match *node {
+            LockedNode::Github {
+                ref owner,
+                ref repo,
+                ..
+            } => format!("github:{owner}/{repo}"),
+            LockedNode::Gitlab {
+                ref host,
+                ref owner,
+                ref repo,
+                ..
+            } => format!("gitlab:{owner}/{repo}?host={host}"),
+            LockedNode::Git { ref url, .. } => format!("git+{url}"),
+            LockedNode::Tarball { ref url, .. } => url.clone(),
+            LockedNode::Path { ref path, .. } => format!("path:{path}"),
+            LockedNode::Indirect { ref id, .. } => format!("flake:{id}"),
+            LockedNode::Fixed { ref url, .. } => url.clone().unwrap_or_else(|| "fixed".to_owned()),
+        };
+        Self {
+            url,
+            rev: node.forge_rev().map(render::short),
+            last_modified: node.last_modified().filter(|&modified| modified > 0),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

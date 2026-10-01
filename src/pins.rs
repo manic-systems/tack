@@ -124,6 +124,7 @@ pub struct Input {
     pub submodules: bool,
     pub pin_type:   PinType,
     pub unpack:     Option<Unpack>,
+    pub dir:        Option<String>,
     pub follows:    BTreeMap<String, String>,
     pub excludes:   BTreeSet<String>,
     pub group:      Option<String>,
@@ -195,6 +196,7 @@ impl Input {
             .into_iter()
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
+        let dir = str_field("dir")?;
         let group = str_field("group")?;
         let frozen = bool_field("frozen")?.unwrap_or(false);
         let submodules = bool_field("submodules")?.unwrap_or(false);
@@ -204,6 +206,7 @@ impl Input {
             submodules,
             pin_type,
             unpack,
+            dir: dir.map(str::to_owned),
             follows,
             excludes,
             group: group.map(str::to_owned),

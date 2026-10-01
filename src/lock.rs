@@ -94,6 +94,10 @@ impl LockFile {
         self.passthrough.keys().map(String::as_str)
     }
 
+    pub fn unknown_type(&self, name: &str) -> Option<&str> {
+        self.passthrough.get(name).map(lock_type)
+    }
+
     pub fn unknown_nodes_with_values(&self) -> impl Iterator<Item = (&str, &Value)> {
         self.passthrough
             .iter()
@@ -137,15 +141,49 @@ impl FlakeLock {
             if name == root {
                 return None;
             }
-            Some((name.as_str(), node.locked.as_ref()?))
+            Some((name.as_str(), node.locked.known()?))
         })
+    }
+
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
+    pub fn locked(&self, node: &str) -> Option<&LockedNode> {
+        self.nodes.get(node)?.locked.known()
+    }
+
+    pub fn unknown_type(&self, node: &str) -> Option<&str> {
+        match self.nodes.get(node)?.locked {
+            LockedEntry::Unknown(ref kind) => Some(kind),
+            LockedEntry::Absent | LockedEntry::Known(_) => None,
+        }
+    }
+
+    pub fn inputs(&self, node: &str) -> impl Iterator<Item = (&str, &FlakeInputRef)> {
+        self.nodes
+            .get(node)
+            .into_iter()
+            .flat_map(|flake_node| &flake_node.inputs)
+            .map(|(name, input)| (name.as_str(), input))
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct FlakeNode {
     #[serde(default, deserialize_with = "deserialize_locked_node")]
-    locked: Option<LockedNode>,
+    locked: LockedEntry,
+    #[serde(default)]
+    inputs: BTreeMap<String, FlakeInputRef>,
+}
+
+/// a lock node's input names either another node or, as a list, the input
+/// path it follows from the root
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum FlakeInputRef {
+    Node(String),
+    Follows(Vec<String>),
 }
 
 type ExtraFields = BTreeMap<String, Value>;
@@ -570,12 +608,40 @@ fn default_root() -> String {
     "root".to_owned()
 }
 
-fn deserialize_locked_node<'de, D>(deserializer: D) -> Result<Option<LockedNode>, D::Error>
+#[derive(Debug, Default)]
+enum LockedEntry {
+    #[default]
+    Absent,
+    Known(LockedNode),
+    /// keeps the type, so a reader can name what it skipped
+    Unknown(String),
+}
+
+impl LockedEntry {
+    const fn known(&self) -> Option<&LockedNode> {
+        match *self {
+            Self::Known(ref node) => Some(node),
+            Self::Absent | Self::Unknown(_) => None,
+        }
+    }
+}
+
+fn lock_type(value: &Value) -> &str {
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+}
+
+fn deserialize_locked_node<'de, D>(deserializer: D) -> Result<LockedEntry, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let locked = Option::<Value>::deserialize(deserializer)?;
-    Ok(locked.and_then(|value| LockedNode::from_value(value).ok()))
+    let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+        return Ok(LockedEntry::Absent);
+    };
+    let kind = lock_type(&value).to_owned();
+    Ok(LockedNode::from_value(value).map_or(LockedEntry::Unknown(kind), LockedEntry::Known))
 }
 
 fn deserialize_host<'de, D>(deserializer: D) -> Result<String, D::Error>

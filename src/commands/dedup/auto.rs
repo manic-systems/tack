@@ -9,14 +9,12 @@ use std::{
     mem::discriminant,
 };
 
-use super::scan::{
-    strip_disambiguator,
-    try_raw_file,
-};
+use super::scan::strip_disambiguator;
 use crate::{
     commands::tolerate,
     dispatcher,
     fetch::{
+        self,
         CompareStatus,
         compare_planner::CompareSession,
     },
@@ -237,7 +235,7 @@ fn scan_input(
     let node = lock.get(&input.name)?;
     let path = vec![input.name.clone()];
     let mut batch = ScanBatch::default();
-    let (maybe_raw, maybe_cause) = tolerate(try_raw_file(node, ScanFile::FlakeLock));
+    let (maybe_raw, maybe_cause) = tolerate(fetch::raw_file(node, ScanFile::FlakeLock.as_path()));
     if let Some(cause) = maybe_cause {
         batch
             .diagnostics

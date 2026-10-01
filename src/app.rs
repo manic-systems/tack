@@ -49,6 +49,12 @@ pub fn run(cmd: Command) -> misstep::Result<()> {
                 verbose,
             )
         },
+        Command::Tree { exclude, names } => {
+            commands::tree_cli(&project, commands::Selection {
+                names:   &names,
+                exclude: &exclude,
+            })
+        },
         Command::Dedup => commands::dedup(&project),
         Command::Undo { list } => commands::undo(&project, list),
         Command::Redo => commands::redo(&project),

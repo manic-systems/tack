@@ -52,6 +52,8 @@ tack update [names|groups...] [--accept] [--exclude <names>]...
                                       fetch latest, rewrite lock
 tack look [names|groups...] [--verbose|-v] [--exclude <names>]...
                                       report pins with newer upstream revs
+tack tree [names|groups...] [--exclude <names>]...
+                                      show each pin's locked inputs and follows
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                       [--dir <d>] [--submodules] [--follows c=p]...
 tack rm <name>
@@ -181,6 +183,11 @@ just one side:
 [inputs.bar]
 follows = { "flake:systems" = "systems", "tack:nixpkgs" = "nixpkgs" }
 ```
+
+`tack tree` prints every pin's flake inputs as the resolver wires them. follows
+fold onto one line per pin, so what stands out are the inputs that bring their
+own copy, along with any other pins that pull in that same copy, which are the
+candidates for an `[all_follow]` rule.
 
 ## laziness
 

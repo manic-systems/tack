@@ -26,6 +26,10 @@ pub enum Command {
         names:   Vec<String>,
         verbose: bool,
     },
+    Tree {
+        exclude: Vec<String>,
+        names:   Vec<String>,
+    },
     Add(AddArgs),
     Rm {
         name: String,
@@ -96,6 +100,14 @@ enum Cli {
         #[pound(long)]
         exclude: Vec<String>,
         /// pins or groups to inspect (default: all)
+        names:   Vec<String>,
+    },
+    /// show each pin's locked inputs and what they follow
+    Tree {
+        /// pins or groups to leave out (repeatable, or comma-separated)
+        #[pound(long)]
+        exclude: Vec<String>,
+        /// pins or groups to show (default: all)
         names:   Vec<String>,
     },
     /// add a pin
@@ -211,7 +223,11 @@ impl Command {
                     format!("alias {name}")
                 }
             },
-            Self::Look { .. } | Self::Dedup | Self::Undo { .. } | Self::Redo => String::new(),
+            Self::Look { .. }
+            | Self::Tree { .. }
+            | Self::Dedup
+            | Self::Undo { .. }
+            | Self::Redo => String::new(),
         }
     }
 }
@@ -252,6 +268,12 @@ impl From<Cli> for Command {
                     names,
                     exclude: split_list(&exclude),
                     verbose,
+                }
+            },
+            Cli::Tree { exclude, names } => {
+                Self::Tree {
+                    names,
+                    exclude: split_list(&exclude),
                 }
             },
             Cli::Add {

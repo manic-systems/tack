@@ -37,6 +37,7 @@ gix-transport = { default-features = false, features = [
   "http-client",
 ], version = "0.57.1" }
 hmac-sha256 = "1.1.14"
+jiff = "0.2.28"
 misstep = { features = [ "pretty" ], version = "0.3.0" }
 percent-encoding = "2.3.2"
 pound = "0.1.4"

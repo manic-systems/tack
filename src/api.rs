@@ -14,6 +14,7 @@ use crate::{
     report::{
         DedupReport,
         LookReport,
+        TreeReport,
         UpdateReport,
     },
 };
@@ -48,6 +49,7 @@ pub enum CommandOutcome {
     Init,
     Update(UpdateReport),
     Look(LookReport),
+    Tree(TreeReport),
     Add,
     Rm,
     Alias,
@@ -143,6 +145,13 @@ impl<'a> Tack<'a> {
                 let report = commands::look(self.project, selection, verbose)?;
                 Ok(unrecorded(CommandOutcome::Look(report)))
             },
+            Command::Tree { exclude, names } => {
+                let report = commands::tree(self.project, commands::Selection {
+                    names:   &names,
+                    exclude: &exclude,
+                })?;
+                Ok(unrecorded(CommandOutcome::Tree(report)))
+            },
             Command::Add(args) => {
                 self.recorded_as(label, CommandOutcome::Add, || {
                     commands::add(self.project, &args)
@@ -215,6 +224,7 @@ fn status_for(outcome: &CommandOutcome) -> CommandStatus {
         CommandOutcome::Update(ref report) => update_status(report),
         CommandOutcome::Init
         | CommandOutcome::Look(_)
+        | CommandOutcome::Tree(_)
         | CommandOutcome::Add
         | CommandOutcome::Rm
         | CommandOutcome::Alias

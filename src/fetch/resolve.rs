@@ -3,6 +3,7 @@
 use std::{
     borrow::Cow,
     fs,
+    io::ErrorKind,
     os::unix::fs::MetadataExt as _,
     path::{
         Path,
@@ -23,6 +24,7 @@ use ureq::{
 };
 
 use super::{
+    FetchError,
     FetchResult,
     archive::{
         detect_tar_format,
@@ -47,6 +49,7 @@ use crate::{
     source::{
         Source,
         clone_url,
+        forge::Forge,
     },
 };
 
@@ -524,6 +527,55 @@ fn git_revision_of(root: &Path) -> Option<String> {
 
 pub fn raw(url: &str) -> FetchResult<String> {
     HttpClient::global().raw_text(url)
+}
+
+/// [`None`] when the locked tree has no file at `path`
+pub fn locked_file(node: &LockedNode, path: &str) -> Result<Option<String>> {
+    if let (Some(forge), Some(rev)) = (Forge::from_locked(node), node.forge_rev()) {
+        match forge_raw_file(&forge, rev, path) {
+            Ok(raw) => return Ok(Some(raw)),
+            Err(FetchError::NotFound { .. }) if forge.authoritative() => return Ok(None),
+            // ssh remotes and private repos have no raw file url that answers
+            Err(_) => {},
+        }
+    }
+    let scratch = tempfile::tempdir()?;
+    let root = fetch_locked_tree_into(node, scratch.path())?.canonicalize()?;
+    let file = match root.join(path).canonicalize() {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("resolve {path}")),
+    };
+    if !file.starts_with(&root) {
+        bail!("{path} links outside the locked tree");
+    }
+    fs::read_to_string(&file)
+        .map(Some)
+        .with_context(|| format!("read {path}"))
+}
+
+/// [`None`] when no forge serves raw files for `node`
+pub fn raw_file(node: &LockedNode, path: &str) -> FetchResult<Option<String>> {
+    let (Some(forge), Some(rev)) = (Forge::from_locked(node), node.forge_rev()) else {
+        return Ok(None);
+    };
+    forge_raw_file(&forge, rev, path).map(Some)
+}
+
+pub fn forge_raw_file(forge: &Forge, rev: &str, path: &str) -> FetchResult<String> {
+    let raw_file = forge.raw_file_url(rev, path);
+    let body = raw(&raw_file.url)?;
+    match raw_file.decoder {
+        Some(decode) => {
+            decode(&body).map_err(|source| {
+                FetchError::Decode {
+                    what: path.to_owned(),
+                    source,
+                }
+            })
+        },
+        None => Ok(body),
+    }
 }
 
 #[cfg(test)]
