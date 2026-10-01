@@ -30,7 +30,10 @@ use crate::{
         ScanDiagnostic,
         ScanFile,
     },
-    source::id::SourceId,
+    source::{
+        forge::Forge,
+        id::SourceId,
+    },
 };
 
 const AUTO_DEDUP_SCAN_IN_FLIGHT: usize = 16;
@@ -240,6 +243,15 @@ fn scan_input(
         batch
             .diagnostics
             .insert(ScanDiagnostic::fetch(&path, ScanFile::FlakeLock, cause));
+    } else if maybe_raw.is_none()
+        && let Some(forge) = Forge::from_locked(node)
+        && fetch::forge_miss_untrusted(&forge)
+    {
+        batch.diagnostics.insert(ScanDiagnostic::private_repo(
+            &path,
+            ScanFile::FlakeLock,
+            forge.base(),
+        ));
     }
     let Some(raw_body) = maybe_raw.flatten() else {
         return (!batch.diagnostics.is_empty()).then_some(batch);

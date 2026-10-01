@@ -652,8 +652,16 @@ fn commit_url(node: &LockedNode) -> Option<(String, &str)> {
     Some((url, rev.as_str()))
 }
 
-pub fn raw(url: &str) -> FetchResult<String> {
-    HttpClient::global().raw_text(url)
+fn raw(url: &str, credential_host: Option<&str>) -> FetchResult<String> {
+    HttpClient::global().raw_text(url, credential_host)
+}
+
+/// anonymous 404s from an authoritative forge also mean a private repo
+pub fn forge_miss_untrusted(forge: &Forge) -> bool {
+    forge.authoritative()
+        && forge
+            .credential_host()
+            .is_none_or(|host| token_for_host(host).is_none())
 }
 
 /// [`None`] when the locked tree has no file at `path`
@@ -661,7 +669,7 @@ pub fn locked_file(node: &LockedNode, path: &str) -> Result<Option<String>> {
     if let (Some(forge), Some(rev)) = (Forge::from_locked(node), node.forge_rev()) {
         match forge_raw_file(&forge, rev, path) {
             Ok(raw) => return Ok(Some(raw)),
-            Err(FetchError::NotFound { .. }) if forge.authoritative() => return Ok(None),
+            Err(FetchError::NotFound { .. }) if !forge_miss_untrusted(&forge) => return Ok(None),
             // ssh remotes and private repos have no raw file url that answers
             Err(_) => {},
         }
@@ -691,7 +699,7 @@ pub fn raw_file(node: &LockedNode, path: &str) -> FetchResult<Option<String>> {
 
 pub fn forge_raw_file(forge: &Forge, rev: &str, path: &str) -> FetchResult<String> {
     let raw_file = forge.raw_file_url(rev, path);
-    let body = raw(&raw_file.url)?;
+    let body = raw(&raw_file.url, forge.credential_host())?;
     match raw_file.decoder {
         Some(decode) => {
             decode(&body).map_err(|source| {

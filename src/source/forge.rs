@@ -3,6 +3,7 @@
 use std::error::Error;
 
 use crate::{
+    fetch::percent_encode,
     lock::LockedNode,
     source::{
         gitlab,
@@ -32,7 +33,7 @@ static GITHUB_RAW_SCHEME: HostScheme = HostScheme {
 
 static GITLAB_SCHEME: HostScheme = HostScheme {
     matches: host::is_gitlab,
-    build:   |base, rev, file| format!("{base}/-/raw/{rev}/{file}"),
+    build:   gitlab_api_raw_url,
     decoder: None,
 };
 
@@ -68,14 +69,15 @@ static DEFAULT_SCHEME: HostScheme = HostScheme {
 };
 
 pub struct Forge {
-    base:          String,
-    authoritative: bool,
-    scheme:        &'static HostScheme,
+    base:            String,
+    authoritative:   bool,
+    credential_host: Option<String>,
+    scheme:          &'static HostScheme,
 }
 
 impl Forge {
     pub fn from_locked(node: &LockedNode) -> Option<Self> {
-        let (base, authoritative, scheme) = match *node {
+        let (base, authoritative, credential_host, scheme) = match *node {
             LockedNode::Github {
                 ref owner,
                 ref repo,
@@ -84,6 +86,7 @@ impl Forge {
                 (
                     format!("https://raw.githubusercontent.com/{owner}/{repo}"),
                     true,
+                    Some("github.com".to_owned()),
                     &GITHUB_RAW_SCHEME,
                 )
             },
@@ -96,6 +99,7 @@ impl Forge {
                 (
                     format!("https://{host}/{owner}/{repo}"),
                     true,
+                    Some(host.clone()),
                     &GITLAB_SCHEME,
                 )
             },
@@ -104,12 +108,16 @@ impl Forge {
                     (
                         format!("https://{}/{}/{}", repo.host, repo.owner, repo.repo),
                         false,
+                        Some(repo.host),
                         &GITLAB_SCHEME,
                     )
                 } else {
                     let base = url.strip_suffix(".git").unwrap_or(url).to_owned();
                     let scheme = scheme_for_git_url(&base);
-                    (base, false, scheme)
+                    let credential_host = base
+                        .starts_with("https://")
+                        .then(|| host_of(&base).to_owned());
+                    (base, false, credential_host, scheme)
                 }
             },
             LockedNode::Tarball { .. }
@@ -120,12 +128,21 @@ impl Forge {
         Some(Self {
             base,
             authoritative,
+            credential_host,
             scheme,
         })
     }
 
     pub const fn authoritative(&self) -> bool {
         self.authoritative
+    }
+
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    pub fn credential_host(&self) -> Option<&str> {
+        self.credential_host.as_deref()
     }
 
     pub fn raw_file_url(&self, rev: &str, file: &str) -> RawFile {
@@ -143,6 +160,21 @@ fn scheme_for_git_url(base: &str) -> &'static HostScheme {
         .copied()
         .find(|scheme| (scheme.matches)(host))
         .unwrap_or(&DEFAULT_SCHEME)
+}
+
+fn gitlab_api_raw_url(base: &str, rev: &str, file: &str) -> String {
+    let host = host_of(base);
+    let project = base
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split_once('/'))
+        .map_or("", |(_, project)| project);
+    format!(
+        "https://{host}/api/v4/projects/{}/repository/files/{}/raw?ref={}",
+        percent_encode(project),
+        percent_encode(file),
+        percent_encode(rev),
+    )
 }
 
 fn host_of(base: &str) -> &str {

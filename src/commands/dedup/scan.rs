@@ -199,6 +199,13 @@ impl<'a> RawProbe<'a> {
                 diagnostics,
             }
         } else {
+            if all_missing && fetch::forge_miss_untrusted(&self.forge) {
+                diagnostics.insert(ScanDiagnostic::private_repo(
+                    path,
+                    ScanFile::FlakeLock,
+                    self.forge.base(),
+                ));
+            }
             RawProbeOutcome {
                 documents: Some(documents),
                 diagnostics,

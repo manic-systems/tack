@@ -6,6 +6,8 @@ use std::fmt::{
     Formatter,
 };
 
+use crate::render::printable;
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ScanDiagnostic {
     path: Vec<String>,
@@ -16,6 +18,18 @@ pub struct ScanDiagnostic {
 impl ScanDiagnostic {
     pub fn fetch<E: Display>(path: &[String], file: ScanFile, error: E) -> Self {
         Self::new(path, file, ScanDiagnosticKind::Fetch(format!("{error:#}")))
+    }
+
+    pub fn private_repo(path: &[String], file: ScanFile, base: &str) -> Self {
+        Self::new(
+            path,
+            file,
+            ScanDiagnosticKind::Fetch(format!(
+                "{} not readable anonymously, the repository may be private (set GITHUB_TOKEN or \
+                 GH_TOKEN, GITLAB_TOKEN for gitlab, or TACK_NIX_CONF_TOKENS=1)",
+                printable(base)
+            )),
+        )
     }
 
     pub fn parse<E: Display>(path: &[String], file: ScanFile, error: E) -> Self {

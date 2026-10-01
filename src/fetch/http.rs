@@ -227,12 +227,17 @@ impl HttpClient {
         })
     }
 
-    pub(super) fn raw_text(self, url: &str) -> FetchResult<String> {
-        let mut resp = self
-            .get(url)
-            .call()
-            .map_err(|err| FetchError::from_ureq(err, url))?;
-        read_ok_body(&mut resp, url)
+    pub(super) fn raw_text(self, url: &str, credential_host: Option<&str>) -> FetchResult<String> {
+        let attempt = |credential| {
+            let mut resp = Self::with_credential(self.get(url), credential)
+                .call()
+                .map_err(|err| FetchError::from_ureq(err, url))?;
+            read_ok_body(&mut resp, url)
+        };
+        credential_host.map_or_else(
+            || attempt(Credential::Anonymous),
+            |host| with_credential_fallback(host, true, attempt),
+        )
     }
 }
 
