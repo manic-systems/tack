@@ -448,6 +448,17 @@ impl PinRun<'_> {
             None => tag::follow(&input.name, input.tag.as_ref(), &localized.url),
         };
         let mut resolution = match target {
+            // a fixed pin's asset only changes with its tag
+            Ok(followed)
+                if input.pin_type == PinType::Fixed
+                    && !stale
+                    && old.is_some()
+                    && followed.tag.is_some()
+                    && followed.tag.as_deref() == lock.tag(&input.name) =>
+            {
+                PinResolution::unchanged(localized.warning)
+                    .tagged(lock.tag(&input.name), followed.tag)
+            },
             Ok(followed) => {
                 classify(
                     input,
