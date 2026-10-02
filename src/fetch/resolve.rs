@@ -44,10 +44,7 @@ use super::{
     github,
     github_commits,
     gitlab,
-    http::{
-        HttpClient,
-        link_with_rel,
-    },
+    http::HttpClient,
     time::epoch_from_http_date,
 };
 use crate::{
@@ -193,12 +190,11 @@ pub(super) fn current_rev(source: &Source) -> Result<String> {
         },
         Source::Tarball { ref url } => {
             let http = HttpClient::global();
-            let resp = http
-                .head(url.as_str())
-                .call()
-                .or_else(|_| http.get(url.as_str()).call().map_err(Box::new))
+            let (resp, immutable) = http
+                .through_redirects(url, true)
+                .or_else(|_| http.through_redirects(url, false))
                 .with_context(|| format!("probe {url}"))?;
-            Ok(immutable_url_of(&resp, url))
+            Ok(immutable_url_of(&resp, immutable, url))
         },
         Source::Path { ref path } => Ok(path.clone()),
     }
@@ -242,11 +238,10 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<FetchedPin> 
     if !url.starts_with("https://") && !url.starts_with("http://") {
         user_bail!("fixed pins require a plain http(s) URL, got: {url}");
     }
-    let mut resp = HttpClient::global()
-        .get(url)
-        .call()
+    let (mut resp, immutable) = HttpClient::global()
+        .through_redirects(url, false)
         .with_context(|| format!("GET {url}"))?;
-    let immutable_url = immutable_url_of(&resp, url);
+    let immutable_url = immutable_url_of(&resp, immutable, url);
     let sha256 = nar::hash_reader(resp.body_mut().as_reader())
         .with_context(|| format!("read body of {url}"))?;
 
@@ -388,11 +383,10 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
             git_pin_from_checkout(resolved.as_ref(), checkout, submodules)
         },
         Source::Tarball { ref url } => {
-            let mut resp = HttpClient::global()
-                .get(url.as_str())
-                .call()
+            let (mut resp, immutable) = HttpClient::global()
+                .through_redirects(url.as_str(), false)
                 .with_context(|| format!("GET {url}"))?;
-            let immutable_url = immutable_url_of(&resp, url);
+            let immutable_url = immutable_url_of(&resp, immutable, url);
             let last_modified = resp
                 .headers()
                 .get("Last-Modified")
@@ -559,29 +553,27 @@ fn git_pin_from_checkout(
     Ok(FetchedPin::rev(node, checkout.rev).with_tree(checkout.dir, root))
 }
 
-fn immutable_url_of(resp: &ureq_http::Response<Body>, fallback: &str) -> String {
-    resp.headers()
-        .get("Link")
-        .and_then(|header| header.to_str().ok())
-        .and_then(parse_link_immutable)
-        .unwrap_or_else(|| {
-            let uri = resp.get_uri().to_string();
-            // a redirect to another host is usually a signed download link that
-            // expires, as GitHub release assets are, so keep what was asked for
-            if uri.is_empty() || host_of(&uri) != host_of(fallback) {
-                fallback.to_owned()
-            } else {
-                uri
-            }
-        })
+fn immutable_url_of(
+    resp: &ureq_http::Response<Body>,
+    immutable: Option<String>,
+    fallback: &str,
+) -> String {
+    if let Some(url) = immutable {
+        return url;
+    }
+
+    let uri = resp.get_uri().to_string();
+    // a redirect to another host is usually a signed download link that
+    // expires, as GitHub release assets are, so keep what was asked for
+    if uri.is_empty() || host_of(&uri) != host_of(fallback) {
+        fallback.to_owned()
+    } else {
+        uri
+    }
 }
 
 fn host_of(url: &str) -> Option<&str> {
     url.split_once("://")?.1.split(['/', '?', '#']).next()
-}
-
-fn parse_link_immutable(header: &str) -> Option<String> {
-    link_with_rel(header, &["immutable", "immutable_link"])
 }
 
 /// embedded `.git-revision`, if present and a plausible git object id

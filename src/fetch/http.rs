@@ -21,6 +21,7 @@ use ureq::{
             AUTHORIZATION,
             CONTENT_TYPE,
             LINK,
+            LOCATION,
             USER_AGENT,
         },
     },
@@ -61,6 +62,8 @@ pub(super) fn agent() -> &'static Agent {
     })
 }
 
+const MAX_REDIRECT_HOPS: u32 = 10;
+
 fn read_ok_body(resp: &mut Response<Body>, what: &str) -> FetchResult<String> {
     if !resp.status().is_success() {
         return Err(FetchError::from_response(resp, what));
@@ -95,8 +98,39 @@ impl HttpClient {
         Self::with_tack_headers(self.agent.get(url))
     }
 
-    pub(super) fn head(self, url: &str) -> RequestBuilder<WithoutBody> {
-        Self::with_tack_headers(self.agent.head(url))
+    /// the final response plus the first immutable `Link` from any hop, because
+    /// nixos channels send it on the redirect, which ureq's own following hides
+    pub(super) fn through_redirects(
+        self,
+        url: &str,
+        head: bool,
+    ) -> FetchResult<(Response<Body>, Option<String>)> {
+        let mut current = url.to_owned();
+        let mut immutable = None;
+        for _ in 0..MAX_REDIRECT_HOPS {
+            let request = if head {
+                self.agent.head(&current)
+            } else {
+                self.agent.get(&current)
+            };
+            let resp = Self::with_tack_headers(request)
+                .config()
+                .max_redirects(0)
+                .build()
+                .call()
+                .map_err(|err| FetchError::from_ureq(err, &current))?;
+            immutable = immutable.or_else(|| link_immutable_of(&resp));
+            let Some(location) = redirect_location(&resp) else {
+                return Ok((resp, immutable));
+            };
+            let Some(next) = resolve_location(&current, &location) else {
+                return Ok((resp, immutable));
+            };
+            current = next;
+        }
+        Err(FetchError::Transport(format!(
+            "too many redirects probing {url}"
+        )))
     }
 
     fn post(self, url: &str) -> RequestBuilder<WithBody> {
@@ -343,4 +377,42 @@ pub(super) fn link_with_rel(header: &str, rels: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+fn link_immutable_of(resp: &Response<Body>) -> Option<String> {
+    resp.headers()
+        .get(LINK)
+        .and_then(|header| header.to_str().ok())
+        .and_then(|header| link_with_rel(header, &["immutable", "immutable_link"]))
+}
+
+/// [`None`] when the response isn't a redirect or names nowhere to go
+fn redirect_location(resp: &Response<Body>) -> Option<String> {
+    resp.status().is_redirection().then(|| {
+        resp.headers()
+            .get(LOCATION)
+            .and_then(|header| header.to_str().ok())
+            .map(str::to_owned)
+    })?
+}
+
+/// `http::Uri` carries no reference resolution of its own
+fn resolve_location(base: &str, location: &str) -> Option<String> {
+    if location.starts_with("https://") || location.starts_with("http://") {
+        return Some(location.to_owned());
+    }
+    let (scheme, rest) = base.split_once("://")?;
+    if location.starts_with("//") {
+        return Some(format!("{scheme}:{location}"));
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if let Some(path) = location.strip_prefix('/') {
+        return Some(format!("{scheme}://{authority}{path}"));
+    }
+    let stem = base.split(['?', '#']).next().unwrap_or(base);
+    if location.starts_with('?') {
+        return Some(format!("{stem}{location}"));
+    }
+    let dir = stem.rsplit_once('/').map_or(stem, |(dir, _)| dir);
+    Some(format!("{dir}/{location}"))
 }
