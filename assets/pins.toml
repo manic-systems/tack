@@ -42,4 +42,6 @@
 #                   tags are skipped, needs a github, gitlab or network git url with
 #                   no ref or rev, not file://, or for a fixed pin a release
 #                   download url naming the asset with {tag} or {version}
+#   tags_from       fixed-only repo url or http(s) page to read tag's tags from, for an
+#                   asset that isn't a release download
 [inputs]

@@ -75,12 +75,40 @@ impl TagTemplate {
             .trim_start_matches(|ch: char| !ch.is_ascii_digit())
     }
 
+    /// the tags in `text`, skipping matches that `runs_into` from either side
+    fn scan(&self, text: &str) -> Vec<String> {
+        let mut found = text
+            .match_indices(self.prefix.as_str())
+            .filter_map(|(at, _)| {
+                let (before, from_prefix) = text.split_at(at);
+                if runs_into(before.chars().rev(), self.prefix.is_empty()) {
+                    return None;
+                }
+                let rest = from_prefix.strip_prefix(self.prefix.as_str())?;
+                let run = rest
+                    .find(|ch: char| !(ch.is_ascii_digit() || SEPARATORS.contains(&ch)))
+                    .unwrap_or(rest.len());
+                (1..=run).rev().find_map(|len| {
+                    let (middle, past_middle) = rest.split_at(len);
+                    let after = past_middle.strip_prefix(self.suffix.as_str())?;
+                    let tag = format!("{}{middle}{}", self.prefix, self.suffix);
+                    let fits = !runs_into(after.chars(), self.suffix.is_empty())
+                        && self.version(&tag).is_some();
+                    fits.then_some(tag)
+                })
+            })
+            .collect::<Vec<_>>();
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+
     fn version(&self, tag: &str) -> Option<Vec<u64>> {
         let middle = tag
             .strip_prefix(self.prefix.as_str())?
             .strip_suffix(self.suffix.as_str())?;
         middle
-            .split(['.', '-', '_'])
+            .split(SEPARATORS)
             .map(|part| {
                 let numeric = !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
                 numeric.then(|| part.parse::<u64>().ok()).flatten()
@@ -89,26 +117,76 @@ impl TagTemplate {
     }
 }
 
+/// where a fixed pin reads its tags, a repo or an http(s) page
+#[derive(Clone, Debug)]
+pub enum TagSource {
+    Repo(Source),
+    Page(String),
+}
+
+impl TagSource {
+    pub fn parse(name: &str, expanded: &str) -> Result<Self> {
+        match expanded.parse::<Source>()? {
+            Source::Tarball { url } => Ok(Self::Page(url)),
+            Source::Path { .. } => {
+                user_bail!("input '{name}': tags_from needs a repo or an http(s) page, not a path")
+            },
+            Source::Github { .. } | Source::Gitlab { .. } | Source::Git { .. } => {
+                followable(name, expanded).map(Self::Repo)
+            },
+        }
+    }
+
+    fn tags(&self, template: &TagTemplate) -> Result<Vec<String>> {
+        match *self {
+            Self::Repo(ref source) => fetch::list_tags(source),
+            Self::Page(ref url) => Ok(template.scan(&fetch::raw(url, None)?)),
+        }
+    }
+}
+
+/// a tag template and where its tags come from, [`None`] for the url's own repo
+#[derive(Clone, Debug)]
+pub struct TagFollow {
+    pub template: TagTemplate,
+    pub from:     Option<TagSource>,
+}
+
+const SEPARATORS: [char; 3] = ['.', '-', '_'];
+
+/// whether `beyond` continues a match, with a letter or digit, or at an `open`
+/// edge with a separator and digit
+fn runs_into(mut beyond: impl Iterator<Item = char>, open: bool) -> bool {
+    match beyond.next() {
+        Some(ch) if ch.is_alphanumeric() => true,
+        Some(ch) if open && SEPARATORS.contains(&ch) => {
+            beyond.next().is_some_and(|next| next.is_ascii_digit())
+        },
+        Some(_) | None => false,
+    }
+}
+
 pub struct Followed<'url> {
     pub url: Cow<'url, str>,
     pub tag: Option<String>,
 }
 
-/// rewrites `expanded` to the newest tag `template` matches, or passes it
+/// rewrites `expanded` to the newest tag `follow` matches, or passes it
 /// through untouched for a pin with no template
 pub fn follow<'url>(
     name: &str,
-    template: Option<&TagTemplate>,
+    follow: Option<&TagFollow>,
     expanded: &'url str,
 ) -> Result<Followed<'url>> {
-    let Some(tag_template) = template else {
+    let Some(tagged) = follow else {
         return Ok(Followed {
             url: Cow::Borrowed(expanded),
             tag: None,
         });
     };
+    let tag_template = &tagged.template;
     if names_asset(expanded) {
-        return follow_asset(name, tag_template, expanded);
+        return follow_asset(name, tagged, expanded);
     }
     let source = followable(name, expanded)?;
     let tags = fetch::list_tags(&source)?;
@@ -188,8 +266,12 @@ pub fn asset_repo(name: &str, expanded: &str) -> Result<Source> {
     format!("git+https://{repo}").parse::<Source>()
 }
 
-fn follow_asset(name: &str, template: &TagTemplate, expanded: &str) -> Result<Followed<'static>> {
-    let tags = fetch::list_tags(&asset_repo(name, expanded)?)?;
+fn follow_asset(name: &str, follow: &TagFollow, expanded: &str) -> Result<Followed<'static>> {
+    let template = &follow.template;
+    let tags = match follow.from {
+        Some(ref from) => from.tags(template)?,
+        None => fetch::list_tags(&asset_repo(name, expanded)?)?,
+    };
     let ranked = template.ranked(&tags);
     if ranked.is_empty() {
         user_bail!("input '{name}': no tag matches {template}");

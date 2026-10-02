@@ -57,7 +57,7 @@ tack tree [names|groups...] [--exclude <names>]...
 tack verify [--base <git-ref>]       check locked commits against declared signers
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                       [--dir <d>] [--submodules] [--follows c=p]...
-                      [--tag <template>]
+                      [--tag <template> [--tags-from <url>]]
 tack rm <name>
 tack freeze <names|groups...>        hold pins at their locked rev
 tack unfreeze <names|groups...>      let update move them again
@@ -159,6 +159,19 @@ the url must be a GitHub, Forgejo, Gitea or GitLab release download, since its
 tags come from that repo. tack takes the newest matching tag whose release
 already has the asset, so a release tagged before its uploads finish is
 skipped.
+
+an asset hosted anywhere else reads its tags from `tags_from`, either a repo
+url or an http(s) page such as a download listing, where every name the
+template matches counts as a tag
+
+```toml
+[inputs.linphone]
+url = "https://download.linphone.org/releases/linux/app/Linphone-{version}-x86_64.AppImage"
+type = "fixed"
+unpack = "file"
+tag = "Linphone-{version}-x86_64.AppImage"
+tags_from = "https://download.linphone.org/releases/linux/app/"
+```
 
 ## groups
 

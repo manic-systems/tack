@@ -42,6 +42,8 @@ use crate::{
     },
     tag::{
         self,
+        TagFollow,
+        TagSource,
         TagTemplate,
     },
 };
@@ -152,7 +154,7 @@ pub struct Input {
     pub keep_inputs: BTreeSet<String>,
     pub signers:     Vec<SignerName>,
     pub patches:     Vec<PatchSource>,
-    pub tag:         Option<TagTemplate>,
+    pub tag:         Option<TagFollow>,
     pub group:       Option<String>,
     pub frozen:      bool,
 }
@@ -237,7 +239,8 @@ impl Input {
         if pin_type == PinType::Fixed && !patches.is_empty() {
             user_bail!("input '{name}': patches are not valid for type = \"fixed\"");
         }
-        let tag = tag_field(name, str_field("tag")?, pin_type, url, shorturls)?;
+        let tags_from = str_field("tags_from")?;
+        let tag = tag_field(name, str_field("tag")?, tags_from, pin_type, url, shorturls)?;
         let group = str_field("group")?;
         let frozen = bool_field("frozen")?.unwrap_or(false);
         let submodules = bool_field("submodules")?.unwrap_or(false);
@@ -261,17 +264,22 @@ impl Input {
     }
 }
 
-/// a pin's tag template, checked against the url it follows
+/// a pin's tag template and where its tags come from, checked against the
+/// url it follows
 fn tag_field(
     name: &str,
     raw: Option<&str>,
+    raw_from: Option<&str>,
     pin_type: PinType,
     url: &str,
     shorturls: &ShortUrls<'_>,
-) -> Result<Option<TagTemplate>> {
+) -> Result<Option<TagFollow>> {
     let Some(template) = raw else {
         if pin_type == PinType::Fixed && tag::names_asset(url) {
             user_bail!("input '{name}': {{tag}} in a fixed pin's url needs a `tag` template");
+        }
+        if raw_from.is_some() {
+            user_bail!("input '{name}': tags_from needs a `tag` template");
         }
         return Ok(None);
     };
@@ -279,12 +287,29 @@ fn tag_field(
         .parse::<TagTemplate>()
         .with_context(|| format!("input '{name}'"))?;
     let expanded = shorturls.expand(url)?;
-    if pin_type == PinType::Fixed {
-        tag::asset_repo(name, &expanded)?;
-    } else {
-        tag::followable(name, &expanded)?;
-    }
-    Ok(Some(parsed))
+    let from = match (pin_type, raw_from) {
+        (PinType::Fixed, Some(from)) => {
+            if !tag::names_asset(&expanded) {
+                user_bail!("input '{name}': tags_from needs {{tag}} or {{version}} in the url");
+            }
+            Some(TagSource::parse(name, &shorturls.expand(from)?)?)
+        },
+        (PinType::Fixed, None) => {
+            tag::asset_repo(name, &expanded)?;
+            None
+        },
+        (PinType::Flake | PinType::Fetch, Some(_)) => {
+            user_bail!("input '{name}': tags_from is only valid for type = \"fixed\"")
+        },
+        (PinType::Flake | PinType::Fetch, None) => {
+            tag::followable(name, &expanded)?;
+            None
+        },
+    };
+    Ok(Some(TagFollow {
+        template: parsed,
+        from,
+    }))
 }
 
 fn follows_table(name: &str, item: Option<&Item>) -> Result<BTreeMap<String, String>> {
@@ -730,6 +755,7 @@ pub struct AddInputOpts<'a> {
     pub submodules: bool,
     pub follows:    &'a [(String, String)],
     pub tag:        Option<&'a TagTemplate>,
+    pub tags_from:  Option<&'a str>,
 }
 
 impl AddInputOpts<'_> {
@@ -751,6 +777,9 @@ impl AddInputOpts<'_> {
         }
         if let Some(template) = self.tag {
             entry.insert("tag", value(template.to_string()));
+        }
+        if let Some(from) = self.tags_from {
+            entry.insert("tags_from", value(from));
         }
         if !self.follows.is_empty() {
             let mut follows_tbl = Table::new();

@@ -73,6 +73,7 @@ pub struct AddArgs {
     pub submodules: bool,
     pub follows:    Vec<(String, String)>,
     pub template:   Option<TagTemplate>,
+    pub tags_from:  Option<String>,
 }
 
 pound::from_str!(SignerName, GithubUser, TagTemplate);
@@ -178,10 +179,12 @@ enum Cli {
         /// follows child=parent (repeatable; a bare child follows its namesake)
         #[pound(long)]
         follows:    Vec<String>,
-        /// follow the newest tag matching a template like v{version} (not with
-        /// --fixed)
+        /// follow the newest tag matching a template like v{version}
         #[pound(long)]
         tag:        Option<TagTemplate>,
+        /// for --fixed: read --tag's tags from this repo or http(s) page
+        #[pound(long)]
+        tags_from:  Option<String>,
     },
     /// remove a pin
     Rm {
@@ -385,6 +388,7 @@ impl From<Cli> for Command {
                 submodules,
                 follows,
                 tag,
+                tags_from,
             } => {
                 let pin_type = if fixed {
                     PinType::Fixed
@@ -402,6 +406,7 @@ impl From<Cli> for Command {
                     submodules,
                     follows: follows.iter().map(|rule| parse_follows(rule)).collect(),
                     template: tag,
+                    tags_from,
                 })
             },
             Cli::Rm { name } => Self::Rm { name },

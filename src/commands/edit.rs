@@ -46,6 +46,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         submodules,
         ref follows,
         ref template,
+        ref tags_from,
     } = *args;
     if unpack.is_some() && pin_type != PinType::Fixed {
         user_bail!("--unpack is only valid with --fixed");
@@ -69,7 +70,9 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         if template.is_none() {
             user_bail!("{{tag}} in a fixed pin's url needs --tag to fill it");
         }
-        tag::asset_repo(name, &expanded)?;
+        if tags_from.is_none() {
+            tag::asset_repo(name, &expanded)?;
+        }
     }
     if template.is_some() {
         if pin_type != PinType::Fixed {
@@ -84,16 +87,21 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         submodules,
         follows,
         tag: template.as_ref(),
+        tags_from: tags_from.as_deref(),
     });
     // a load's own checks, so no flag combination saves an unloadable pins.toml
-    doc.inputs()?;
+    let follow = doc
+        .inputs()?
+        .into_iter()
+        .find(|input| input.name == *name)
+        .and_then(|input| input.tag);
     project.save_pins(&doc)?;
 
     let localized = source::localize_path_url_with_warning(&expanded, project.dir());
     if let Some(warning) = localized.warning {
         eprintln!("tack: {warning}");
     }
-    let fetched = tag::follow(name, template.as_ref(), &localized.url).and_then(|followed| {
+    let fetched = tag::follow(name, follow.as_ref(), &localized.url).and_then(|followed| {
         update::fetch_input(pin_type, unpack, submodules, &followed.url)
             .map(|pin| (pin, followed.tag))
     });

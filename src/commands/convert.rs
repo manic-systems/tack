@@ -51,6 +51,7 @@ pub(super) fn convert(project: &Project, flake_path: &Path) -> Result<usize> {
             submodules: input.submodules.unwrap_or(false),
             follows:    &follows,
             tag:        None,
+            tags_from:  None,
         });
         added += 1;
     }
