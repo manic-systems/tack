@@ -155,8 +155,9 @@ pub fn followable(name: &str, expanded: &str) -> Result<Source> {
 }
 
 /// how many of the newest matching tags to try for a release asset, since a
-/// release can be tagged before its assets are uploaded
-const ASSET_TRIES: usize = 5;
+/// release can be tagged before its assets are uploaded, and some tags never
+/// get a release at all
+const ASSET_TRIES: usize = 10;
 const TAG_SLOT: &str = "{tag}";
 const VERSION_SLOT: &str = "{version}";
 
