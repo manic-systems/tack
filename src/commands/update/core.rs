@@ -855,6 +855,13 @@ fn classify_look(
             let channel = matches!(source, Source::Tarball { .. })
                 .then(|| fetch::channel_repo(&current.rev).zip(fetch::channel_rev(&current.rev)))
                 .flatten();
+            // the lock may hold the channel's mutable url while the probe resolved
+            // the immutable one, so the shipped commit is the real identity
+            if let Some((_, ref rev)) = channel
+                && old_compare_rev == Some(rev.as_str())
+            {
+                return (LookOutcome::Unchanged, None);
+            }
             let (history, head, comparison) = match channel {
                 Some((ref nixpkgs, ref rev)) => {
                     let comparison = compare_with_planner(session, nixpkgs, old_compare_rev, rev);
