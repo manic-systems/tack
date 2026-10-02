@@ -19,8 +19,7 @@ use crate::{
 };
 
 /// a tag name with one `{version}` slot, which only matches integers joined
-/// by one kind of separator, `.`, `-` or `_`, so `v{version}` skips
-/// `v2.0.3-purple`, `v2.1-rc1` and `v2.1.0-1`
+/// by `.`, `-` or `_`, so `v{version}` skips `v2.0.3-purple` and `v2.1-rc1`
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagTemplate {
     prefix: String,
@@ -80,9 +79,8 @@ impl TagTemplate {
         let middle = tag
             .strip_prefix(self.prefix.as_str())?
             .strip_suffix(self.suffix.as_str())?;
-        let separator = middle.chars().find(|ch| matches!(ch, '.' | '-' | '_'));
         middle
-            .split(|ch| Some(ch) == separator)
+            .split(['.', '-', '_'])
             .map(|part| {
                 let numeric = !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
                 numeric.then(|| part.parse::<u64>().ok()).flatten()

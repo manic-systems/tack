@@ -136,10 +136,10 @@ type = "fetch"
 tag = "GE-Proton{version}"
 ```
 
-`{version}` matches numbers joined by one separator, either `.`, `-` or `_`,
-used consistently, and the highest version wins. `v{version}` takes `v2.1.0` over
-`v2.0.9` and `GE-Proton{version}` matches `GE-Proton10-17`, while mixed tags like
-`v2.1.0-1`, `v1.0.0-20240101` and `v2.0.3-purple` are skipped. tack lists
+`{version}` matches numbers joined by `.`, `-` or `_`, and the highest version
+wins. `v{version}` takes `v2.1.0` over `v2.0.9`, `GE-Proton{version}` matches
+`GE-Proton10-17` and `cachyos-{version}-slr` matches `cachyos-11.0-20260703-slr`,
+while tags with words in the version like `v2.0.3-purple` are skipped. tack lists
 tags over the git protocol, so any github, gitlab or network git url works, as
 long as it names no ref or rev of its own. local `file://` urls are not
 supported. the chosen tag is kept in the lock and shown by `tack look` and `tack update`.
