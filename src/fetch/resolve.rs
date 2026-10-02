@@ -761,8 +761,10 @@ pub fn channel_rev(url: &str) -> Option<String> {
 
 /// whether `url` answers a HEAD request with success, after redirects
 pub fn serves(url: &str) -> bool {
+    // Forgejo redirects assets to S3 urls presigned for GET
     HttpClient::global()
-        .head(url)
+        .get(url)
+        .header("Range", "bytes=0-0")
         .call()
         .is_ok_and(|resp| resp.status().is_success())
 }
