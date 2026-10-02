@@ -644,18 +644,23 @@ impl<'a> AllFollowTable<'a> {
         let table = item
             .as_table_like()
             .with_context(|| "all_follow must be a table")?;
+        // the resolver keeps a doubled alias's first row in sorted key order
+        let mut rows = table.iter().collect::<Vec<_>>();
+        rows.sort_by_key(|&(key, _)| key);
         let mut out = BTreeMap::new();
-        for (key, value) in table.iter() {
+        for (key, value) in rows {
             if let Some(target) = value.as_str() {
-                out.insert(key.to_owned(), target.to_owned());
+                out.entry(key.to_owned())
+                    .or_insert_with(|| target.to_owned());
             } else if let Some(arr) = value.as_array() {
                 // array form uses the key as the target
-                out.insert(key.to_owned(), key.to_owned());
+                out.entry(key.to_owned()).or_insert_with(|| key.to_owned());
                 for (index, el) in arr.iter().enumerate() {
                     let alias = el
                         .as_str()
                         .with_context(|| format!("all_follow.{key}[{index}] must be a string"))?;
-                    out.insert(alias.to_owned(), key.to_owned());
+                    out.entry(alias.to_owned())
+                        .or_insert_with(|| key.to_owned());
                 }
             } else {
                 user_bail!("all_follow.{key} must be a string or array of strings");
