@@ -10,13 +10,21 @@ use std::{
     str::FromStr,
 };
 
-use misstep::Result;
+use misstep::{
+    Result,
+    ResultExt as _,
+};
+use regex::Regex;
 
 use crate::{
     error::user_bail,
     fetch,
     source::Source,
 };
+
+#[cfg(test)]
+#[path = "tag_tests.rs"]
+mod tests;
 
 /// a tag name with one `{version}` slot, which only matches integers joined
 /// by `.`, `-` or `_`, so `v{version}` skips `v2.0.3-purple` and `v2.1-rc1`
@@ -89,16 +97,56 @@ impl TagTemplate {
     }
 }
 
+/// a webpage to read an asset pin's tags from, for upstreams that publish
+/// release files without tagging a repo. every `regex` match names one tag
+#[derive(Clone, Debug)]
+pub struct TagPage {
+    url:   String,
+    regex: Regex,
+}
+
+impl TagPage {
+    pub fn new(url: &str, pattern: &str) -> Result<Self> {
+        Ok(Self {
+            url:   url.to_owned(),
+            regex: pattern
+                .parse::<Regex>()
+                .with_context(|| format!("tag_regex '{pattern}' is not a valid regex"))?,
+        })
+    }
+
+    /// the tags the page serves, in the order it serves them
+    fn tags(&self, name: &str) -> Result<Vec<String>> {
+        let page = fetch::raw(&self.url, None)
+            .with_context(|| format!("input '{name}': read tag page {}", self.url))?;
+        let found = self
+            .regex
+            .find_iter(&page)
+            .map(|matched| matched.as_str().to_owned())
+            .collect::<Vec<_>>();
+        if found.is_empty() {
+            user_bail!(
+                "input '{name}': {} serves nothing matching {}",
+                self.url,
+                self.regex
+            );
+        }
+        Ok(found)
+    }
+}
+
 pub struct Followed<'url> {
     pub url: Cow<'url, str>,
     pub tag: Option<String>,
 }
 
 /// rewrites `expanded` to the newest tag `template` matches, or passes it
-/// through untouched for a pin with no template
+/// through untouched for a pin with no template. `page` replaces the repo
+/// behind the url as the source of the tags it ranks
 pub fn follow<'url>(
     name: &str,
     template: Option<&TagTemplate>,
+    page: Option<&TagPage>,
     expanded: &'url str,
 ) -> Result<Followed<'url>> {
     let Some(tag_template) = template else {
@@ -108,7 +156,7 @@ pub fn follow<'url>(
         });
     };
     if names_asset(expanded) {
-        return follow_asset(name, tag_template, expanded);
+        return follow_asset(name, tag_template, page, expanded);
     }
     let source = followable(name, expanded)?;
     let tags = fetch::list_tags(&source)?;
@@ -188,8 +236,16 @@ pub fn asset_repo(name: &str, expanded: &str) -> Result<Source> {
     format!("git+https://{repo}").parse::<Source>()
 }
 
-fn follow_asset(name: &str, template: &TagTemplate, expanded: &str) -> Result<Followed<'static>> {
-    let tags = fetch::list_tags(&asset_repo(name, expanded)?)?;
+fn follow_asset(
+    name: &str,
+    template: &TagTemplate,
+    page: Option<&TagPage>,
+    expanded: &str,
+) -> Result<Followed<'static>> {
+    let tags = match page {
+        Some(found) => found.tags(name)?,
+        None => fetch::list_tags(&asset_repo(name, expanded)?)?,
+    };
     let ranked = template.ranked(&tags);
     if ranked.is_empty() {
         user_bail!("input '{name}': no tag matches {template}");

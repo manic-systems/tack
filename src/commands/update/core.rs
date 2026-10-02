@@ -445,7 +445,14 @@ impl PinRun<'_> {
                     tag: lock.tag(&input.name).map(str::to_owned),
                 })
             },
-            None => tag::follow(&input.name, input.tag.as_ref(), &localized.url),
+            None => {
+                tag::follow(
+                    &input.name,
+                    input.tag.as_ref(),
+                    input.tag_page.as_ref(),
+                    &localized.url,
+                )
+            },
         };
         let mut resolution = match target {
             // a fixed pin's asset only changes with its tag
@@ -920,19 +927,23 @@ pub(super) fn look(
             .get(&input.name)
             .filter(|_| !stale)
             .and_then(comparable_rev);
-        let (mut outcome, log, chosen) =
-            match tag::follow(&input.name, input.tag.as_ref(), &localized.url) {
-                Ok(followed) => {
-                    let current = Current {
-                        old: old.as_deref(),
-                        compare_rev: old_compare_rev,
-                        tag: lock.tag(&input.name),
-                        stale,
-                    };
-                    look_followed(input, followed, &current, verbose, &session)
-                },
-                Err(err) => (LookOutcome::Failed(format!("{err:#}")), None, None),
-            };
+        let (mut outcome, log, chosen) = match tag::follow(
+            &input.name,
+            input.tag.as_ref(),
+            input.tag_page.as_ref(),
+            &localized.url,
+        ) {
+            Ok(followed) => {
+                let current = Current {
+                    old: old.as_deref(),
+                    compare_rev: old_compare_rev,
+                    tag: lock.tag(&input.name),
+                    stale,
+                };
+                look_followed(input, followed, &current, verbose, &session)
+            },
+            Err(err) => (LookOutcome::Failed(format!("{err:#}")), None, None),
+        };
         let mut warnings = Vec::from_iter(localized.warning);
         let pulls = match (lock.get(&input.name), lock.patched(&input.name)) {
             (Some(node), Some(tree)) => {

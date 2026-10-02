@@ -288,6 +288,7 @@ mod tests {
                     signers:     Vec::new(),
                     patches:     Vec::new(),
                     tag:         None,
+                    tag_page:    None,
                     group:       None,
                     frozen:      false,
                 }

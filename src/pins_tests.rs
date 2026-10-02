@@ -85,3 +85,122 @@ fn follow_tables_reject_bare_and_scoped_keys_for_one_name() {
     let distinct_sides = doc("[all_follow]\n\"flake:foo\" = \"a\"\n\"tack:foo\" = \"b\"\n");
     assert_eq!(distinct_sides.all_follows().unwrap().len(), 2);
 }
+
+#[test]
+fn page_pins_keep_their_page_and_template() {
+    let parsed = doc(r#"
+[inputs.linphone]
+url = "https://download.linphone.org/releases/linux/app/Linphone-{version}-x86_64.AppImage"
+type = "fixed"
+tag = "Linphone-{version}-x86_64.AppImage"
+tag_page = "https://download.linphone.org/releases/linux/app/"
+tag_regex = 'Linphone-\d[^"]*-x86_64\.AppImage'
+"#)
+    .inputs()
+    .expect("inputs");
+
+    let pin = parsed
+        .iter()
+        .find(|inp| inp.name == "linphone")
+        .expect("pin");
+    assert_eq!(pin.pin_type, PinType::Fixed);
+    assert_eq!(
+        pin.tag.as_ref().map(ToString::to_string).as_deref(),
+        Some("Linphone-{version}-x86_64.AppImage")
+    );
+    assert!(pin.tag_page.is_some());
+}
+
+#[test]
+fn tag_pages_are_checked_against_their_pin() {
+    let slot = "https://e/x-{version}.zip";
+    let error = |url: &str, fields: &str| {
+        PinsDoc::parse(&format!(
+            "[inputs.p]\nurl = \"{url}\"\ntype = \"fixed\"\n{fields}"
+        ))
+        .expect("toml")
+        .inputs()
+        .expect_err("rejected")
+        .to_string()
+    };
+
+    assert_eq!(
+        error(
+            "https://e/x.zip",
+            "tag_page = \"https://e/\"\ntag_regex = \"x\"\n"
+        ),
+        "input 'p': tag_page needs a `tag` template to rank its tags with"
+    );
+    assert_eq!(
+        error(
+            "https://e/x.zip",
+            "tag = \"{version}\"\ntag_page = \"https://e/\"\ntag_regex = \"x\"\n"
+        ),
+        "input 'p': a tag_page fills {tag} or {version} in the pin's url"
+    );
+    assert_eq!(
+        error(slot, "tag = \"v{version}\"\ntag_page = \"https://e/\"\n"),
+        "input 'p': a tag_page needs a tag_regex to pick its tags with"
+    );
+    assert_eq!(
+        error(slot, "tag = \"v{version}\"\ntag_regex = \"x\"\n"),
+        "input 'p': tag_regex needs a tag_page to read"
+    );
+    assert_eq!(
+        error(
+            slot,
+            "tag = \"{version}\"\ntag_page = \"ftp://e/\"\ntag_regex = \"x\"\n"
+        ),
+        "input 'p': tag_page must be an http(s) url, got: ftp://e/"
+    );
+    assert_eq!(
+        error(
+            slot,
+            "tag = \"{version}\"\ntag_page = \"https://e/{tag}\"\ntag_regex = \"x\"\n"
+        ),
+        "input 'p': tag_page names a page, so it takes no {tag} placeholder"
+    );
+    assert!(
+        error(
+            slot,
+            "tag = \"{version}\"\ntag_page = \"https://e/\"\ntag_regex = \"(\"\n"
+        )
+        .contains("tag_regex '(' is not a valid regex")
+    );
+}
+
+#[test]
+fn tag_pages_only_drive_fixed_pins_naming_their_asset() {
+    let error = PinsDoc::parse(
+        "[inputs.p]\nurl = \"https://e/x.zip\"\ntype = \"fetch\"\ntag = \"v{version}\"\ntag_page = \
+         \"https://e/\"\ntag_regex = \"x\"\n",
+    )
+    .expect("toml")
+    .inputs()
+    .expect_err("rejected")
+    .to_string();
+    assert_eq!(
+        error,
+        "input 'p': tag_page is only valid for type = \"fixed\""
+    );
+}
+
+#[test]
+fn repo_tagged_assets_keep_reading_their_repo() {
+    let parsed = doc(r#"
+[inputs.app]
+url = "https://github.com/o/app/releases/download/v{version}/app-{version}.AppImage"
+type = "fixed"
+tag = "v{version}"
+group = "binary"
+"#)
+    .inputs()
+    .expect("inputs");
+
+    let pin = parsed.iter().find(|inp| inp.name == "app").expect("pin");
+    assert_eq!(
+        pin.tag.as_ref().map(ToString::to_string).as_deref(),
+        Some("v{version}")
+    );
+    assert!(pin.tag_page.is_none());
+}

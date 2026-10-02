@@ -42,6 +42,7 @@ use crate::{
     },
     tag::{
         self,
+        TagPage,
         TagTemplate,
     },
 };
@@ -153,6 +154,7 @@ pub struct Input {
     pub signers:     Vec<SignerName>,
     pub patches:     Vec<PatchSource>,
     pub tag:         Option<TagTemplate>,
+    pub tag_page:    Option<TagPage>,
     pub group:       Option<String>,
     pub frozen:      bool,
 }
@@ -220,24 +222,17 @@ impl Input {
         let omit_inputs = name_set("omit_inputs")?;
         let keep_inputs = name_set("keep_inputs")?;
         let dir = str_field("dir")?;
-        let signers = string_array(&context, "signers", entry.get("signers"))?
-            .into_iter()
-            .map(str::parse::<SignerName>)
-            .collect::<Result<Vec<_>>>()
-            .with_context(|| format!("input '{name}'"))?;
-        if pin_type == PinType::Fixed && !signers.is_empty() {
-            user_bail!("input '{name}': signers are not valid for type = \"fixed\"");
-        }
-        let patches = string_array(&context, "patches", entry.get("patches"))?
-            .into_iter()
-            .map(|raw| {
-                PatchSource::parse(raw, shorturls).with_context(|| format!("input '{name}'"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if pin_type == PinType::Fixed && !patches.is_empty() {
-            user_bail!("input '{name}': patches are not valid for type = \"fixed\"");
-        }
-        let tag = tag_field(name, str_field("tag")?, pin_type, url, shorturls)?;
+        let signers = signers_field(name, &context, entry.get("signers"), pin_type)?;
+        let patches = patches_field(name, &context, entry.get("patches"), pin_type, shorturls)?;
+        let (tag, tag_page) = tag_fields(
+            name,
+            str_field("tag")?,
+            str_field("tag_page")?,
+            str_field("tag_regex")?,
+            pin_type,
+            url,
+            shorturls,
+        )?;
         let group = str_field("group")?;
         let frozen = bool_field("frozen")?.unwrap_or(false);
         let submodules = bool_field("submodules")?.unwrap_or(false);
@@ -255,36 +250,114 @@ impl Input {
             signers,
             patches,
             tag,
+            tag_page,
             group: group.map(str::to_owned),
             frozen,
         })
     }
 }
 
-/// a pin's tag template, checked against the url it follows
-fn tag_field(
+/// the signers an input verifies, which a fixed pin takes none of
+fn signers_field(
     name: &str,
-    raw: Option<&str>,
+    context: &str,
+    raw: Option<&Item>,
+    pin_type: PinType,
+) -> Result<Vec<SignerName>> {
+    let signers = string_array(context, "signers", raw)?
+        .into_iter()
+        .map(str::parse::<SignerName>)
+        .collect::<Result<Vec<_>>>()
+        .with_context(|| format!("input '{name}'"))?;
+    if pin_type == PinType::Fixed && !signers.is_empty() {
+        user_bail!("input '{name}': signers are not valid for type = \"fixed\"");
+    }
+    Ok(signers)
+}
+
+/// the patches an input applies, which a fixed pin takes none of
+fn patches_field(
+    name: &str,
+    context: &str,
+    raw: Option<&Item>,
+    pin_type: PinType,
+    shorturls: &ShortUrls<'_>,
+) -> Result<Vec<PatchSource>> {
+    let patches = string_array(context, "patches", raw)?
+        .into_iter()
+        .map(|path| PatchSource::parse(path, shorturls).with_context(|| format!("input '{name}'")))
+        .collect::<Result<Vec<_>>>()?;
+    if pin_type == PinType::Fixed && !patches.is_empty() {
+        user_bail!("input '{name}': patches are not valid for type = \"fixed\"");
+    }
+    Ok(patches)
+}
+
+/// a pin's tag template and the page it reads tags from instead of a repo,
+/// both checked against the url they name
+fn tag_fields(
+    name: &str,
+    raw_tag: Option<&str>,
+    raw_page: Option<&str>,
+    raw_regex: Option<&str>,
     pin_type: PinType,
     url: &str,
     shorturls: &ShortUrls<'_>,
-) -> Result<Option<TagTemplate>> {
-    let Some(template) = raw else {
+) -> Result<(Option<TagTemplate>, Option<TagPage>)> {
+    let Some(raw) = raw_tag else {
         if pin_type == PinType::Fixed && tag::names_asset(url) {
             user_bail!("input '{name}': {{tag}} in a fixed pin's url needs a `tag` template");
         }
-        return Ok(None);
+        if raw_page.is_some() || raw_regex.is_some() {
+            user_bail!("input '{name}': tag_page needs a `tag` template to rank its tags with");
+        }
+        return Ok((None, None));
     };
-    let parsed = template
+    let template = raw
         .parse::<TagTemplate>()
         .with_context(|| format!("input '{name}'"))?;
     let expanded = shorturls.expand(url)?;
-    if pin_type == PinType::Fixed {
-        tag::asset_repo(name, &expanded)?;
-    } else {
-        tag::followable(name, &expanded)?;
+    let Some(page) = raw_page else {
+        if raw_regex.is_some() {
+            user_bail!("input '{name}': tag_regex needs a tag_page to read");
+        }
+        if pin_type == PinType::Fixed {
+            tag::asset_repo(name, &expanded)?;
+        } else {
+            tag::followable(name, &expanded)?;
+        }
+        return Ok((Some(template), None));
+    };
+    if pin_type != PinType::Fixed {
+        user_bail!("input '{name}': tag_page is only valid for type = \"fixed\"");
     }
-    Ok(Some(parsed))
+    let Some(regex) = raw_regex else {
+        user_bail!("input '{name}': a tag_page needs a tag_regex to pick its tags with");
+    };
+    if !tag::names_asset(&expanded) {
+        user_bail!("input '{name}': a tag_page fills {{tag}} or {{version}} in the pin's url");
+    }
+    Ok((
+        Some(template),
+        Some(read_tag_page(name, page, regex, shorturls)?),
+    ))
+}
+
+/// one page to read tags from, which has to be a page and not an asset
+fn read_tag_page(
+    name: &str,
+    url: &str,
+    pattern: &str,
+    shorturls: &ShortUrls<'_>,
+) -> Result<TagPage> {
+    let page = shorturls.expand(url)?;
+    if !page.starts_with("https://") && !page.starts_with("http://") {
+        user_bail!("input '{name}': tag_page must be an http(s) url, got: {page}");
+    }
+    if tag::names_asset(&page) {
+        user_bail!("input '{name}': tag_page names a page, so it takes no {{tag}} placeholder");
+    }
+    TagPage::new(&page, pattern).with_context(|| format!("input '{name}'"))
 }
 
 fn follows_table(name: &str, item: Option<&Item>) -> Result<BTreeMap<String, String>> {
@@ -542,6 +615,7 @@ impl PinsDoc {
                 });
                 // a multiline array keeps its layout when the new entry takes the
                 // indent of the last one, without the comments above it
+                // comments above it
                 let indent = patches
                     .iter()
                     .last()

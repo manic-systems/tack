@@ -160,6 +160,22 @@ tags come from that repo. tack takes the newest matching tag whose release
 already has the asset, so a release tagged before its uploads finish is
 skipped.
 
+a fixed pin whose upstream publishes files without tagged commits reads its tags
+off the download page instead, each `tag_regex` match over `tag_page` being one
+tag
+
+```toml
+[inputs.linphone]
+url = "https://download.linphone.org/releases/linux/app/Linphone-{version}-x86_64.AppImage"
+type = "fixed"
+tag = "Linphone-{version}-x86_64.AppImage"
+tag_page = "https://download.linphone.org/releases/linux/app/"
+tag_regex = 'Linphone-\d[\d.]*-x86_64\.AppImage'
+```
+
+the matches are then ranked and filled in as if they came from a repo, so the
+regex does the picking and `tag` still says where the version sits.
+
 ## groups
 
 tag pins with a `group` to print them under headers in `tack look` and

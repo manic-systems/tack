@@ -42,4 +42,7 @@
 #                   tags are skipped, needs a github, gitlab or network git url with
 #                   no ref or rev, not file://, or for a fixed pin a release
 #                   download url naming the asset with {tag} or {version}
+#   tag_page        for a fixed pin, an http(s) page to read the tags off instead of a
+#                   repo, needs tag and tag_regex
+#   tag_regex       regex over tag_page whose every whole match is one tag for tag to rank
 [inputs]
