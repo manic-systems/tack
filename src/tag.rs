@@ -15,6 +15,7 @@ use misstep::Result;
 use crate::{
     error::user_bail,
     fetch,
+    lock::LockedTag,
     source::Source,
 };
 
@@ -191,6 +192,13 @@ impl TagSource {
 pub struct TagFollow {
     pub template: TagTemplate,
     pub from:     Option<TagSource>,
+}
+
+impl TagFollow {
+    pub fn locked(&self, tag: String) -> LockedTag {
+        let version = self.template.asset_version(&tag).to_owned();
+        LockedTag { tag, version }
+    }
 }
 
 const SEPARATORS: [char; 3] = ['.', '-', '_'];

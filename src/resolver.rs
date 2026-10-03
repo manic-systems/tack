@@ -19,6 +19,7 @@ const FEATURES_PREFIX: &str = "# tack-resolver:";
 
 pub const PATCHED: &str = "patched";
 pub const TAG: &str = "tag";
+pub const VERSION: &str = "version";
 pub const SIGNED: &str = "signedBy";
 
 fn declared(resolver: &str) -> Vec<&str> {
@@ -36,6 +37,7 @@ pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
             [
                 (lock.patched(name).is_some(), PATCHED),
                 (lock.tag(name).is_some(), TAG),
+                (lock.version(name).is_some(), VERSION),
                 (lock.signed_by(name).is_some(), SIGNED),
             ]
             .into_iter()
@@ -87,6 +89,7 @@ mod tests {
         RESOLVER_NIX,
         SIGNED,
         TAG,
+        VERSION,
         declared,
     };
 
@@ -94,7 +97,7 @@ mod tests {
     fn bundled_resolver_declares_every_lock_feature() {
         let features = declared(RESOLVER_NIX);
         assert!(
-            [PATCHED, TAG, SIGNED]
+            [PATCHED, TAG, VERSION, SIGNED]
                 .iter()
                 .all(|feature| features.contains(feature))
         );

@@ -78,7 +78,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         if pin_type != PinType::Fixed {
             tag::followable(name, &expanded)?;
         }
-        resolver::ensure(project, &[(name, resolver::TAG)])?;
+        resolver::ensure(project, &[(name, resolver::TAG), (name, resolver::VERSION)])?;
     }
     doc.add_input(name, url, &pins::AddInputOpts {
         pin_type,
@@ -116,7 +116,11 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
                 || render::added_identity(identity.as_str()),
                 |tag| format!("NEW -> {tag}"),
             );
-            lk.set_tag(name, chosen);
+            let locked = follow
+                .as_ref()
+                .zip(chosen)
+                .map(|(tagged, tag)| tagged.locked(tag));
+            lk.set_tag(name, locked);
             project.save_lock(&lk)?;
             match date {
                 Some(day) if !day.is_empty() => println!("added {name}  {shown} ({day})"),
