@@ -152,6 +152,12 @@ pub struct TagFollow {
     pub from:     Option<TagSource>,
 }
 
+impl TagFollow {
+    pub fn version(&self, tag: &str) -> String {
+        self.template.asset_version(tag).to_owned()
+    }
+}
+
 const SEPARATORS: [char; 3] = ['.', '-', '_'];
 
 /// whether `beyond` continues a match, with a letter or digit, or at an `open`

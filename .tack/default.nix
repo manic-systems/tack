@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
-# tack-resolver: patched tag signedBy
+# tack-resolver: patched tag version signedBy
 
 let
   inherit (builtins)
@@ -253,6 +253,7 @@ let
           "repo"
           "host"
           "tag"
+          "version"
           "rev"
           "narHash"
           "lastModified"
@@ -262,6 +263,7 @@ let
           "repo"
           "host"
           "tag"
+          "version"
           "rev"
           "narHash"
           "lastModified"
@@ -270,6 +272,7 @@ let
           "url"
           "ref"
           "tag"
+          "version"
           "rev"
           "narHash"
           "lastModified"
@@ -289,6 +292,7 @@ let
         fixed = [
           "url"
           "tag"
+          "version"
           "sha256"
           "unpack"
         ];

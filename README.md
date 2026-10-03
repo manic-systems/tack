@@ -436,16 +436,17 @@ inputs._meta.nixpkgs.rev
 ```
 
 every entry has a `type`, and the other fields depend on it. `?` marks fields
-that may be absent, and `tag` is only there on pins that follow one.
+that may be absent, and `tag` with the `version` it carries are only there on
+pins that follow one.
 
 | type | fields |
 |---|---|
-| `github`, `gitlab` | `owner`, `repo`, `host`, `tag`?, `rev`, `narHash`, `lastModified` |
-| `git` | `url`, `ref`?, `tag`?, `rev`, `narHash`, `lastModified` |
+| `github`, `gitlab` | `owner`, `repo`, `host`, `tag`?, `version`?, `rev`, `narHash`, `lastModified` |
+| `git` | `url`, `ref`?, `tag`?, `version`?, `rev`, `narHash`, `lastModified` |
 | `tarball` | `url`, `rev`?, `narHash`, `lastModified` |
 | `indirect` | `id`, `rev`, `narHash`, `lastModified` |
 | `path` | `path`, `narHash`?, `lastModified`? |
-| `fixed` | `url`, `tag`?, `sha256`, `unpack` |
+| `fixed` | `url`, `tag`?, `version`?, `sha256`, `unpack` |
 | `upstream` | none |
 
 `host` defaults to `github.com` or `gitlab.com`, and `unpack` to `file`. a pin a

@@ -505,7 +505,14 @@ fn record_pin(
     changed |= moved;
     changed |= mark.record_into(lock, &input.name);
     if settled {
-        changed |= lock.set_tag(&input.name, resolution.tag.take());
+        let chosen = resolution.tag.take();
+        let version = input
+            .tag
+            .as_ref()
+            .zip(chosen.as_deref())
+            .map(|(tagged, tag)| tagged.version(tag));
+        changed |= lock.set_tag(&input.name, chosen);
+        changed |= lock.set_version(&input.name, version);
     }
     changed |=
         mem::replace(&mut resolution.patched, Settled::Current).record_into(lock, &input.name);
