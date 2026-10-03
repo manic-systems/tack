@@ -144,6 +144,10 @@ tags over the git protocol, so any github, gitlab or network git url works, as
 long as it names no ref or rev of its own. local `file://` urls are not
 supported. the chosen tag is kept in the lock and shown by `tack look` and `tack update`.
 
+a trailing `*` matches anything after the template, for tags that end in a
+build hash. `b{version}-*` matches `b4012-9f3c2a1` and ranks it by `4012`
+alone. it can't be used with a `tags_from` page.
+
 a fixed pin follows the tag's release asset instead, named in its url with
 `{tag}` and `{version}`, where `{version}` is the tag from its first digit
 
