@@ -22,33 +22,43 @@ use crate::{
 /// by `.`, `-` or `_`, so `v{version}` skips `v2.0.3-purple` and `v2.1-rc1`
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagTemplate {
-    prefix: String,
-    suffix: String,
+    prefix:   String,
+    suffix:   String,
+    /// a trailing `*`, matching anything after the suffix
+    open_end: bool,
 }
 
 impl FromStr for TagTemplate {
     type Err = misstep::Report;
 
     fn from_str(raw: &str) -> Result<Self> {
-        let Some((prefix, suffix)) = raw.split_once("{version}") else {
+        let Some((prefix, tail)) = raw.split_once("{version}") else {
             user_bail!("tag template '{raw}' needs a {{version}} placeholder");
         };
-        if suffix.contains("{version}") {
+        if tail.contains("{version}") {
             user_bail!("tag template '{raw}' has more than one {{version}}");
         }
         if raw.contains(['&', '#', '?']) {
             user_bail!("tag template '{raw}' cannot contain &, # or ?");
         }
+        let (suffix, open_end) = tail
+            .strip_suffix('*')
+            .map_or((tail, false), |closed| (closed, true));
+        if prefix.contains('*') || suffix.contains('*') {
+            user_bail!("tag template '{raw}' can only use * at its end");
+        }
         Ok(Self {
             prefix: prefix.to_owned(),
             suffix: suffix.to_owned(),
+            open_end,
         })
     }
 }
 
 impl Display for TagTemplate {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}{{version}}{}", self.prefix, self.suffix)
+        let star = if self.open_end { "*" } else { "" };
+        write!(f, "{}{{version}}{}{star}", self.prefix, self.suffix)
     }
 }
 
@@ -70,7 +80,10 @@ impl TagTemplate {
     /// the version a release asset's name carries, the tag from its first
     /// digit up to the template's suffix, so `v0.60.{version}` gives `0.60.3`
     fn asset_version<'tag>(&self, tag: &'tag str) -> &'tag str {
-        tag.strip_suffix(self.suffix.as_str())
+        let end = self
+            .matched(tag)
+            .map_or(tag.len(), |(middle, _)| self.prefix.len() + middle.len());
+        tag.get(..end)
             .unwrap_or(tag)
             .trim_start_matches(|ch: char| !ch.is_ascii_digit())
     }
@@ -104,16 +117,28 @@ impl TagTemplate {
     }
 
     fn version(&self, tag: &str) -> Option<Vec<u64>> {
-        let middle = tag
-            .strip_prefix(self.prefix.as_str())?
-            .strip_suffix(self.suffix.as_str())?;
-        middle
-            .split(SEPARATORS)
-            .map(|part| {
-                let numeric = !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-                numeric.then(|| part.parse::<u64>().ok()).flatten()
+        self.matched(tag).map(|(_, parts)| parts)
+    }
+
+    /// a matching tag's `{version}` text and numbers, the longest that fits
+    /// when an open end lets anything follow the suffix
+    fn matched<'tag>(&self, tag: &'tag str) -> Option<(&'tag str, Vec<u64>)> {
+        let rest = tag.strip_prefix(self.prefix.as_str())?;
+        if !self.open_end {
+            let middle = rest.strip_suffix(self.suffix.as_str())?;
+            return Some((middle, version_parts(middle)?));
+        }
+        rest.char_indices()
+            .map(|(at, _)| at)
+            .chain([rest.len()])
+            .rev()
+            .find_map(|at| {
+                let (middle, after) = rest.split_at(at);
+                after
+                    .starts_with(self.suffix.as_str())
+                    .then(|| Some((middle, version_parts(middle)?)))
+                    .flatten()
             })
-            .collect()
     }
 }
 
@@ -140,6 +165,9 @@ impl TagSource {
     fn tags(&self, template: &TagTemplate) -> Result<Vec<String>> {
         match *self {
             Self::Repo(ref source) => fetch::list_tags(source),
+            Self::Page(_) if template.open_end => {
+                user_bail!("tag template '{template}' cannot end in * when reading a page")
+            },
             Self::Page(ref url) => Ok(template.scan(&fetch::raw(url, None)?)),
         }
     }
@@ -153,6 +181,16 @@ pub struct TagFollow {
 }
 
 const SEPARATORS: [char; 3] = ['.', '-', '_'];
+
+fn version_parts(middle: &str) -> Option<Vec<u64>> {
+    middle
+        .split(SEPARATORS)
+        .map(|part| {
+            let numeric = !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+            numeric.then(|| part.parse::<u64>().ok()).flatten()
+        })
+        .collect()
+}
 
 /// whether `beyond` continues a match, with a letter or digit, or at an `open`
 /// edge with a separator and digit
