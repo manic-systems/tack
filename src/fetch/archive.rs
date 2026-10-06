@@ -12,6 +12,7 @@ use std::{
         PathBuf,
     },
     result::Result as StdResult,
+    time::UNIX_EPOCH,
 };
 
 use flate2::read::GzDecoder;
@@ -72,6 +73,35 @@ fn ends_with_ci(path: &str, ext: &str) -> bool {
     let bytes = path.as_bytes();
     let suffix = ext.as_bytes();
     bytes.len() >= suffix.len() && bytes[bytes.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
+/// what nix reports as a tarball's lastModified, since channel tarballs carry
+/// no date and fetchTree would otherwise say 1970
+pub fn newest_mtime(dir: &Path) -> Option<u64> {
+    let mut newest = None;
+    let mut pending = vec![dir.to_owned()];
+    while let Some(next) = pending.pop() {
+        let Ok(read) = fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            // unpacking a file into a directory stamps the directory with now
+            if meta.is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|elapsed| elapsed.as_secs());
+            newest = newest.max(modified);
+        }
+    }
+    newest.filter(|&secs| secs > 0)
 }
 
 pub(super) fn unpack_tar_stream<R>(reader: R, format: TarFormat, into: &Path) -> Result<PathBuf>

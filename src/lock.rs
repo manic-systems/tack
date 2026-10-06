@@ -591,19 +591,24 @@ impl LockedNode {
         }
     }
 
-    // channel tarballs ship their rev, fetchTree derives lastModified itself
-    pub fn new_tarball_with_rev<Url, Rev, NarHash>(url: Url, rev: Rev, nar_hash: NarHash) -> Self
+    // channel tarballs ship a rev but no date, so lastModified is the newest mtime
+    pub fn new_tarball_with_rev<Url, Rev, NarHash>(
+        url: Url,
+        rev: Rev,
+        nar_hash: NarHash,
+        last_modified: Option<i64>,
+    ) -> Self
     where
         Url: Into<String>,
         Rev: Into<String>,
         NarHash: Into<String>,
     {
         Self::Tarball {
-            url:           url.into(),
-            rev:           Some(rev.into()),
-            nar_hash:      Some(nar_hash.into()),
-            last_modified: None,
-            extra:         BTreeMap::new(),
+            url: url.into(),
+            rev: Some(rev.into()),
+            nar_hash: Some(nar_hash.into()),
+            last_modified,
+            extra: BTreeMap::new(),
         }
     }
 

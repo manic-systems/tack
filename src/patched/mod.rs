@@ -11,7 +11,6 @@ use std::{
         Path,
         PathBuf,
     },
-    time::UNIX_EPOCH,
 };
 
 use apply::SourceTree;
@@ -30,6 +29,7 @@ use crate::{
     fetch::{
         self,
         FetchedTree,
+        newest_mtime,
     },
     history::HistoryStore,
     lock::{
@@ -396,35 +396,6 @@ pub fn drifted(project: &Project, sources: &[PatchSource], tree: &PatchedTree) -
             fs::read(project.dir().join(&digest.file))
                 .is_ok_and(|bytes| HEXLOWER.encode(&Sha256::hash(&bytes)) != digest.sha256)
         })
-}
-
-/// what nix reports as a tarball's lastModified, since channel tarballs carry
-/// no date and fetchTree would otherwise say 1970
-fn newest_mtime(dir: &Path) -> Option<u64> {
-    let mut newest = None;
-    let mut pending = vec![dir.to_owned()];
-    while let Some(next) = pending.pop() {
-        let Ok(read) = fs::read_dir(&next) else {
-            continue;
-        };
-        for entry in read.flatten() {
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            // unpacking a file into a directory stamps the directory with now
-            if meta.is_dir() {
-                pending.push(entry.path());
-                continue;
-            }
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|elapsed| elapsed.as_secs());
-            newest = newest.max(modified);
-        }
-    }
-    newest.filter(|&secs| secs > 0)
 }
 
 fn gcroot(project: &Project, name: &str) -> PathBuf {

@@ -19,6 +19,7 @@ mod resolve;
 mod time;
 mod topology;
 
+pub use archive::newest_mtime;
 pub use auth::drain_fetch_warnings;
 pub use error::{
     FetchError,

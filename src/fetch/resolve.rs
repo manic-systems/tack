@@ -32,6 +32,7 @@ use super::{
     FetchResult,
     archive::{
         detect_tar_format,
+        newest_mtime,
         sniff_reader,
         unpack_tar_stream,
     },
@@ -404,7 +405,13 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
             let node = git_revision_of(&root).map_or_else(
                 || LockedNode::new_tarball(immutable_url.clone(), nar_hash.clone(), last_modified),
                 |rev| {
-                    LockedNode::new_tarball_with_rev(immutable_url.clone(), rev, nar_hash.clone())
+                    let newest = newest_mtime(&root).and_then(|secs| i64::try_from(secs).ok());
+                    LockedNode::new_tarball_with_rev(
+                        immutable_url.clone(),
+                        rev,
+                        nar_hash.clone(),
+                        newest,
+                    )
                 },
             );
             Ok(FetchedPin::immutable_url(node, immutable_url).with_tree(dir, root))

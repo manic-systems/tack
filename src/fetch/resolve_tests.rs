@@ -84,22 +84,3 @@ fn gitlab_git_url_checkout_stays_generic_git_lock() {
         FetchIdentity::Rev("abc1230000000000000000000000000000000000".to_owned())
     );
 }
-
-#[test]
-fn tarball_with_rev_drops_last_modified() {
-    let serialized = serde_json::to_value(LockedNode::new_tarball_with_rev(
-        "https://host/x.tar.xz",
-        "9ae611a455b90cf061d8f332b977e387bda8e1ca",
-        "sha256-n",
-    ))
-    .unwrap();
-    assert_eq!(
-        serialized,
-        json!({
-            "type": "tarball",
-            "url": "https://host/x.tar.xz",
-            "rev": "9ae611a455b90cf061d8f332b977e387bda8e1ca",
-            "narHash": "sha256-n"
-        })
-    );
-}
