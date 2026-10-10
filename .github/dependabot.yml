@@ -13,6 +13,10 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+      exclude: [manic-systems/*]
+    groups:
+      actions:
+        patterns: ["*"]
   - package-ecosystem: nix
     directory: "/"
     schedule:
