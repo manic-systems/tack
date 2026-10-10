@@ -149,7 +149,8 @@ build hash. `b{version}-*` matches `b4012-9f3c2a1` and ranks it by `4012`
 alone. it can't be used with a `tags_from` page.
 
 a fixed pin follows the tag's release asset instead, named in its url with
-`{tag}` and `{version}`, where `{version}` is the tag from its first digit
+`{tag}` and `{version}`, where `{version}` is the matched version, so
+`v{version}` gives `2.1.0` and `v0.60.{version}` gives `0.60.3`
 
 ```toml
 [inputs.proton-ge]

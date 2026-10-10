@@ -77,15 +77,28 @@ impl TagTemplate {
         matching.into_iter().map(|(_, tag)| tag).collect()
     }
 
-    /// the version a release asset's name carries, the tag from its first
-    /// digit up to the template's suffix, so `v0.60.{version}` gives `0.60.3`
+    /// the version a release asset's name carries, `{version}` plus any dotted
+    /// number run that ends the prefix on its own
     fn asset_version<'tag>(&self, tag: &'tag str) -> &'tag str {
-        let end = self
-            .matched(tag)
-            .map_or(tag.len(), |(middle, _)| self.prefix.len() + middle.len());
-        tag.get(..end)
+        let Some((middle, _)) = self.matched(tag) else {
+            return tag;
+        };
+        let mut head = self.prefix.as_str();
+        while let Some(before_dot) = head.strip_suffix('.') {
+            let digits = before_dot.trim_end_matches(|ch: char| ch.is_ascii_digit());
+            if digits.len() == before_dot.len() {
+                break;
+            }
+            head = digits;
+        }
+        let lead = head.strip_suffix(['v', 'V']).unwrap_or(head);
+        let start = if lead.ends_with(|ch: char| ch.is_ascii_alphanumeric()) {
+            self.prefix.len()
+        } else {
+            head.len()
+        };
+        tag.get(start..self.prefix.len() + middle.len())
             .unwrap_or(tag)
-            .trim_start_matches(|ch: char| !ch.is_ascii_digit())
     }
 
     /// the tags in `text`, skipping matches that `runs_into` from either side
