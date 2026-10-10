@@ -50,6 +50,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         ref template,
         ref tags_from,
     } = *args;
+    pins::check_name(name)?;
     let mut doc = project.load_pins()?;
     if doc.has_input(name) {
         user_bail!("input '{name}' already exists");
