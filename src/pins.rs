@@ -57,10 +57,11 @@ use crate::{
 /// the resolver exposes pin metadata under this root attr
 const META_KEY: &str = "_meta";
 const PATCHED_KEY: &str = "_patched";
+const NESTED_KEY: &str = "_nested";
 
 /// names the lock and the resolver keep for themselves
 pub fn is_reserved(name: &str) -> bool {
-    [DECLARED_KEY, META_KEY, PATCHED_KEY].contains(&name)
+    [DECLARED_KEY, META_KEY, PATCHED_KEY, NESTED_KEY].contains(&name)
 }
 
 /// tack keeps per-pin files and gcroots under the name, so it has to be one
