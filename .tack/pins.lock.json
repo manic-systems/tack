@@ -1,18 +1,21 @@
 {
+  "$declared": {
+    "fenix": "github:nix-community/fenix",
+    "nixpkgs": "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz"
+  },
   "fenix": {
     "type": "github",
     "owner": "nix-community",
     "repo": "fenix",
-    "rev": "f6670530f53e69cc284f7aef818eb0f08fe81905",
-    "narHash": "sha256-SQmrkj17xBdvc8lVMbsY7pIJCjKftgNh42R1keP3dLQ=",
-    "lastModified": 1780397302
+    "rev": "03354d2e087aa40031614557db02e87a62ff1880",
+    "narHash": "sha256-V2dYFoE5csclBwmaW2XQ5uZYDHgZQielsjDmVyuVlgM=",
+    "lastModified": 1791550487
   },
   "nixpkgs": {
-    "type": "github",
-    "owner": "nixos",
-    "repo": "nixpkgs",
-    "rev": "ffa10e26ae11d676b2db836259889f1f571cb14f",
-    "narHash": "sha256-QfWfccTN+70ZQ4m2qlU9PiKfz2Yppq94058iJyARNwc=",
-    "lastModified": 1780365719
+    "type": "tarball",
+    "url": "https://releases.nixos.org/nixpkgs/nixpkgs-26.11pre1087089.39ad350a0602/nixexprs.tar.xz?rev=39ad350a0602fa0a58a544344e3e9187526ea45c&lastModified=1791366222",
+    "rev": "39ad350a0602fa0a58a544344e3e9187526ea45c",
+    "narHash": "sha256-/4ezBOv6aldGab7qTb6ls3SDpgzG8kuuSqEAA9zEZ8E=",
+    "lastModified": 315532800
   }
 }
