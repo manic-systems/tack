@@ -459,9 +459,12 @@ fn fetch_into_repo(remote: &gix::Remote<'_>, url: &str, shallow: bool) -> Result
         Scheme::Http | Scheme::Https => {
             remote.to_connection_with_transport(git_http::boxed(parsed_url))
         },
-        Scheme::File | Scheme::Git | Scheme::Ssh | Scheme::Ext(_) => {
-            remote.connect(Direction::Fetch)?
-        },
+        Scheme::File
+        | Scheme::Git
+        | Scheme::Ssh
+        | Scheme::Ext
+        | Scheme::Helper(_)
+        | Scheme::HelperUrl(_) => remote.connect(Direction::Fetch)?,
     };
     let interrupt = AtomicBool::new(false);
     let mut prepare = connection.prepare_fetch(Discard, RefMapOptions::default())?;
@@ -522,7 +525,7 @@ fn write_tree(repo: &gix::Repository, tree_id: gix::ObjectId, dir: &Path) -> Res
         let mode = (kind == EntryKind::Link).then_some(ComponentMode::Symlink);
         component(name, mode, options)
             .with_context(|| format!("unsafe path {name:?} in tree {tree_id}"))?;
-        let path = dir.join(from_bstr(name));
+        let path = dir.join(from_bstr(name)?);
         // exclusive, so a duplicate entry can't write through an earlier symlink
         let create_file = |data: &[u8]| -> Result<()> {
             OpenOptions::new()
@@ -544,7 +547,7 @@ fn write_tree(repo: &gix::Repository, tree_id: gix::ObjectId, dir: &Path) -> Res
             },
             EntryKind::Link => {
                 let target = repo.find_blob(entry.id())?;
-                symlink(from_bstr(target.data.as_bstr()), &path)?;
+                symlink(from_bstr(target.data.as_bstr())?, &path)?;
             },
             EntryKind::Commit => fs::create_dir(&path)?,
         }

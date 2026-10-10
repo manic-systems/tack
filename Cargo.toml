@@ -17,42 +17,42 @@ name = "tack"
 path = "src/main.rs"
 
 [dependencies]
-data-encoding = "2.11.0"
+data-encoding = "2.11.1"
 diffy = "0.5.2"
 etcetera = "0.11.0"
-flate2 = "1.1.9"
+flate2 = "1.1.10"
 gix = { default-features = false, features = [
   "blocking-network-client",
   "revision",
   "sha1",
-], version = "0.84.0" }
-gix-pack = "0.71.0"
+], version = "0.89.0" }
+gix-pack = "0.76.0"
 gix-protocol = { default-features = false, features = [
   "blocking-client",
   "fetch",
   "handshake",
   "sha1",
-], version = "0.62.0" }
+], version = "0.67.0" }
 gix-transport = { default-features = false, features = [
   "blocking-client",
   "http-client",
-], version = "0.57.1" }
-hmac-sha256 = "1.1.14"
-jiff = "0.2.28"
+], version = "0.61.0" }
+hmac-sha256 = "1.1.15"
+jiff = "0.2.38"
 misstep = { features = [ "pretty" ], version = "0.3.0" }
 percent-encoding = "2.3.2"
-pound = "0.1.4"
-serde = { features = [ "derive" ], version = "1.0.228" }
-serde_json = "1.0.150"
+pound = "0.2.0"
+serde = { features = [ "derive" ], version = "1.0.229" }
+serde_json = "1.0.151"
 tar = { default-features = false, version = "0.4.46" }
 tempfile = "3.27.0"
 terminal_size = "0.4.4"
-thiserror = "2.0.18"
-toml_edit = "0.25.12"
+thiserror = "2.0.21"
+toml_edit = "0.25.17"
 unicode-width = "0.2.2"
-ureq = { default-features = false, features = [ "rustls" ], version = "3.3.0" }
+ureq = { default-features = false, features = [ "rustls" ], version = "3.4.2" }
 xz2 = "0.1.7"
-zstd = { default-features = false, version = "0.13.3" }
+zstd = { default-features = false, version = "0.14.1" }
 
 [profile.release]
 codegen-units = 1

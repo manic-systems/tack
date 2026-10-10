@@ -201,7 +201,7 @@ pub(super) fn commit_object(oid: &str, signed: &Signature) -> FetchResult<Commit
     .into_bytes();
     let computed = compute_hash(HashKind::Sha1, objs::Kind::Commit, &data)
         .map_err(|err| FetchError::Github(format!("hash commit from github: {err}")))?;
-    if computed.to_string() != oid {
+    if computed != oid {
         return Err(FetchError::Github(format!(
             "contents for commit {} hash to {computed}",
             printable(oid)

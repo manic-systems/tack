@@ -2,7 +2,6 @@
 
 use std::{
     any::Any,
-    error::Error,
     io::{
         self,
         BufRead,
@@ -18,18 +17,18 @@ use std::{
     },
 };
 
-use gix_transport::{
-    IsSpuriousError as _,
-    client::blocking_io::{
-        Transport as BlockingTransport,
-        http::{
-            Error as HttpError,
-            GetResponse,
-            Http,
-            PostBodyDataKind,
-            PostResponse,
-            connect_http,
-        },
+use gix::{
+    Error as HttpError,
+    error::ErrorExt as _,
+};
+use gix_transport::client::blocking_io::{
+    Transport as BlockingTransport,
+    http::{
+        GetResponse,
+        Http,
+        PostBodyDataKind,
+        PostResponse,
+        connect_http,
     },
 };
 use misstep::OptionExt as _;
@@ -143,10 +142,7 @@ impl Http for UreqHttp {
         })
     }
 
-    fn configure(
-        &mut self,
-        _config: &dyn Any,
-    ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+    fn configure(&mut self, _config: &dyn Any) -> Result<(), HttpError> {
         Ok(())
     }
 }
@@ -214,7 +210,7 @@ impl HttpFailure {
     }
 
     fn from_http_error(url: &str, error: &HttpError) -> Self {
-        let kind = if error.is_spurious() {
+        let kind = if error.is_retryable() {
             io::ErrorKind::ConnectionAborted
         } else {
             io::ErrorKind::Other
@@ -495,9 +491,7 @@ fn send_once(
             )));
         },
         Err(err) => {
-            return Err(HttpError::InitHttpClient {
-                source: Box::new(err),
-            });
+            return Err(err.raise());
         },
     };
     let status = response.status();

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    borrow::Cow,
     collections::{
         BTreeSet,
         VecDeque,
@@ -22,7 +21,7 @@ use std::{
 use gix::{
     credentials::{
         helper::Action as CredentialsAction,
-        protocol::Result as CredentialsResult,
+        protocol::Outcome as CredentialsOutcome,
     },
     objs::{
         self,
@@ -325,7 +324,7 @@ fn list_refs(
     gix_protocol::LsRefsCommand::new(
         prefixes,
         &handshake.capabilities,
-        ("agent", Some(Cow::Borrowed("tack"))),
+        ("agent", Some("tack".to_owned())),
     )
     .invoke_blocking(&mut transport, &mut progress, true)
     .map_err(|err| FetchError::Transport(format!("git ls-refs {url}: {err}")))
@@ -549,7 +548,7 @@ fn fetch_pack<'a>(
 
     let mut features = gix_protocol::Command::Fetch
         .default_features(handshake.server_protocol_version, &handshake.capabilities);
-    features.push(("agent", Some(Cow::Borrowed("tack"))));
+    features.push(("agent", Some("tack".to_owned())));
     let sideband_all = features.iter().any(|&(name, _)| name == "sideband-all");
     let mut args = Arguments::new(handshake.server_protocol_version, features, false);
     if let Some(filter) = shape.filter {
@@ -602,10 +601,8 @@ fn fetch_pack<'a>(
         &mut progress,
         &interrupt,
         Some(repo.objects.clone()),
-        PackWriteOptions {
-            object_hash: repo.object_hash(),
-            ..Default::default()
-        },
+        repo.object_hash(),
+        PackWriteOptions::default(),
     )
     .map_err(|err| {
         FetchError::Transport(format!(
@@ -753,14 +750,11 @@ fn copy_local_commit_graph(
     Ok(())
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "gix dictates the credential closure's return type"
-)]
 fn configured_credentials(
     repo: &gix::Repository,
     url: gix::Url,
-) -> FetchResult<impl FnMut(CredentialsAction) -> CredentialsResult + 'static> {
+) -> FetchResult<impl FnMut(CredentialsAction) -> gix::Result<Option<CredentialsOutcome>> + 'static>
+{
     let (mut cascade, _action, prompt_options) = repo
         .config_snapshot()
         .credential_helpers(url)
@@ -771,7 +765,12 @@ fn configured_credentials(
 fn low_level_transport(parsed_url: gix::Url, url: &str) -> FetchResult<Box<dyn Transport + Send>> {
     match parsed_url.scheme {
         Scheme::Http | Scheme::Https => Ok(git_http::boxed(parsed_url)),
-        Scheme::File | Scheme::Git | Scheme::Ssh | Scheme::Ext(_) => {
+        Scheme::File
+        | Scheme::Git
+        | Scheme::Ssh
+        | Scheme::Ext
+        | Scheme::Helper(_)
+        | Scheme::HelperUrl(_) => {
             connect::connect(url, connect::Options {
                 version: gix_transport::Protocol::V2,
                 ..Default::default()
