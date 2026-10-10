@@ -358,8 +358,9 @@ pub(super) fn fetch_scan_files(
         .map_err(|err| FetchError::Transport(format!("create sparse scan repo: {err}")))?;
     let mut repo = gix::init_bare(dir.path())
         .map_err(|err| FetchError::Transport(format!("init sparse scan repo: {err}")))?;
-    // github only accepts tree:0, which sends just the wanted object, so the root
-    // tree and then the entries under it are fetched one round at a time
+    // github only accepts tree:0, which sends just the wanted object, so the
+    // root tree and then the entries under it are fetched one round at a
+    // time
     let commit_shape = FetchShape {
         filter:     Some("tree:0"),
         depth:      Some(1),

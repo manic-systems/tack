@@ -206,8 +206,9 @@ impl Display {
                 }
             }
 
-            // replace live spinner rows line by line, since tmux's scroll-on-clear
-            // pushes the screen into scrollback when `\x1b[J` runs from the top-left
+            // replace live spinner rows line by line, since tmux's
+            // scroll-on-clear pushes the screen into scrollback
+            // when `\x1b[J` runs from the top-left
             let list = String::from_utf8_lossy(&rendered).replace('\n', "\n\x1b[2K");
             let drawn = self.drawn.load(Ordering::Relaxed);
             let _ = write!(out, "\x1b[{drawn}A\x1b[2K{list}\x1b[J");
@@ -268,7 +269,8 @@ impl<'a> CommitLogLines<'a> {
         );
 
         for &(ref hash, ref subject) in &self.log.fresh {
-            // upstream controls subjects, so strip escapes a terminal would act on
+            // upstream controls subjects, so strip escapes a terminal would act
+            // on
             let _ = writeln!(
                 out,
                 "{}{}    {}",

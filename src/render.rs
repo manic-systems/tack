@@ -45,7 +45,8 @@ pub fn short(rev: &str) -> String {
         };
 
         if let Some(seg) = pick {
-            // keep `nixos-26.11pre1079315` whole, the cut made every release alike
+            // keep `nixos-26.11pre1079315` whole, the cut made every release
+            // alike
             let release = seg
                 .rsplit_once('.')
                 .filter(|&(_, suffix)| {

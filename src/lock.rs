@@ -608,7 +608,8 @@ impl LockedNode {
         }
     }
 
-    // channel tarballs ship a rev but no date, so lastModified is the newest mtime
+    // channel tarballs ship a rev but no date, so lastModified is the newest
+    // mtime
     pub fn new_tarball_with_rev<Url, Rev, NarHash>(
         url: Url,
         rev: Rev,

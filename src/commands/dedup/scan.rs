@@ -363,7 +363,8 @@ pub(super) fn walk_flake_lock<'a>(
             },
             InputDecision::Omit => {},
             InputDecision::Traverse => {
-                // a follows path aliases the edge it names, which the walk counts there
+                // a follows path aliases the edge it names, which the walk
+                // counts there
                 let FlakeInputRef::Node(ref target) = *input_ref else {
                     continue;
                 };

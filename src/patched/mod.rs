@@ -164,7 +164,8 @@ impl<'a> PatchedPin<'a> {
         let patches = self.collect(sources, locked, mode)?;
         let digests = patches.iter().map(PatchDigest::from).collect::<Vec<_>>();
         let current = locked.filter(|tree| !moved && tree.patches == digests);
-        // a hand-edited or badly merged lock can name a hash the path doesn't have
+        // a hand-edited or badly merged lock can name a hash the path doesn't
+        // have
         let recorded = current
             .filter(|tree| tree.path.exists())
             .map(|tree| tree.path.recorded_nar_hash());
@@ -201,8 +202,8 @@ impl<'a> PatchedPin<'a> {
                 Settled::Rebuilt(self.materialize(&patches, digests, None)?)
             },
         };
-        // a vendored file whose source now vendors elsewhere, as when a shorturl
-        // alias was repointed, is left over
+        // a vendored file whose source now vendors elsewhere, as when a
+        // shorturl alias was repointed, is left over
         let orphans = locked
             .into_iter()
             .flat_map(|tree| &tree.patches)
@@ -247,7 +248,8 @@ impl<'a> PatchedPin<'a> {
                              the same patch"
                         );
                     }
-                    // a vendored file the lock doesn't know is left over from an undo
+                    // a vendored file the lock doesn't know is left over from
+                    // an undo
                     let url = remote.url();
                     let known = locked
                         .into_iter()
@@ -292,8 +294,8 @@ impl<'a> PatchedPin<'a> {
     ) -> Result<PatchedTree> {
         let name = self.name;
         let scratch = tempfile::tempdir()?;
-        // nix-store names the path after the directory, and fetchTree only reuses
-        // a tree named `source` instead of copying it again
+        // nix-store names the path after the directory, and fetchTree only
+        // reuses a tree named `source` instead of copying it again
         let tree = scratch.path().join("source");
         if let Some(upstream) = self.upstream.take() {
             fs::rename(upstream.root(), &tree)?;

@@ -64,7 +64,8 @@ fn compare_jobs_are_capped_before_network_work() {
 
 #[test]
 fn comparator_prefers_top_level_pin_over_newer_transitive() {
-    // A declared pin (empty path) wins even when a transitive entry has a newer lm.
+    // A declared pin (empty path) wins even when a transitive entry has a newer
+    // lm.
     let declared = entry(&[], "nixpkgs", "rev-declared", Some(100));
     let transitive = entry(&["dep"], "nixpkgs", "rev-transitive", Some(9999));
     let entries = vec![declared, transitive];

@@ -603,8 +603,9 @@ impl PinsDoc {
                         .and_then(|prefix| prefix.as_str())
                         .is_some_and(|prefix| prefix.contains('\n'))
                 });
-                // a multiline array keeps its layout when the new entry takes the
-                // indent of the last one, without the comments above it
+                // a multiline array keeps its layout when the new entry takes
+                // the indent of the last one, without the
+                // comments above it
                 let indent = patches
                     .iter()
                     .last()

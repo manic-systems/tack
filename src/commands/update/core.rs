@@ -612,7 +612,8 @@ fn settle_patches(
         Mode::Update,
     ) {
         Ok(settled) => {
-            // the rev line says unchanged, so a rebuild on the same node needs saying
+            // the rev line says unchanged, so a rebuild on the same node needs
+            // saying
             let rebuilt = match settled {
                 Settled::Rehashed(_) => Some("its tree no longer matched the lock's hash"),
                 Settled::Rebuilt(_) if !moved => Some("its patches changed"),
@@ -884,8 +885,9 @@ fn classify_look(
             let channel = matches!(source, Source::Tarball { .. })
                 .then(|| fetch::channel_repo(&current.rev).zip(fetch::channel_rev(&current.rev)))
                 .flatten();
-            // the lock may hold the channel's mutable url while the probe resolved
-            // the immutable one, so the shipped commit is the real identity
+            // the lock may hold the channel's mutable url while the probe
+            // resolved the immutable one, so the shipped commit is
+            // the real identity
             if let Some((_, ref rev)) = channel
                 && old_compare_rev == Some(rev.as_str())
             {
@@ -996,7 +998,8 @@ pub(super) fn look(
             },
             _ => Vec::new(),
         };
-        // after the pull status check, which needs the upstream rev, not the tag
+        // after the pull status check, which needs the upstream rev, not the
+        // tag
         if let Some(picked) = chosen.as_deref() {
             outcome.show_tag(lock.tag(&input.name), picked);
         }

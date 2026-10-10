@@ -454,7 +454,8 @@ fn commit_present(repo: &gix::Repository, rev: &str) -> bool {
 
 fn fetch_into_repo(remote: &gix::Remote<'_>, url: &str, shallow: bool) -> Result<()> {
     let parsed_url = gix::Url::try_from(url)?;
-    // one boxed transport type keeps gix's fetch pipeline to a single instantiation
+    // one boxed transport type keeps gix's fetch pipeline to a single
+    // instantiation
     let connection = match parsed_url.scheme {
         Scheme::Http | Scheme::Https => {
             remote.to_connection_with_transport(git_http::boxed(parsed_url))
@@ -501,7 +502,8 @@ fn checkout_existing_commit(repo: &gix::Repository, rev: &str) -> Result<(String
 fn checkout_commit(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<()> {
     let workdir = repo.workdir().context("gix repository has no worktree")?;
     write_tree(repo, commit.tree_id()?.detach(), workdir)?;
-    // with no index written, submodule discovery reads gitlinks from HEAD's tree
+    // with no index written, submodule discovery reads gitlinks from HEAD's
+    // tree
     repo.reference("HEAD", commit.id, PreviousValue::Any, "checkout")?;
     Ok(())
 }
@@ -526,7 +528,8 @@ fn write_tree(repo: &gix::Repository, tree_id: gix::ObjectId, dir: &Path) -> Res
         component(name, mode, options)
             .with_context(|| format!("unsafe path {name:?} in tree {tree_id}"))?;
         let path = dir.join(from_bstr(name)?);
-        // exclusive, so a duplicate entry can't write through an earlier symlink
+        // exclusive, so a duplicate entry can't write through an earlier
+        // symlink
         let create_file = |data: &[u8]| -> Result<()> {
             OpenOptions::new()
                 .write(true)

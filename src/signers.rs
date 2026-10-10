@@ -77,8 +77,9 @@ impl FromStr for SignerKey {
     fn from_str(raw: &str) -> Result<Self> {
         let trimmed = raw.trim();
         if trimmed.starts_with(PGP_PUBLIC_KEY) {
-            // GitHub's .gpg exports carry a `Note:` armor header that gpg refuses, and
-            // armor headers are optional, so drop them all
+            // GitHub's .gpg exports carry a `Note:` armor header that gpg
+            // refuses, and armor headers are optional, so drop them
+            // all
             let mut in_headers = false;
             let armored = trimmed
                 .lines()

@@ -281,7 +281,8 @@ impl SourceTree {
         if source != target && self.current(staged, &target)?.is_some() {
             user_bail!("{} already exists", String::from_utf8_lossy(to));
         }
-        // hand-written patches often create a file as `--- a/x` against `@@ -0,0`
+        // hand-written patches often create a file as `--- a/x` against `@@
+        // -0,0`
         let creates = matches!(*edit, Edit::InPlace { creatable: true })
             && !hunks.hunks().is_empty()
             && hunks
