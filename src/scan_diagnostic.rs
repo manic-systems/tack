@@ -16,7 +16,10 @@ pub struct ScanDiagnostic {
 }
 
 impl ScanDiagnostic {
-    pub fn fetch<E: Display>(path: &[String], file: ScanFile, error: E) -> Self {
+    pub fn fetch<E>(path: &[String], file: ScanFile, error: E) -> Self
+    where
+        E: Display,
+    {
         Self::new(path, file, ScanDiagnosticKind::Fetch(format!("{error:#}")))
     }
 
@@ -32,11 +35,17 @@ impl ScanDiagnostic {
         )
     }
 
-    pub fn parse<E: Display>(path: &[String], file: ScanFile, error: E) -> Self {
+    pub fn parse<E>(path: &[String], file: ScanFile, error: E) -> Self
+    where
+        E: Display,
+    {
         Self::new(path, file, ScanDiagnosticKind::Parse(format!("{error:#}")))
     }
 
-    pub fn config<E: Display>(path: &[String], file: ScanFile, error: E) -> Self {
+    pub fn config<E>(path: &[String], file: ScanFile, error: E) -> Self
+    where
+        E: Display,
+    {
         Self::new(path, file, ScanDiagnosticKind::Config(format!("{error:#}")))
     }
 

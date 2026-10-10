@@ -32,7 +32,10 @@ pub fn hash_path(root: &Path) -> Result<String> {
 }
 
 #[expect(clippy::large_stack_arrays, reason = "64kb isn't that large, really")]
-pub fn hash_reader<R: io::Read>(mut reader: R) -> io::Result<String> {
+pub fn hash_reader<R>(mut reader: R) -> io::Result<String>
+where
+    R: io::Read,
+{
     let mut hasher = Sha256::new();
     let mut buf = [0_u8; 0x10000];
     loop {

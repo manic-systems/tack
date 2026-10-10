@@ -333,8 +333,7 @@ fn probe_gitlab(host: &str, endpoint: &str) -> bool {
     }
     resp.status == 200
         && serde_json::from_str::<GitlabProbe>(&resp.body)
-            .ok()
-            .is_some_and(|probe| probe.version.is_some() || probe.revision.is_some())
+            .is_ok_and(|probe| probe.version.is_some() || probe.revision.is_some())
 }
 
 fn probe_cgit(host: &str) -> bool {

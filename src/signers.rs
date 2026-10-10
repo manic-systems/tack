@@ -327,10 +327,10 @@ impl Keyring {
     }
 
     /// a signer whose values cannot all be read and parsed is left out
-    pub fn load_lenient<Read: Fn(&str) -> Option<String>>(
-        declared: Vec<(SignerName, Vec<&str>)>,
-        read: Read,
-    ) -> Self {
+    pub fn load_lenient<Read>(declared: Vec<(SignerName, Vec<&str>)>, read: Read) -> Self
+    where
+        Read: Fn(&str) -> Option<String>,
+    {
         let signers = declared
             .into_iter()
             .filter_map(|(name, values)| {

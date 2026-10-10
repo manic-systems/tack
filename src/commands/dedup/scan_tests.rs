@@ -130,7 +130,7 @@ fn configured_follow_beats_omit_and_skips_original_subtree() {
     assert_eq!(result.followed[0].target, "replacement");
     assert_eq!(result.followed[0].path, ["top"]);
     assert_eq!(result.followed[0].name, "old");
-    assert!(result.followed[0].side == Side::Flake);
+    assert_eq!(result.followed[0].side, Side::Flake);
 }
 
 #[test]

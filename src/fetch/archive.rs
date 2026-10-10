@@ -62,7 +62,10 @@ pub(super) fn sniff_tar_format(head: &[u8]) -> Option<TarFormat> {
 
 const SNIFF_LEN: u64 = 262;
 
-pub(super) fn sniff_reader<R: Read>(mut reader: R) -> io::Result<(Option<TarFormat>, impl Read)> {
+pub(super) fn sniff_reader<R>(mut reader: R) -> io::Result<(Option<TarFormat>, impl Read)>
+where
+    R: Read,
+{
     let mut head = Vec::new();
     reader.by_ref().take(SNIFF_LEN).read_to_end(&mut head)?;
     Ok((sniff_tar_format(&head), Cursor::new(head).chain(reader)))
