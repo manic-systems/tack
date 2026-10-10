@@ -35,6 +35,10 @@ pub(super) fn convert(project: &Project, flake_path: &Path) -> Result<usize> {
             eprintln!("tack: input '{name}' is reserved by tack, skipped");
             continue;
         }
+        if !pins::is_plain_name(&name) {
+            eprintln!("tack: input '{name}' can't be a pin name, skipped");
+            continue;
+        }
         if doc.has_input(&name) {
             eprintln!("tack: input '{name}' already in pins.toml, skipped");
             continue;

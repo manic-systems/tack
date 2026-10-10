@@ -10,7 +10,10 @@ use std::{
         Formatter,
         Result as FmtResult,
     },
-    path::Path,
+    path::{
+        Component,
+        Path,
+    },
     str::FromStr,
 };
 
@@ -57,6 +60,26 @@ const META_KEY: &str = "_meta";
 /// names the lock and the resolver keep for themselves
 pub fn is_reserved(name: &str) -> bool {
     name == DECLARED_KEY || name == META_KEY
+}
+
+/// tack keeps per-pin files and gcroots under the name, so it has to be one
+/// plain path component
+pub fn is_plain_name(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(Component::Normal(part)), None) if part == name
+    )
+}
+
+pub fn check_name(name: &str) -> Result<()> {
+    if is_reserved(name) {
+        user_bail!("'{name}' is reserved by tack, rename that input");
+    }
+    if !is_plain_name(name) {
+        user_bail!("'{name}' can't be a pin name, which has to be a plain file name");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -175,9 +198,7 @@ pub struct Input {
 
 impl Input {
     fn from_item(name: &str, input_item: &Item, shorturls: &ShortUrls<'_>) -> Result<Self> {
-        if is_reserved(name) {
-            user_bail!("'{name}' is reserved by tack, rename that input");
-        }
+        check_name(name)?;
         let entry = input_item
             .as_table_like()
             .with_context(|| format!("input '{name}' is not a table"))?;
