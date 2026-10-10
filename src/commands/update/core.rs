@@ -546,7 +546,16 @@ fn prune_departed(project: &Project, lock: &mut LockFile, all: &[pins::Input]) -
         .iter()
         .map(|input| input.name.as_str())
         .collect::<BTreeSet<_>>();
-    patched::prune_roots(project, &names.iter().copied().collect::<Vec<_>>())?;
+    let departed = lock
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|&name| !names.contains(name) && pins::is_plain_name(name))
+        .collect::<Vec<_>>();
+    patched::prune_roots(
+        project,
+        &names.iter().copied().collect::<Vec<_>>(),
+        &departed,
+    )?;
     Ok(lock.retain_declared(|name| names.contains(name)))
 }
 
@@ -616,6 +625,9 @@ fn settle_patches(
             // saying
             let rebuilt = match settled {
                 Settled::Rehashed(_) => Some("its tree no longer matched the lock's hash"),
+                Settled::Rediffed(_) => {
+                    Some("its generated diff was missing, edited, or unrecorded")
+                },
                 Settled::Rebuilt(_) if !moved => Some("its patches changed"),
                 Settled::Current | Settled::Restored | Settled::Rebuilt(_) | Settled::Unpatched => {
                     None

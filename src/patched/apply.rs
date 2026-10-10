@@ -2,7 +2,11 @@
 
 use std::{
     borrow::Cow,
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+        btree_map::Entry,
+    },
     ffi::OsStr,
     fmt::{
         Display,
@@ -26,7 +30,9 @@ use diffy::{
     Hunk,
     Line,
     Patch,
+    PatchFormatter,
     apply_bytes,
+    create_patch_bytes,
     patch_set::{
         FileMode,
         FileOperation,
@@ -34,6 +40,16 @@ use diffy::{
         ParseOptions,
         PatchKind,
         PatchSet,
+    },
+};
+use gix::{
+    bstr::ByteSlice as _,
+    validate::path::{
+        component,
+        component::{
+            Error as ComponentError,
+            Options as ComponentOptions,
+        },
     },
 };
 use misstep::{
@@ -44,7 +60,12 @@ use misstep::{
 use crate::error::user_bail;
 
 pub struct SourceTree {
-    root: PathBuf,
+    root:      PathBuf,
+    /// each file a patch touched as upstream had it, [`None`] where it didn't
+    /// exist
+    originals: BTreeMap<PathBuf, Option<(Vec<u8>, FileMode)>>,
+    /// directories upstream ships empty, which pruning leaves alone
+    kept:      BTreeSet<PathBuf>,
 }
 
 /// a patch's file changes, staged so one failing file leaves the tree as it
@@ -71,15 +92,27 @@ enum Edit {
 impl SourceTree {
     pub fn new(root: &Path) -> Result<Self> {
         Ok(Self {
-            root: root.canonicalize()?,
+            root:      root.canonicalize()?,
+            originals: BTreeMap::new(),
+            kept:      BTreeSet::new(),
         })
     }
 
-    pub fn apply(&self, patch: &[u8]) -> Result<()> {
+    pub fn apply(&mut self, patch: &[u8]) -> Result<()> {
         let text = recounted(patch)?;
         let mut staged = BTreeMap::new();
         for file_patch in file_patches(&text)? {
             self.stage(&mut staged, &file_patch, false)?;
+        }
+        for target in staged.keys() {
+            if let Entry::Vacant(slot) = self.originals.entry(target.clone()) {
+                slot.insert(on_disk(target)?);
+            }
+            if let Some(dir) = target.ancestors().skip(1).find(|dir| dir.is_dir())
+                && fs::read_dir(dir)?.next().is_none()
+            {
+                self.kept.insert(dir.to_owned());
+            }
         }
         // removals go first so a file can take the place of a directory the
         // patch empties
@@ -95,6 +128,69 @@ impl SourceTree {
             }
         }
         Ok(())
+    }
+
+    /// all applied patches as one git diff, with hunks at the exact lines they
+    /// landed so `git apply` gives the same tree
+    pub fn diff(&self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        for (target, original) in &self.originals {
+            let current = on_disk(target)?;
+            if *original == current {
+                continue;
+            }
+
+            let relative = target.strip_prefix(&self.root)?.as_os_str().as_bytes();
+            let old_name = git_quoted(b"a/", relative);
+            let new_name = git_quoted(b"b/", relative);
+            let mode_lines = match (original.as_ref(), current.as_ref()) {
+                (None, Some(&(_, mode))) => format!("new file mode {}\n", git_mode(mode)),
+                (Some(&(_, mode)), None) => format!("deleted file mode {}\n", git_mode(mode)),
+                (Some(&(_, old)), Some(&(_, new))) if old != new => {
+                    format!("old mode {}\nnew mode {}\n", git_mode(old), git_mode(new))
+                },
+                _ => String::new(),
+            };
+            out.extend_from_slice(
+                &[
+                    b"diff --git ",
+                    old_name.as_slice(),
+                    b" ",
+                    &new_name,
+                    b"\n",
+                    mode_lines.as_bytes(),
+                ]
+                .concat(),
+            );
+
+            let before = original
+                .as_ref()
+                .map_or(&[][..], |&(ref contents, _)| contents);
+            let after = current
+                .as_ref()
+                .map_or(&[][..], |&(ref contents, _)| contents);
+            if before == after {
+                continue;
+            }
+            let old_side = original.as_ref().map_or(&b"/dev/null"[..], |_| &old_name);
+            let new_side = current.as_ref().map_or(&b"/dev/null"[..], |_| &new_name);
+            out.extend_from_slice(&[b"--- ", old_side, b"\n+++ ", new_side, b"\n"].concat());
+
+            let mut hunks = Vec::new();
+            PatchFormatter::new()
+                .suppress_blank_empty(false)
+                .write_patch_into(&create_patch_bytes(before, after), &mut hunks)?;
+            if let Some(body) = hunks.splitn(3, |&byte| byte == b'\n').nth(2) {
+                if body.contains(&0) {
+                    user_bail!(
+                        "the hunks of {} hold NUL bytes, which nix can't read from a diff",
+                        target.strip_prefix(&self.root)?.display()
+                    );
+                }
+                out.extend_from_slice(body);
+            }
+        }
+        Ok(out)
     }
 
     /// GNU patch's test for a patch that is already in the tree: its reverse
@@ -350,6 +446,28 @@ impl SourceTree {
                 relative.display()
             );
         }
+        // the `git apply` that rebuilds the tree without tack refuses these,
+        // and ends a name at `\` when it checks them
+        let options = ComponentOptions {
+            protect_windows: false,
+            protect_hfs:     true,
+            protect_ntfs:    true,
+        };
+        let refused = relative.components().any(|part| {
+            let name = part.as_os_str().as_bytes();
+            let head = name.split(|&byte| byte == b'\\').next().unwrap_or(name);
+            component(name.as_bstr(), None, options).is_err()
+                || matches!(
+                    component(head.as_bstr(), None, options),
+                    Err(ComponentError::DotGitDir)
+                )
+        });
+        if refused {
+            user_bail!(
+                "patch touches {}, which git refuses to write",
+                relative.display()
+            );
+        }
         let mut walked = self.root.clone();
         for component in relative.components() {
             walked.push(component);
@@ -378,7 +496,7 @@ impl SourceTree {
         for dir in target
             .ancestors()
             .skip(1)
-            .take_while(|&dir| dir != self.root)
+            .take_while(|&dir| dir != self.root && !self.kept.contains(dir))
         {
             if fs::read_dir(dir)?.next().is_some() {
                 break;
@@ -871,6 +989,55 @@ impl Display for Anchor {
             Self::End => "end",
         })
     }
+}
+
+/// a file's contents and mode, [`None`] where no file is
+fn on_disk(target: &Path) -> Result<Option<(Vec<u8>, FileMode)>> {
+    match fs::read(target) {
+        Ok(contents) => Ok(Some((contents, mode_of(target)?))),
+        Err(err)
+            if matches!(
+                err.kind(),
+                ErrorKind::NotFound | ErrorKind::IsADirectory | ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        },
+        Err(err) => Err(err).with_context(|| format!("read {}", target.display())),
+    }
+}
+
+const fn git_mode(mode: FileMode) -> &'static str {
+    match mode {
+        FileMode::Regular => "100644",
+        FileMode::Executable => "100755",
+        FileMode::Symlink => "120000",
+        FileMode::Gitlink => "160000",
+    }
+}
+
+/// `prefix` and `path` as git writes a name, C-quoted when a byte needs it
+fn git_quoted(prefix: &[u8], path: &[u8]) -> Vec<u8> {
+    let name = [prefix, path].concat();
+    let plain = name
+        .iter()
+        .all(|&byte| (0x20..0x7F).contains(&byte) && byte != b'"' && byte != b'\\');
+    if plain {
+        return name;
+    }
+    let mut quoted = vec![b'"'];
+    for byte in name {
+        match byte {
+            b'"' => quoted.extend_from_slice(b"\\\""),
+            b'\\' => quoted.extend_from_slice(b"\\\\"),
+            b'\t' => quoted.extend_from_slice(b"\\t"),
+            b'\n' => quoted.extend_from_slice(b"\\n"),
+            0x20..0x7F => quoted.push(byte),
+            _ => quoted.extend_from_slice(format!("\\{byte:03o}").as_bytes()),
+        }
+    }
+    quoted.push(b'"');
+    quoted
 }
 
 fn mode_of(path: &Path) -> Result<FileMode> {

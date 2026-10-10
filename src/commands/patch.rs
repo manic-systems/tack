@@ -212,6 +212,9 @@ fn settle_selected(project: &Project, names: &[String], mode: Mode) -> Result<()
                     (_, &Settled::Rehashed(_)) => {
                         Some("rebuilt, it no longer matched the lock's hash")
                     },
+                    (_, &Settled::Rediffed(_)) => {
+                        Some("rebuilt, its generated diff was missing, edited, or unrecorded")
+                    },
                 };
                 if let Some(label) = status {
                     println!("{}  {label}", input.name);

@@ -21,7 +21,10 @@ use crate::{
     error::user_bail,
     fetch,
     lock::LockedNode,
-    patched::unroot,
+    patched::{
+        remove_diff,
+        unroot,
+    },
     pins::{
         self,
         Frozen,
@@ -173,6 +176,7 @@ fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
         },
         _ => {},
     }
+    remove_diff(&project, name)?;
     Ok((removed_pin, removed_lock))
 }
 

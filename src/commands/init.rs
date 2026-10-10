@@ -25,6 +25,7 @@ use crate::{
         self,
         Project,
     },
+    resolver::ignore_out_links,
 };
 
 pub fn init(project: &Project, request: InitRequest) -> Result<()> {
@@ -68,6 +69,7 @@ pub fn init(project: &Project, request: InitRequest) -> Result<()> {
         project::write_atomic(&lp, "{}\n")?;
     }
     project::write_atomic(&rp, RESOLVER_NIX)?;
+    ignore_out_links(project.dir())?;
 
     println!("initialized tack in {}", project.dir().display());
     println!("  pins.toml       edit shorturls and inputs here");
@@ -94,6 +96,7 @@ fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     };
     if let Some(current) = existing {
         if current == RESOLVER_NIX {
+            ignore_out_links(dir)?;
             println!("resolver already up to date at {}", path.display());
             return Ok(());
         }
@@ -106,6 +109,7 @@ fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     }
     fs::create_dir_all(dir)?;
     project::write_atomic(path, RESOLVER_NIX)?;
+    ignore_out_links(dir)?;
     println!("updated resolver at {}", path.display());
     Ok(())
 }

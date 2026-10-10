@@ -355,8 +355,18 @@ notes each vendored pull or merge request that has merged, closed, or changed
 since you vendored it.
 
 patched trees only exist in the store of the machine that built them. on a
-fresh machine or in CI, run `tack materialize` before evaluating. it rebuilds
-each tree and refuses one whose hash differs from the lock.
+fresh machine or in CI, run `tack materialize` before evaluating, or build them
+with nix directly if tack isn't installed
+
+```sh
+nix-build .tack -A _patched -o .tack/patched
+```
+
+this applies `diffs/<pin>.diff` to the locked upstream with `git apply` from
+your `nixpkgs` pin (or `--arg pkgs`). tack writes that diff for each patched
+pin, so commit `diffs/` alongside `patches/`. the `.tack/patched` link keeps
+the trees from being garbage collected, so you only need to rerun it after
+pulling a lock with new patches.
 
 hunks may sit at a different line than the patch says, and hand-edited hunk
 counts are recounted the way GNU patch does, but context lines must match
@@ -364,7 +374,7 @@ exactly, since its fuzz isn't supported. binary, symlink, and submodule changes
 aren't either. when a patch stops applying, the hunks that failed land in a
 `.rej` file next to it, a patch of their own to fix up by hand. `tack patch rm`
 deletes a remote patch's vendored copy but leaves local files alone, and
-`tack undo` restores `patches/` along with the lock.
+`tack undo` restores `patches/` and `diffs/` along with the lock.
 
 ## laziness
 
@@ -461,8 +471,8 @@ downstream project replaces through follows takes that project's entry, or
 
 a `fetch` pin that overrides or policy reach carries the upstream project's own
 `_meta` as `inputs.<pin>._meta`. upstream resolvers older than this have none,
-so read those through `inputs.<pin>._meta or { }`. `_meta` can't be used as a
-pin name.
+so read those through `inputs.<pin>._meta or { }`. `_meta` and `_patched` can't
+be used as pin names.
 
 ## publishing
 
