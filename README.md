@@ -194,8 +194,9 @@ group = "desktop"
 `tack look desktop --exclude niri` works. a group can't share its name with
 a pin.
 
-`tack freeze desktop` sets `frozen = true` on each pin in the group. a frozen
-pin stays at its locked rev through `tack update` and `tack update desktop`,
+`tack freeze desktop` sets `frozen` on each pin in the group to its locked
+commit, or to `true` for pins without one. a frozen pin stays at that commit
+through `tack update` and `tack update desktop`, even if the lock is deleted,
 and only moves when named directly, as in `tack update niri`. `tack look` still
 reports how far behind it is.
 

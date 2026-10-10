@@ -289,7 +289,7 @@ mod tests {
                     patches:     Vec::new(),
                     tag:         None,
                     group:       None,
-                    frozen:      false,
+                    frozen:      None,
                 }
             })
             .collect()

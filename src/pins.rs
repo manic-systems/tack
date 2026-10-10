@@ -140,6 +140,22 @@ impl FromStr for Unpack {
     }
 }
 
+/// how a frozen pin holds, at the commit `tack freeze` recorded when it has one
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Frozen {
+    Held,
+    At(String),
+}
+
+impl Frozen {
+    pub fn rev(&self) -> Option<&str> {
+        match *self {
+            Self::Held => None,
+            Self::At(ref rev) => Some(rev),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Input {
     pub name:        String,
@@ -156,7 +172,7 @@ pub struct Input {
     pub patches:     Vec<PatchSource>,
     pub tag:         Option<TagFollow>,
     pub group:       Option<String>,
-    pub frozen:      bool,
+    pub frozen:      Option<Frozen>,
 }
 
 impl Input {
@@ -242,7 +258,7 @@ impl Input {
         let tags_from = str_field("tags_from")?;
         let tag = tag_field(name, str_field("tag")?, tags_from, pin_type, url, shorturls)?;
         let group = str_field("group")?;
-        let frozen = bool_field("frozen")?.unwrap_or(false);
+        let frozen = frozen_field(name, entry.get("frozen"))?;
         let submodules = bool_field("submodules")?.unwrap_or(false);
         Ok(Self {
             name: name.to_owned(),
@@ -261,6 +277,22 @@ impl Input {
             group: group.map(str::to_owned),
             frozen,
         })
+    }
+}
+
+fn frozen_field(name: &str, field: Option<&Item>) -> Result<Option<Frozen>> {
+    let Some(item) = field else {
+        return Ok(None);
+    };
+    match (item.as_bool(), item.as_str()) {
+        (Some(true), _) => Ok(Some(Frozen::Held)),
+        (Some(false), _) => Ok(None),
+        (_, Some(rev))
+            if matches!(rev.len(), 40 | 64) && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            Ok(Some(Frozen::At(rev.to_owned())))
+        },
+        _ => user_bail!("input '{name}': frozen must be true or a full commit hash"),
     }
 }
 
@@ -537,17 +569,23 @@ impl PinsDoc {
     /// # Panics
     ///
     /// if `name` isn't an input table, so pass names from `inputs`
-    pub fn set_frozen(&mut self, name: &str, frozen: bool) {
+    pub fn set_frozen(&mut self, name: &str, frozen: Option<&Frozen>) {
         let entry = self
             .doc
             .get_mut("inputs")
             .and_then(|inputs| inputs.get_mut(name))
             .and_then(Item::as_table_like_mut)
             .expect("input listed by inputs()");
-        if frozen {
-            entry.insert("frozen", value(true));
-        } else {
-            entry.remove("frozen");
+        match frozen {
+            Some(&Frozen::Held) => {
+                entry.insert("frozen", value(true));
+            },
+            Some(&Frozen::At(ref rev)) => {
+                entry.insert("frozen", value(rev.as_str()));
+            },
+            None => {
+                entry.remove("frozen");
+            },
         }
     }
 

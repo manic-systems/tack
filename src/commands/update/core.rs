@@ -42,6 +42,7 @@ use crate::{
     },
     pins::{
         self,
+        Frozen,
         PinType,
         Unpack,
     },
@@ -421,12 +422,20 @@ impl PinRun<'_> {
         let localized = source::localize_path_url_with_warning(url, self.project.dir());
         let old = lock.get(&input.name);
         let stale = declared_changed(input, lock, url, &localized.url);
-        let frozen = input.frozen && !self.named.contains(&input.name) && old.is_some();
-        // a frozen pin whose url was respelled relocks at the rev it holds
-        let hold = old
-            .and_then(LockedNode::forge_rev)
-            .filter(|_| frozen && stale);
-        if frozen && hold.is_none() {
+        let freeze = input
+            .frozen
+            .as_ref()
+            .filter(|_| !self.named.contains(&input.name));
+        let locked_rev = old.and_then(LockedNode::forge_rev);
+        // a frozen pin relocks at its recorded rev once the lock loses it, and
+        // at the rev it holds when its url was respelled
+        let hold = freeze.and_then(|held| {
+            match held.rev() {
+                Some(rev) if stale || Some(rev) != locked_rev => Some(rev),
+                _ => locked_rev.filter(|_| stale),
+            }
+        });
+        if freeze.is_some() && old.is_some() && hold.is_none() {
             let mut resolution = PinResolution::frozen();
             if stale {
                 resolution.warning = Some(format!(
@@ -705,7 +714,7 @@ pub(super) fn update(
     accept: bool,
     progress: &impl Progress<UpdateOutcome>,
 ) -> Result<UpdateReport> {
-    let doc = project.load_pins()?;
+    let mut doc = project.load_pins()?;
     let shorturls = doc.shorturls();
     let all = doc.inputs()?;
     let all_follow = doc.all_follows()?;
@@ -745,12 +754,24 @@ pub(super) fn update(
     let mut pins = Vec::with_capacity(resolutions.len());
     let mut warnings = Vec::new();
     let mut changed_names = Vec::new();
+    let mut refrozen = false;
     for (input, (mut resolution, mark, url)) in selected.iter().zip(resolutions) {
         warnings.extend(resolution.warning.take());
         let (recorded, moved) = record_pin(&mut lock, input, &url, &mut resolution, mark);
         changed |= recorded;
         if moved {
             changed_names.push(input.name.clone());
+        }
+        let moved_rev = lock
+            .get(&input.name)
+            .and_then(LockedNode::forge_rev)
+            .filter(|_| moved);
+        if let Some(rev) = moved_rev
+            && let Some(held) = input.frozen.as_ref()
+            && held.rev().is_some_and(|frozen_at| frozen_at != rev)
+        {
+            doc.set_frozen(&input.name, Some(&Frozen::At(rev.to_owned())));
+            refrozen = true;
         }
         if resolution.drift {
             drift += 1;
@@ -773,6 +794,9 @@ pub(super) fn update(
     }
     if changed {
         project.save_lock(&lock)?;
+    }
+    if refrozen {
+        project.save_pins(&doc)?;
     }
 
     for diagnostic in auto_dedup.scan_diagnostics {

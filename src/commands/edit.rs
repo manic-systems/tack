@@ -20,9 +20,11 @@ use crate::{
     cli::AddArgs,
     error::user_bail,
     fetch,
+    lock::LockedNode,
     patched::unroot,
     pins::{
         self,
+        Frozen,
         PinType,
     },
     project::Project,
@@ -203,22 +205,35 @@ pub fn set_frozen(project: &Project, names: &[String], frozen: bool) -> Result<(
         user_bail!("name at least one pin or group");
     }
     let mut doc = project.load_pins()?;
+    let lock = project.load_lock()?;
     let all = doc.inputs()?;
     let targets = select(&all, Selection::new(names, &[]))?;
-    let (verb, unchanged) = if frozen {
-        ("froze", "is already frozen")
-    } else {
-        ("unfroze", "isn't frozen")
-    };
     let mut changed = false;
     for input in targets {
-        if input.frozen == frozen {
+        // an unlocked pin keeps the rev it was frozen at
+        let wanted = frozen.then(|| {
+            lock.get(&input.name)
+                .and_then(LockedNode::forge_rev)
+                .map(|rev| Frozen::At(rev.to_owned()))
+                .or_else(|| input.frozen.clone())
+                .unwrap_or(Frozen::Held)
+        });
+        if input.frozen == wanted {
+            let unchanged = if frozen {
+                "is already frozen"
+            } else {
+                "isn't frozen"
+            };
             println!("{} {unchanged}", input.name);
-        } else {
-            doc.set_frozen(&input.name, frozen);
-            println!("{verb} {}", input.name);
-            changed = true;
+            continue;
         }
+        doc.set_frozen(&input.name, wanted.as_ref());
+        match wanted {
+            Some(Frozen::At(ref rev)) => println!("froze {} at {}", input.name, render::short(rev)),
+            Some(Frozen::Held) => println!("froze {}", input.name),
+            None => println!("unfroze {}", input.name),
+        }
+        changed = true;
     }
     if changed {
         project.save_pins(&doc)?;
