@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
-# tack-resolver: patched tag version signedBy
+# tack-resolver: patched patchedDiff tag version signedBy
 
 let
   inherit (builtins)
@@ -9,6 +9,7 @@ let
     attrNames
     attrValues
     concatMap
+    concatStringsSep
     any
     elem
     elemAt
@@ -103,13 +104,20 @@ let
     {
       overrides ? { },
       resolverDir ? ./.,
+      pkgs ? null,
+      system ? builtins.currentSystem or null,
     }:
     let
       pins = fromTOML (readFile (resolverDir + "/pins.toml"));
       lock = fromJSON (readFile (resolverDir + "/pins.lock.json"));
       declared =
-        if pins.inputs or { } ? _meta then
-          throw "tack: '_meta' is reserved by tack, rename that input"
+        if
+          any (reserved: pins.inputs or { } ? ${reserved}) [
+            "_meta"
+            "_patched"
+          ]
+        then
+          throw "tack: '_meta' and '_patched' are reserved by tack, rename that input"
         else
           pins.inputs or { };
       all_follow_raw = pins.all_follow or { };
@@ -241,14 +249,11 @@ let
         in
         if (entry.unpack or "file") == "tarball" then unpacked.outPath + "/" + name else raw.outPath;
 
-      # tack builds patched trees and adds them to the store, so eval only
-      # fetches a locked path and never builds
-      fetchPatched =
+      patchedTree =
         { name, pin }:
         let
-          node = lock.${name} or { };
           tree =
-            node.patched
+            lock.${name}.patched
               or (throw "tack: pin '${name}' has patches but no patched tree, run tack update ${name}");
           vendored =
             digest:
@@ -262,9 +267,22 @@ let
           current =
             map (digest: digest.source) tree.patches == pin.patches
             && all (digest: hashFile "sha256" (vendored digest) == digest.sha256) tree.patches;
+        in
+        if current then
+          tree
+        else
+          throw "tack: patches for '${name}' changed since the lock was written, run tack update ${name}";
+
+      # tack builds patched trees and adds them to the store, so eval only
+      # fetches a locked path and never builds
+      fetchPatched =
+        { name, pin }:
+        let
+          node = lock.${name} or { };
+          tree = patchedTree { inherit name pin; };
           fetched =
             addErrorContext
-              "tack: could not read the patched tree of '${name}', run tack materialize ${name}, or tack update ${name} if the lock was edited by hand"
+              "tack: the patched tree of '${name}' is not in the store, run tack materialize or nix-build .tack -A _patched -o .tack/patched, or tack update ${name} if the lock was edited by hand"
               (
                 fetchTree (
                   {
@@ -275,19 +293,94 @@ let
                 )
               );
         in
-        if !current then
-          throw "tack: patches for '${name}' changed since the lock was written, run tack update ${name}"
+        fetched
+        // (
+          if node ? rev then
+            {
+              dirtyRev = node.rev + "-dirty";
+              dirtyShortRev = substring 0 7 node.rev + "-dirty";
+            }
+          else
+            { }
+        );
+
+      patchTools =
+        if pkgs != null then
+          pkgs
+        else if !(lock ? nixpkgs) then
+          throw "tack: building patched trees needs a nixpkgs pin, or pass one with nix-build .tack -A _patched --arg pkgs 'import <nixpkgs> {}'"
+        else if system == null then
+          throw "tack: building patched trees needs a system argument in pure eval"
         else
-          fetched
-          // (
-            if node ? rev then
-              {
-                dirtyRev = node.rev + "-dirty";
-                dirtyShortRev = substring 0 7 node.rev + "-dirty";
-              }
+          import (fetchPin "nixpkgs") {
+            inherit system;
+            config = { };
+            overlays = [ ];
+          };
+
+      ownPatched = listToAttrs (
+        map (name: {
+          inherit name;
+          value = buildPatched {
+            inherit name;
+            pin = declared.${name};
+          };
+        }) (filter (name: (declared.${name}.patches or [ ]) != [ ]) (attrNames declared))
+      );
+
+      buildPatched =
+        { name, pin }:
+        let
+          tree = patchedTree { inherit name pin; };
+          diff = resolverDir + "/diffs/${name}.diff";
+        in
+        patchDerivation {
+          upstream = fetchPin name;
+          diff =
+            if !(tree ? diff) then
+              throw "tack: the lock has no generated diff for '${name}', run tack update ${name}"
+            else if !pathExists diff then
+              throw "tack: diffs/${name}.diff is missing, if this is a flake make sure it is tracked by git (git add .tack/diffs)"
+            else if hashFile "sha256" diff != tree.diff then
+              throw "tack: diffs/${name}.diff doesn't match the lock, run tack update ${name}"
             else
-              { }
+              diff;
+          inherit (tree) narHash;
+        };
+
+      # same name and hash as tack's tree, so the same store path
+      patchDerivation =
+        {
+          upstream,
+          diff,
+          narHash,
+        }:
+        derivation {
+          name = "source";
+          inherit (patchTools.stdenv.buildPlatform) system;
+          builder = "${patchTools.bash}/bin/bash";
+          args = [
+            "-euc"
+            ''
+              cp -R "$upstream" "$out"
+              chmod -R u+w "$out"
+              cd "$out"
+              if [ -s "$diff" ]; then git apply "$diff"; fi
+            ''
+          ];
+          PATH = concatStringsSep ":" (
+            map (tool: "${tool}/bin") [
+              patchTools.coreutils
+              patchTools.gitMinimal
+            ]
           );
+          HOME = "/homeless-shelter";
+          upstream = upstream.outPath;
+          inherit diff;
+          outputHash = narHash;
+          outputHashMode = "recursive";
+          outputHashAlgo = "sha256";
+        };
 
       metaFields = {
         github = [
@@ -1038,7 +1131,8 @@ let
           self
           // {
             _meta = selfMeta;
-            __functor = _: args: call ({ inherit resolverDir; } // args);
+            _patched = ownPatched;
+            __functor = _: { ... }@args: call ({ inherit resolverDir; } // args);
           }
         )
     );

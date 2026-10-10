@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 caress = "0.2.0"
 data-encoding = "2.11.1"
-diffy = "0.5.2"
+diffy = { features = [ "std" ], version = "0.5.2" }
 etcetera = "0.11.0"
 flate2 = "1.1.10"
 gix = { default-features = false, features = [

@@ -8,6 +8,7 @@ use std::{
     fs,
     io::ErrorKind,
     path::{
+        Component,
         Path,
         PathBuf,
     },
@@ -105,6 +106,9 @@ pub enum Settled {
     /// the same patches on the same node built a tree the lock hashes
     /// differently, as when patch application itself changed
     Rehashed(PatchedTree),
+    /// the same tree, with its generated diff written again because the lock
+    /// had none or the file no longer matched
+    Rediffed(PatchedTree),
     Unpatched,
 }
 
@@ -112,7 +116,9 @@ impl Settled {
     pub fn record_into(self, lock: &mut LockFile, pin: &str) -> bool {
         match self {
             Self::Current | Self::Restored => false,
-            Self::Rebuilt(tree) | Self::Rehashed(tree) => lock.set_patched(pin, Some(tree)),
+            Self::Rebuilt(tree) | Self::Rehashed(tree) | Self::Rediffed(tree) => {
+                lock.set_patched(pin, Some(tree))
+            },
             Self::Unpatched => lock.set_patched(pin, None),
         }
     }
@@ -153,6 +159,7 @@ impl<'a> PatchedPin<'a> {
         let name = self.name;
         if sources.is_empty() {
             unroot(self.project, name)?;
+            remove_diff(self.project, name)?;
             return Ok(Settled::Unpatched);
         }
         if matches!(
@@ -169,39 +176,64 @@ impl<'a> PatchedPin<'a> {
         let recorded = current
             .filter(|tree| tree.path.exists())
             .map(|tree| tree.path.recorded_nar_hash());
+        let diff_path = self.project.dir().join(diff_file(name));
+        let diffed = current.is_some_and(|tree| recorded_diff(&diff_path, tree));
+        let hashed =
+            current.is_some_and(|tree| recorded.flatten().is_none_or(|hash| hash == tree.nar_hash));
+        let mut generated = None;
         let settled = match (current, mode) {
             (Some(tree), _)
                 if tree.path.exists()
-                    && recorded.flatten().is_none_or(|hash| hash == tree.nar_hash) =>
+                    && hashed
+                    && (diffed || mode == Mode::Restore && tree.diff.is_none()) =>
             {
                 tree.path.root_at(&gcroot(self.project, name))?;
                 Settled::Current
             },
-            (Some(tree), Mode::Restore) if tree.path.exists() => {
+            (Some(tree), Mode::Restore) if tree.path.exists() && !hashed => {
                 user_bail!(
                     "the lock's narHash {} is not the patched tree's, run `tack update {name}`",
                     tree.nar_hash
                 )
             },
             (Some(tree), Mode::Restore) => {
-                self.materialize(&patches, digests, Some(&tree.nar_hash))?;
+                let (rebuilt, diff) = self.materialize(&patches, digests, Some(&tree.nar_hash))?;
+                if rebuilt.diff == tree.diff {
+                    generated = Some(diff);
+                } else {
+                    eprintln!(
+                        "tack: {name}: the lock has no diff this tack writes, run `tack update \
+                         {name}` so nix can build the tree without tack"
+                    );
+                }
                 Settled::Restored
             },
             (Some(tree), Mode::Update | Mode::Refresh) => {
-                let rebuilt = self.materialize(&patches, digests, None)?;
-                if rebuilt.nar_hash == tree.nar_hash {
-                    Settled::Restored
-                } else {
+                let (rebuilt, diff) = self.materialize(&patches, digests, None)?;
+                generated = Some(diff);
+                if rebuilt.nar_hash != tree.nar_hash {
                     Settled::Rehashed(rebuilt)
+                } else if rebuilt.diff != tree.diff || !diffed {
+                    Settled::Rediffed(PatchedTree {
+                        last_modified: tree.last_modified,
+                        ..rebuilt
+                    })
+                } else {
+                    Settled::Restored
                 }
             },
             (None, Mode::Restore) => {
                 user_bail!("the patches no longer match the lock, run `tack update {name}`")
             },
             (None, Mode::Update | Mode::Refresh) => {
-                Settled::Rebuilt(self.materialize(&patches, digests, None)?)
+                let (rebuilt, diff) = self.materialize(&patches, digests, None)?;
+                generated = Some(diff);
+                Settled::Rebuilt(rebuilt)
             },
         };
+        if let Some(diff) = generated {
+            write_diff(&diff_path, &diff)?;
+        }
         // a vendored file whose source now vendors elsewhere, as when a
         // shorturl alias was repointed, is left over
         let orphans = locked
@@ -239,6 +271,14 @@ impl<'a> PatchedPin<'a> {
                 user_bail!("patch {source} is listed twice");
             }
             let patch = match *entry {
+                PatchSource::Local(ref file)
+                    if Path::new(file)
+                        .components()
+                        .find(|part| *part != Component::CurDir)
+                        == Some(Component::Normal(DIFFS_DIR.as_ref())) =>
+                {
+                    user_bail!("{file} is where tack writes its generated diffs, move that patch")
+                },
                 PatchSource::Local(ref file) => PatchFile::read(self.project, &source, file, None)?,
                 PatchSource::Remote(ref remote) => {
                     let file = remote.vendored_file(name);
@@ -291,7 +331,7 @@ impl<'a> PatchedPin<'a> {
         patches: &[PatchFile],
         digests: Vec<PatchDigest>,
         locked: Option<&str>,
-    ) -> Result<PatchedTree> {
+    ) -> Result<(PatchedTree, Vec<u8>)> {
         let name = self.name;
         let scratch = tempfile::tempdir()?;
         // nix-store names the path after the directory, and fetchTree only
@@ -314,7 +354,7 @@ impl<'a> PatchedPin<'a> {
         }
 
         let newest = newest_mtime(&tree);
-        let source_tree = SourceTree::new(&tree)?;
+        let mut source_tree = SourceTree::new(&tree)?;
         for patch in patches {
             if let Err(err) = source_tree.apply(&patch.bytes) {
                 let source = &patch.source;
@@ -339,6 +379,7 @@ impl<'a> PatchedPin<'a> {
             }
         }
 
+        let diff = source_tree.diff()?;
         let nar_hash = nar::hash_path(&tree)?;
         if let Some(expected) = locked
             && nar_hash != expected
@@ -347,7 +388,7 @@ impl<'a> PatchedPin<'a> {
         }
         let path = StorePath::add(&tree)?;
         path.root_at(&gcroot(self.project, name))?;
-        Ok(PatchedTree {
+        let built = PatchedTree {
             path,
             nar_hash,
             last_modified: self
@@ -356,7 +397,9 @@ impl<'a> PatchedPin<'a> {
                 .filter(|&modified| modified > 0)
                 .or(newest),
             patches: digests,
-        })
+            diff: Some(HEXLOWER.encode(&Sha256::hash(&diff))),
+        };
+        Ok((built, diff))
     }
 }
 
@@ -400,6 +443,17 @@ pub fn drifted(project: &Project, sources: &[PatchSource], tree: &PatchedTree) -
         })
 }
 
+const DIFFS_DIR: &str = "diffs";
+
+pub fn diff_file(name: &str) -> String {
+    format!("{DIFFS_DIR}/{name}.diff")
+}
+
+/// drops a pin's generated diff
+pub fn remove_diff(project: &Project, name: &str) -> Result<()> {
+    remove_stale(&project.dir().join(diff_file(name)))
+}
+
 fn gcroot(project: &Project, name: &str) -> PathBuf {
     HistoryStore::for_project(project)
         .state_dir()
@@ -426,8 +480,14 @@ pub fn unroot(project: &Project, name: &str) -> Result<()> {
     remove_stale(&gcroot(project, name))
 }
 
-/// drops the gcroots of pins that left pins.toml without `tack rm`
-pub fn prune_roots(project: &Project, names: &[&str]) -> Result<()> {
+/// drops the gcroots of pins that left pins.toml without `tack rm`, and the
+/// generated diffs of the `departed` ones
+pub fn prune_roots(project: &Project, names: &[&str], departed: &[&str]) -> Result<()> {
+    for name in departed {
+        remove_diff(project, name)?;
+    }
+    let _ = fs::remove_dir(project.dir().join(DIFFS_DIR));
+
     let dir = gcroot(project, "");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -450,4 +510,18 @@ fn remove_stale(path: &Path) -> Result<()> {
         },
         _ => Ok(()),
     }
+}
+
+/// whether the generated diff on disk is the one `tree` records
+fn recorded_diff(path: &Path, tree: &PatchedTree) -> bool {
+    tree.diff.as_deref().is_some_and(|sha256| {
+        fs::read(path).is_ok_and(|bytes| HEXLOWER.encode(&Sha256::hash(&bytes)) == sha256)
+    })
+}
+
+fn write_diff(path: &Path, diff: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_atomic(path, diff)
 }

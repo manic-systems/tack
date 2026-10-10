@@ -74,7 +74,7 @@ impl Snapshot {
 }
 
 /// the `.tack` subdirectories whose files undo restores with the state files
-const VENDORED: [&str; 2] = ["patches", "keys"];
+const VENDORED: [&str; 3] = ["patches", "diffs", "keys"];
 
 /// every vendored file keyed by its path under `.tack`, as one text blob so
 /// undo stores it like the other state files
