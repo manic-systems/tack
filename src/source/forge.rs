@@ -111,13 +111,15 @@ impl Forge {
                         Some(repo.host),
                         &GITLAB_SCHEME,
                     )
-                } else {
+                } else if url.starts_with("https://") || url.starts_with("http://") {
                     let base = url.strip_suffix(".git").unwrap_or(url).to_owned();
                     let scheme = scheme_for_git_url(&base);
                     let credential_host = base
                         .starts_with("https://")
                         .then(|| host_of(&base).to_owned());
                     (base, false, credential_host, scheme)
+                } else {
+                    return None;
                 }
             },
             LockedNode::Tarball { .. }
