@@ -1,24 +1,35 @@
-name: ci
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   check:
+    name: Check (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - ubuntu-26.04-arm
-          - macos-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: cachix/install-nix-action@v31
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-      - run: nix flake check --print-build-logs
+        os: [ubuntu-latest, ubuntu-26.04-arm, macos-latest]
+    permissions:
+      actions: write
+      contents: read
+    uses: manic-systems/workflows/.github/workflows/nix-checks.yml@f66a52617e798d06d8c127b40dc1d1ee939d38d2 # v2.1.0
+    with:
+      os: ${{ matrix.os }}
+      cache: true
+      cache-save: true
+
+  actions:
+    name: Actions Lint
+    uses: manic-systems/workflows/.github/workflows/actions-lint.yml@f66a52617e798d06d8c127b40dc1d1ee939d38d2 # v2.1.0
