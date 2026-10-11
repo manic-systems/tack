@@ -19,7 +19,10 @@ use misstep::{
     Result,
     ResultExt as _,
 };
-use pound::ValueEnum;
+use pound::{
+    ArgValue as _,
+    ValueEnum,
+};
 use toml_edit::{
     Array,
     DocumentMut,
@@ -99,13 +102,6 @@ pub enum Unpack {
 }
 
 impl Unpack {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Tarball => "tarball",
-            Self::File => "file",
-        }
-    }
-
     pub fn detect(url: &str) -> Self {
         let no_query = url.split('?').next().unwrap_or(url);
         let path = no_query.split('#').next().unwrap_or(no_query);
