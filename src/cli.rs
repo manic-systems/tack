@@ -250,7 +250,7 @@ enum Cli {
     /// revert the last tack edit
     Undo {
         /// list the undo history
-        #[pound(long)]
+        #[pound(long, exclusive)]
         list: bool,
     },
     /// reapply an undone edit
