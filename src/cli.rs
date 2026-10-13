@@ -1,13 +1,24 @@
 // SPDX-License-Identifier: EUPL-1.2
 
-use pound::Parse;
+use std::collections::BTreeSet;
+
+use pound::{
+    Parse,
+    complete::{
+        Candidate,
+        Partial,
+    },
+};
 
 use crate::{
     fetch::github::GithubUser,
     pins::{
+        Input,
         PinType,
+        PinsDoc,
         Unpack,
     },
+    project::Project,
     signers::SignerName,
     tag::TagTemplate,
 };
@@ -93,6 +104,7 @@ pub enum SignerAction {
     /// stop trusting a signer that no pin lists
     Rm {
         /// signer name
+        #[pound(complete = signer_names)]
         name: SignerName,
     },
     /// show each signer's keys and the pins that list it
@@ -124,9 +136,10 @@ enum Cli {
         #[pound(long)]
         accept:  bool,
         /// pins or groups to leave alone (repeatable, or comma-separated)
-        #[pound(long)]
+        #[pound(long, complete = pin_names)]
         exclude: Vec<String>,
         /// pins or groups to update (default: all)
+        #[pound(complete = pin_names)]
         names:   Vec<String>,
     },
     /// show upstream drift without writing the lock
@@ -135,9 +148,10 @@ enum Cli {
         #[pound(short, long)]
         verbose: bool,
         /// pins or groups to leave alone (repeatable, or comma-separated)
-        #[pound(long)]
+        #[pound(long, complete = pin_names)]
         exclude: Vec<String>,
         /// pins or groups to inspect (default: all)
+        #[pound(complete = pin_names)]
         names:   Vec<String>,
     },
     /// check that locked commits are signed by their pins' declared signers
@@ -150,9 +164,10 @@ enum Cli {
     /// show each pin's locked inputs and what they follow
     Tree {
         /// pins or groups to leave out (repeatable, or comma-separated)
-        #[pound(long)]
+        #[pound(long, complete = pin_names)]
         exclude: Vec<String>,
         /// pins or groups to show (default: all)
+        #[pound(complete = pin_names)]
         names:   Vec<String>,
     },
     /// add a pin
@@ -189,6 +204,7 @@ enum Cli {
     /// remove a pin
     Rm {
         /// input name
+        #[pound(complete = input_names)]
         name: String,
     },
     /// define or remove a shorturl alias
@@ -204,11 +220,13 @@ enum Cli {
     /// hold pins at their locked rev unless `tack update` names them
     Freeze {
         /// pins or groups to freeze
+        #[pound(complete = pin_names)]
         names: Vec<String>,
     },
     /// let `tack update` move frozen pins again
     Unfreeze {
         /// pins or groups to unfreeze
+        #[pound(complete = pin_names)]
         names: Vec<String>,
     },
     /// manage the keys pins can require commits to be signed by
@@ -224,6 +242,7 @@ enum Cli {
     /// rebuild patched pins that are missing from this machine's nix store
     Materialize {
         /// pins to materialize (default: all)
+        #[pound(complete = input_names)]
         names: Vec<String>,
     },
     /// collapse duplicate pins onto a single source
@@ -243,6 +262,7 @@ pub enum PatchAction {
     /// apply a patch, vendoring remote ones under patches/<name>/
     Add {
         /// input name
+        #[pound(complete = input_names)]
         name:   String,
         /// pull request, merge request or commit url, patch url, or local file
         source: String,
@@ -250,11 +270,13 @@ pub enum PatchAction {
     /// re-download remote patches and rebuild the patched tree
     Update {
         /// pins to refresh (default: all)
+        #[pound(complete = input_names)]
         names: Vec<String>,
     },
     /// drop a patch from a pin
     Rm {
         /// input name
+        #[pound(complete = input_names)]
         name:   String,
         /// the patch as listed in pins.toml
         source: String,
@@ -262,7 +284,57 @@ pub enum PatchAction {
 }
 
 pub fn parse() -> Command {
+    caress::handle(Cli::SPEC);
     Cli::parse().into()
+}
+
+fn project_pins() -> Option<PinsDoc> {
+    Project::discover().ok()?.load_pins().ok()
+}
+
+fn project_inputs() -> Vec<Input> {
+    project_pins()
+        .and_then(|doc| doc.inputs().ok())
+        .unwrap_or_default()
+}
+
+fn input_names(_partial: &Partial<'_, '_>, _typed: &str) -> Vec<Candidate> {
+    project_inputs()
+        .into_iter()
+        .map(|input| Candidate::new(input.name).help(input.url))
+        .collect()
+}
+
+fn pin_names(_partial: &Partial<'_, '_>, _typed: &str) -> Vec<Candidate> {
+    let inputs = project_inputs();
+    let groups = inputs
+        .iter()
+        .filter_map(|input| input.group.as_deref())
+        .collect::<BTreeSet<_>>();
+    groups
+        .into_iter()
+        .map(|group| Candidate::new(group).help("group"))
+        .chain(
+            inputs
+                .iter()
+                .map(|input| Candidate::new(&input.name).help(&input.url)),
+        )
+        .collect()
+}
+
+fn signer_names(_partial: &Partial<'_, '_>, _typed: &str) -> Vec<Candidate> {
+    let Some(doc) = project_pins() else {
+        return Vec::new();
+    };
+
+    doc.signers()
+        .map(|signers| {
+            signers
+                .into_iter()
+                .map(|(name, _)| Candidate::new(name.as_str()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl Command {
