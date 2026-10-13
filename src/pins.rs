@@ -97,7 +97,9 @@ impl FromStr for PinType {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
 pub enum Unpack {
+    /// extract the download as an archive
     Tarball,
+    /// keep the download as a single file
     File,
 }
 
