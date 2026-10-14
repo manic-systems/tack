@@ -62,6 +62,7 @@ use crate::{
         Source,
         clone_url,
         forge::Forge,
+        split_query_fragment,
     },
 };
 
@@ -389,11 +390,14 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
                 .through_redirects(url.as_str(), false)
                 .with_context(|| format!("GET {url}"))?;
             let immutable_url = immutable_url_of(&resp, immutable, url);
-            let last_modified = resp
-                .headers()
-                .get("Last-Modified")
-                .and_then(|header| header.to_str().ok())
-                .and_then(|header| epoch_from_http_date(header).ok())
+            let link_modified = immutable_last_modified(&immutable_url);
+            let last_modified = link_modified
+                .or_else(|| {
+                    resp.headers()
+                        .get("Last-Modified")
+                        .and_then(|header| header.to_str().ok())
+                        .and_then(|header| epoch_from_http_date(header).ok())
+                })
                 .unwrap_or(0);
             let format = detect_tar_format(&immutable_url)
                 .or_else(|_| detect_tar_format(url))
@@ -406,7 +410,7 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
             let node = git_revision_of(&root).map_or_else(
                 || LockedNode::new_tarball(immutable_url.clone(), nar_hash.clone(), last_modified),
                 |rev| {
-                    let newest = newest_mtime(&root).and_then(|secs| i64::try_from(secs).ok());
+                    let newest = link_modified.or_else(|| i64::try_from(newest_mtime(&root)?).ok());
                     LockedNode::new_tarball_with_rev(
                         immutable_url.clone(),
                         rev,
@@ -578,6 +582,16 @@ fn immutable_url_of(
     } else {
         uri
     }
+}
+
+/// channel tarballs stamp every mtime 1980
+fn immutable_last_modified(url: &str) -> Option<i64> {
+    split_query_fragment(url)
+        .1?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("lastModified="))?
+        .parse()
+        .ok()
 }
 
 fn host_of(url: &str) -> Option<&str> {
