@@ -184,10 +184,10 @@ enum Cli {
         /// pin url (shorturl ok; ?rev=<sha> pins a commit)
         url:        String,
         /// pin a source tree only, no flake eval
-        #[pound(long, group = "kind")]
+        #[pound(long, group = kind)]
         fetch:      bool,
         /// pin a fixed-output derivation
-        #[pound(long, group = "kind")]
+        #[pound(long, group = kind)]
         fixed:      bool,
         /// for --fixed: how to materialise the download
         #[pound(long)]
