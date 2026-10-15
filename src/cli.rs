@@ -190,7 +190,7 @@ enum Cli {
         #[pound(long, group = kind)]
         fixed:      bool,
         /// for --fixed: how to materialise the download
-        #[pound(long)]
+        #[pound(long, requires = fixed)]
         unpack:     Option<Unpack>,
         /// subdir holding flake.nix
         #[pound(long)]
@@ -205,7 +205,7 @@ enum Cli {
         #[pound(long)]
         tag:        Option<TagTemplate>,
         /// for --fixed: read --tag's tags from this repo or http(s) page
-        #[pound(long)]
+        #[pound(long, requires = [fixed, tag])]
         tags_from:  Option<String>,
     },
     /// remove a pin
