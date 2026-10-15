@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   update:
-    uses: manic-systems/workflows/.github/workflows/pins-update.yml@f66a52617e798d06d8c127b40dc1d1ee939d38d2 # v2.1.0
+    uses: manic-systems/workflows/.github/workflows/pins-update.yml@d93951cf50722594dc1d64602eb9453dc7da2fb6 # v2.3.0
     with:
       client-id: ${{ vars.MANIC_BOT_CLIENT_ID }}
     secrets:
