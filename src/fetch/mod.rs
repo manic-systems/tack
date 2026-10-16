@@ -32,6 +32,7 @@ pub use resolve::{
     channel_rev,
     commit_object,
     commit_range,
+    commit_times,
     fetch_fixed_pin,
     fetch_locked_scan_files,
     fetch_locked_tree_into,
@@ -54,6 +55,7 @@ pub use topology::{
     CommitRange,
     CompareStatus,
     CurrentRev,
+    RemoteTag,
 };
 
 const PERCENT_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC

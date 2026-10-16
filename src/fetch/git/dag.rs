@@ -53,6 +53,7 @@ use crate::fetch::{
     CompareStatus,
     FetchError,
     FetchResult,
+    RemoteTag,
     auth::record_fetch_warning,
     git_http,
 };
@@ -130,7 +131,7 @@ pub(super) fn resolve_tip(url: &str, reff: Option<&str>) -> FetchResult<String> 
     })
 }
 
-pub(super) fn list_tags(url: &str) -> FetchResult<Vec<String>> {
+pub(super) fn list_tags(url: &str) -> FetchResult<Vec<RemoteTag>> {
     if super::is_local_url(url) {
         return Err(FetchError::Transport(format!(
             "tag following needs a network remote, not {url}"
@@ -139,7 +140,30 @@ pub(super) fn list_tags(url: &str) -> FetchResult<Vec<String>> {
     let mut prefixes = RefPrefixes::new();
     prefixes.extend(["refs/tags/".into()]);
     let remote_refs = probe_refs(url, prefixes)?;
-    Ok(remote_refs.iter().filter_map(tag_name).collect())
+    Ok(remote_refs.iter().filter_map(remote_tag).collect())
+}
+
+/// the committer times of `revs` in seconds, fetched without trees or history
+pub(super) fn commit_times(url: &str, revs: &[&str]) -> FetchResult<Vec<i64>> {
+    let ids = revs
+        .iter()
+        .map(|rev| parse_object_id(rev))
+        .collect::<FetchResult<Vec<_>>>()?;
+    let mut graph = DagGraph::new(url)?;
+    graph.fetch(&ids, 1)?;
+    ids.iter()
+        .map(|&id| {
+            let time = graph
+                .repo
+                .find_commit(id)
+                .map_err(|err| FetchError::Transport(format!("read git commit {id}: {err}")))?
+                .time()
+                .map_err(|err| {
+                    FetchError::Transport(format!("read git commit {id} time: {err}"))
+                })?;
+            Ok(time.seconds)
+        })
+        .collect()
 }
 
 fn probe_refs(url: &str, prefixes: RefPrefixes) -> FetchResult<Vec<handshake::Ref>> {
@@ -150,15 +174,20 @@ fn probe_refs(url: &str, prefixes: RefPrefixes) -> FetchResult<Vec<handshake::Re
     list_refs(&repo, url, Some(prefixes))
 }
 
-fn tag_name(reference: &handshake::Ref) -> Option<String> {
-    let (full_ref_name, _) = named_object(reference)?;
+fn remote_tag(reference: &handshake::Ref) -> Option<RemoteTag> {
+    let (full_ref_name, commit) = named_object(reference)?;
     let name = String::from_utf8(
         full_ref_name
             .strip_prefix(b"refs/tags/".as_slice())?
             .to_vec(),
     )
     .ok()?;
-    (name.chars().count() <= MAX_TAG_CHARS).then_some(name)
+    (name.chars().count() <= MAX_TAG_CHARS).then(|| {
+        RemoteTag {
+            name,
+            commit: commit.to_string(),
+        }
+    })
 }
 
 struct DagGraph {

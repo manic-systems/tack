@@ -18,6 +18,13 @@ pub struct CommitObject {
     pub data: Vec<u8>,
 }
 
+/// a tag a remote lists, with the commit it peels to
+#[derive(Clone, Debug)]
+pub struct RemoteTag {
+    pub name:   String,
+    pub commit: String,
+}
+
 /// the commits a pin moves across, from a verified anchor to its new rev
 #[derive(Clone, Debug)]
 pub enum CommitRange {

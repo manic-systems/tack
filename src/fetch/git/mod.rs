@@ -66,6 +66,7 @@ use super::{
     CommitRange,
     CompareStatus,
     FetchResult,
+    RemoteTag,
     git_http,
 };
 use crate::nar;
@@ -89,8 +90,12 @@ pub(super) fn current_rev(url: &str, reff: Option<&str>, pinned: Option<&str>) -
     )
 }
 
-pub(super) fn list_tags(url: &str) -> FetchResult<Vec<String>> {
+pub(super) fn list_tags(url: &str) -> FetchResult<Vec<RemoteTag>> {
     dag::list_tags(url)
+}
+
+pub(super) fn commit_times(url: &str, revs: &[&str]) -> FetchResult<Vec<i64>> {
+    dag::commit_times(url, revs)
 }
 
 pub(super) fn compare_status(
