@@ -2,6 +2,8 @@
 
 use std::{
     borrow::Cow,
+    cmp::Reverse,
+    collections::HashMap,
     fmt::{
         Display,
         Formatter,
@@ -64,18 +66,17 @@ impl Display for TagTemplate {
 }
 
 impl TagTemplate {
-    fn newest<'tag>(&self, tags: &'tag [String]) -> Option<&'tag str> {
-        self.ranked(tags).into_iter().next()
-    }
-
-    /// the matching tags, newest first
-    fn ranked<'tag>(&self, tags: &'tag [String]) -> Vec<&'tag str> {
+    /// the matching tags and their versions, newest first
+    fn ranked<'tag>(
+        &self,
+        tags: impl IntoIterator<Item = &'tag str>,
+    ) -> Vec<(Vec<u64>, &'tag str)> {
         let mut matching = tags
-            .iter()
-            .filter_map(|tag| Some((self.version(tag)?, tag.as_str())))
+            .into_iter()
+            .filter_map(|tag| Some((self.version(tag)?, tag)))
             .collect::<Vec<_>>();
         matching.sort_unstable_by(|left, right| right.cmp(left));
-        matching.into_iter().map(|(_, tag)| tag).collect()
+        matching
     }
 
     /// the version a release asset's name carries, `{version}` plus any dotted
@@ -176,15 +177,60 @@ impl TagSource {
         }
     }
 
-    fn tags(&self, template: &TagTemplate) -> Result<Vec<String>> {
+    fn ranked(&self, template: &TagTemplate, window: usize) -> Result<Vec<String>> {
         match *self {
-            Self::Repo(ref source) => fetch::list_tags(source),
+            Self::Repo(ref source) => ranked_in_repo(source, template, window),
             Self::Page(_) if template.open_end => {
                 user_bail!("tag template '{template}' cannot end in * when reading a page")
             },
-            Self::Page(ref url) => Ok(template.scan(&fetch::raw(url, None)?)),
+            Self::Page(ref url) => {
+                let tags = template.scan(&fetch::raw(url, None)?);
+                let ranked = template.ranked(tags.iter().map(String::as_str));
+                Ok(ranked.into_iter().map(|(_, tag)| tag.to_owned()).collect())
+            },
         }
     }
+}
+
+/// a repo's tags that `template` matches, newest first, where tags tying on
+/// version within the first `window` go by commit date
+fn ranked_in_repo(source: &Source, template: &TagTemplate, window: usize) -> Result<Vec<String>> {
+    let tags = fetch::list_tags(source)?;
+    let mut ranked = template.ranked(tags.iter().map(|tag| tag.name.as_str()));
+
+    let mut groups = Vec::new();
+    let mut start = 0;
+    while start < ranked.len().min(window) {
+        let version = &ranked[start].0;
+        let len = ranked[start..]
+            .iter()
+            .take_while(|&&(ref other, _)| other == version)
+            .count();
+        if len > 1 {
+            groups.push(start..start + len);
+        }
+        start += len;
+    }
+
+    if !groups.is_empty() {
+        let commits = tags
+            .iter()
+            .map(|tag| (tag.name.as_str(), tag.commit.as_str()))
+            .collect::<HashMap<_, _>>();
+        let tied = groups
+            .iter()
+            .flat_map(|group| ranked[group.clone()].iter().map(|&(_, tag)| tag))
+            .collect::<Vec<_>>();
+        let revs = tied.iter().map(|tag| commits[tag]).collect::<Vec<_>>();
+        if let Some(stamps) = fetch::commit_times(source, &revs) {
+            let dated = tied.into_iter().zip(stamps).collect::<HashMap<_, _>>();
+            for group in groups {
+                ranked[group].sort_by_key(|&(_, tag)| Reverse(dated[tag]));
+            }
+        }
+    }
+
+    Ok(ranked.into_iter().map(|(_, tag)| tag.to_owned()).collect())
 }
 
 /// a tag template and where its tags come from, [`None`] for the url's own repo
@@ -248,8 +294,7 @@ pub fn follow<'url>(
         return follow_asset(name, tagged, expanded);
     }
     let source = followable(name, expanded)?;
-    let tags = fetch::list_tags(&source)?;
-    let Some(tag) = tag_template.newest(&tags) else {
+    let Some(tag) = ranked_in_repo(&source, tag_template, 1)?.into_iter().next() else {
         user_bail!("input '{name}': no tag matches {tag_template}");
     };
     let (base, fragment) = expanded
@@ -258,7 +303,7 @@ pub fn follow<'url>(
     let separator = if base.contains('?') { '&' } else { '?' };
     Ok(Followed {
         url: Cow::Owned(format!("{base}{separator}ref=refs/tags/{tag}{fragment}")),
-        tag: Some(tag.to_owned()),
+        tag: Some(tag),
     })
 }
 
@@ -327,15 +372,14 @@ pub fn asset_repo(name: &str, expanded: &str) -> Result<Source> {
 
 fn follow_asset(name: &str, follow: &TagFollow, expanded: &str) -> Result<Followed<'static>> {
     let template = &follow.template;
-    let tags = match follow.from {
-        Some(ref from) => from.tags(template)?,
-        None => fetch::list_tags(&asset_repo(name, expanded)?)?,
+    let ranked = match follow.from {
+        Some(ref from) => from.ranked(template, ASSET_TRIES)?,
+        None => ranked_in_repo(&asset_repo(name, expanded)?, template, ASSET_TRIES)?,
     };
-    let ranked = template.ranked(&tags);
     if ranked.is_empty() {
         user_bail!("input '{name}': no tag matches {template}");
     }
-    for &tag in ranked.iter().take(ASSET_TRIES) {
+    for tag in ranked.iter().take(ASSET_TRIES) {
         let version = template.asset_version(tag);
         let url = expanded
             .replace(TAG_SLOT, tag)

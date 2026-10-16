@@ -31,6 +31,7 @@ use super::{
     CommitRange,
     FetchError,
     FetchResult,
+    RemoteTag,
     archive::{
         detect_tar_format,
         newest_mtime,
@@ -209,8 +210,25 @@ pub fn is_local_url(url: &str) -> bool {
     git::is_local_url(url)
 }
 
-pub fn list_tags(source: &Source) -> Result<Vec<String>> {
-    let url = match *source {
+pub fn list_tags(source: &Source) -> Result<Vec<RemoteTag>> {
+    Ok(git::list_tags(&tag_remote(source)?)?)
+}
+
+/// the committer times of commits in a tag-following source, in seconds, or
+/// [`None`] with a warning when they can't be read
+pub fn commit_times(source: &Source, revs: &[&str]) -> Option<Vec<i64>> {
+    let times = tag_remote(source).and_then(|url| Ok(git::commit_times(&url, revs)?));
+    times
+        .inspect_err(|err| {
+            record_fetch_warning(format!(
+                "can't date the tags that tie on version, ranking them by name: {err:#}"
+            ));
+        })
+        .ok()
+}
+
+fn tag_remote(source: &Source) -> Result<String> {
+    Ok(match *source {
         Source::Github {
             ref owner,
             ref repo,
@@ -226,8 +244,7 @@ pub fn list_tags(source: &Source) -> Result<Vec<String>> {
         Source::Tarball { .. } | Source::Path { .. } => {
             user_bail!("tag following needs a github, gitlab, or git source")
         },
-    };
-    Ok(git::list_tags(&url)?)
+    })
 }
 
 fn forge_resolve_ref(url: &str, reff: Option<&str>) -> Option<String> {
