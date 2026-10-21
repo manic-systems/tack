@@ -17,8 +17,7 @@ fn pinned_rev_reachable_only_off_named_ref_is_found() {
     let dest = tmp.path().join("out");
     fs::create_dir_all(&dest).unwrap();
 
-    // ref names main, but the pinned rev only lives on feature, so the fetch
-    // must widen past the named ref to find it
+    // ref names main, but the pinned rev only lives on feature
     fetch_tree_into(&remote.url(), Some("main"), Some(&pinned), false, &dest).unwrap();
 
     assert_eq!(
