@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use rustls_native_certs::load_native_certs;
 use serde::{
     Deserialize,
     Serialize,
@@ -25,7 +26,11 @@ use ureq::{
             USER_AGENT,
         },
     },
-    tls::TlsConfig,
+    tls::{
+        Certificate,
+        RootCerts,
+        TlsConfig,
+    },
     typestate::{
         WithBody,
         WithoutBody,
@@ -57,9 +62,32 @@ const APPLICATION_JSON: &str = "application/json";
 pub(super) fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        let config = TlsConfig::builder().build();
+        let config = TlsConfig::builder()
+            .root_certs(RootCerts::new_with_certs(&system_root_certs()))
+            .build();
         Agent::config_builder().tls_config(config).build().into()
     })
+}
+
+fn system_root_certs() -> Vec<Certificate<'static>> {
+    let loaded = load_native_certs();
+
+    for err in &loaded.errors {
+        record_fetch_warning(format!("loading CA certificates: {err}"));
+    }
+
+    if loaded.certs.is_empty() {
+        record_fetch_warning(
+            "no CA certificates found on the system, please set SSL_CERT_FILE to a PEM bundle"
+                .to_owned(),
+        );
+    }
+
+    loaded
+        .certs
+        .iter()
+        .map(|der| Certificate::from_der(der).to_owned())
+        .collect()
 }
 
 const MAX_REDIRECT_HOPS: u32 = 10;
