@@ -224,13 +224,24 @@ fn clone_fetch_candidate(
     Ok((repo, fetched_ref))
 }
 
-/// widen refspecs only when the pin is not reachable
+/// try the exact commit shallowly before widening refspecs
 fn fetch_pinned(
     url: &str,
     reff: Option<&str>,
     pinned: &str,
     into: &Path,
 ) -> Result<gix::Repository> {
+    let shallow_repo = init_scratch_repo(into)?;
+    let exact = [format!("+{pinned}:refs/tack/fetched")];
+    if fetch_refspecs_into(&shallow_repo, url, &exact, true).is_ok()
+        && commit_present(&shallow_repo, pinned)
+    {
+        return Ok(shallow_repo);
+    }
+
+    // A failed shallow fetch must not constrain the full-history fallback.
+    drop(shallow_repo);
+    fs::remove_dir_all(into.join(".git"))?;
     let repo = init_scratch_repo(into)?;
     let primary = match reff {
         Some(target) if target.starts_with("refs/") => target.to_owned(),
@@ -377,6 +388,9 @@ fn fetch_local_wildcard_refspec(
 }
 
 fn local_ref_id(repo: &gix::Repository, name: &str) -> Result<gix::ObjectId> {
+    if let Ok(id) = gix::ObjectId::from_hex(name.as_bytes()) {
+        return Ok(id);
+    }
     if name == "HEAD" {
         return Ok(repo.head_id()?.detach());
     }
