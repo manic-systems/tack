@@ -40,7 +40,7 @@ gix-transport = { default-features = false, features = [
 ], version = "0.61.0" }
 hmac-sha256 = "1.1.15"
 jiff = "0.2.38"
-misstep = { features = [ "pretty" ], version = "0.3.0" }
+misstep = { features = [ "pretty" ], version = "0.4.1" }
 percent-encoding = "2.3.2"
 pound = "0.5.1"
 rustls-native-certs = "0.8.5"
