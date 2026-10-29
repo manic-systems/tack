@@ -88,7 +88,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4d004238ba4fd5eed796d853ab8207163bf6e8b9c8c19c95a2952f11a0e3860"
 dependencies = [
- "pound",
+ "pound 0.5.3",
 ]
 
 [[package]]
@@ -1491,27 +1491,33 @@ dependencies = [
 
 [[package]]
 name = "pound"
-version = "0.5.1"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55eceed0bfeaef65cdb38df8c5b1321e6190dd7827abeb7badcdda74585160ff"
+checksum = "c06bd2a1140980d23b04ea62a07b30da7df5417bb832ac4749e0c3ad4066f281"
+
+[[package]]
+name = "pound"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9415a85b43c9f100b38691b2779e9a3c704e01f10af6e674a6b7fd2e1be500db"
 dependencies = [
  "pound-derive",
 ]
 
 [[package]]
 name = "pound-derive"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5d07f40db2bec324cbd2682fac89304227dd558424477d559ca03c79c01e872"
+checksum = "3cbd90aba74d7559c11608901ae4b790567617e73aac9e6a7c5e7cb787bfb203"
 dependencies = [
  "pound-derive-impl",
 ]
 
 [[package]]
 name = "pound-derive-impl"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c5c4216d4a072658b62063a1eef954c5e83c6730963be477f577efd666823f4"
+checksum = "5aa95e97a2c4024ee8b1a8442926deb08e878265d8c5821ca432df83ef0097d2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1530,9 +1536,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.106"
+version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
@@ -1548,9 +1554,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.45"
+version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
@@ -1827,7 +1833,7 @@ dependencies = [
  "jiff",
  "misstep",
  "percent-encoding",
- "pound",
+ "pound 0.6.0",
  "rustls-native-certs",
  "serde",
  "serde_json",
