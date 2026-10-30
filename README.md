@@ -195,6 +195,18 @@ group = "desktop"
 `tack look desktop --exclude niri` works. a group can't share its name with
 a pin.
 
+a `[groups.<name>]` table sets keys for every pin in the group
+
+```toml
+[groups.desktop]
+exclude_follow = ["nixpkgs"]
+signers        = ["alice"]
+```
+
+a pin can still set any of these keys itself, which replaces the group's value
+outright, including for arrays and tables. `url`, `group` and `frozen` are only
+valid on a pin.
+
 `tack freeze desktop` sets `frozen` on each pin in the group to its locked
 commit, or to `true` for pins without one. a frozen pin stays at that commit
 through `tack update` and `tack update desktop`, even if the lock is deleted,

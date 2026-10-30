@@ -31,6 +31,7 @@ use toml_edit::{
     DocumentMut,
     Item,
     Table,
+    TableLike,
     value,
 };
 
@@ -199,19 +200,24 @@ pub struct Input {
 }
 
 impl Input {
-    fn from_item(name: &str, input_item: &Item, shorturls: &ShortUrls<'_>) -> Result<Self> {
+    fn from_item(
+        name: &str,
+        input_item: &Item,
+        defaults: Option<&dyn TableLike>,
+        shorturls: &ShortUrls<'_>,
+    ) -> Result<Self> {
         check_name(name)?;
         let entry = input_item
             .as_table_like()
             .with_context(|| format!("input '{name}' is not a table"))?;
+        let get = |key: &str| entry.get(key).or_else(|| defaults?.get(key));
         let context = format!("input '{name}'");
         let url = entry
             .get("url")
             .and_then(Item::as_str)
             .with_context(|| format!("input '{name}' has no url"))?;
         let str_field = |key: &str| {
-            entry
-                .get(key)
+            get(key)
                 .map(|item| {
                     item.as_str()
                         .with_context(|| format!("input '{name}': {key} must be a string"))
@@ -219,8 +225,7 @@ impl Input {
                 .transpose()
         };
         let bool_field = |key: &str| {
-            entry
-                .get(key)
+            get(key)
                 .map(|item| {
                     item.as_bool()
                         .with_context(|| format!("input '{name}': {key} must be a bool"))
@@ -245,10 +250,10 @@ impl Input {
         if pin_type != PinType::Fixed && unpack.is_some() {
             user_bail!("input '{name}': unpack is only valid for type = \"fixed\"");
         }
-        let follows = follows_table(name, entry.get("follows"))?;
+        let follows = follows_table(name, get("follows"))?;
         reject_scoped_duplicates(&follows, &format!("inputs.{name}.follows"))?;
         let name_set = |key: &str| {
-            string_array(&context, key, entry.get(key)).map(|names| {
+            string_array(&context, key, get(key)).map(|names| {
                 names
                     .into_iter()
                     .map(str::to_owned)
@@ -259,7 +264,7 @@ impl Input {
         let omit_inputs = name_set("omit_inputs")?;
         let keep_inputs = name_set("keep_inputs")?;
         let dir = str_field("dir")?;
-        let signers = string_array(&context, "signers", entry.get("signers"))?
+        let signers = string_array(&context, "signers", get("signers"))?
             .into_iter()
             .map(str::parse::<SignerName>)
             .collect::<Result<Vec<_>>>()
@@ -267,7 +272,7 @@ impl Input {
         if pin_type == PinType::Fixed && !signers.is_empty() {
             user_bail!("input '{name}': signers are not valid for type = \"fixed\"");
         }
-        let patches = string_array(&context, "patches", entry.get("patches"))?
+        let patches = string_array(&context, "patches", get("patches"))?
             .into_iter()
             .map(|raw| {
                 PatchSource::parse(raw, shorturls).with_context(|| format!("input '{name}'"))
@@ -474,9 +479,17 @@ impl PinsDoc {
         let Some(table) = self.doc.get("inputs").and_then(Item::as_table_like) else {
             return Ok(out);
         };
+        let groups = self.groups()?;
         let shorturls = self.shorturls();
         for (name, item) in table.iter() {
-            out.push(Input::from_item(name, item, &shorturls)?);
+            let defaults = item
+                .get("group")
+                .and_then(Item::as_str)
+                .and_then(|group| groups.get(group).copied());
+            out.push(Input::from_item(name, item, defaults, &shorturls)?);
+        }
+        if let Some(group) = groups.keys().find(|&&group| table.contains_key(group)) {
+            user_bail!("group '{group}' is also an input name");
         }
         self.signers()?;
         let declared = self.doc.get("signers").and_then(Item::as_table_like);
@@ -496,6 +509,28 @@ impl PinsDoc {
             }
         }
         Ok(out)
+    }
+
+    /// the settings each `[groups.<name>]` table gives its pins
+    pub fn groups(&self) -> Result<BTreeMap<&str, &dyn TableLike>> {
+        let Some(table) = self.doc.get("groups").and_then(Item::as_table_like) else {
+            return Ok(BTreeMap::new());
+        };
+        table
+            .iter()
+            .map(|(group, item)| {
+                let settings = item
+                    .as_table_like()
+                    .with_context(|| format!("group '{group}' is not a table"))?;
+                if let Some(key) = ["url", "group", "frozen"]
+                    .into_iter()
+                    .find(|&key| settings.contains_key(key))
+                {
+                    user_bail!("group '{group}': {key} can only be set on a pin");
+                }
+                Ok((group, settings))
+            })
+            .collect()
     }
 
     /// the keys of every signer that one of `inputs` lists

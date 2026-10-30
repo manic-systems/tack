@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
-# tack-resolver: patched patchedDiff tag version signedBy
+# tack-resolver: patched patchedDiff tag version signedBy groups
 
 let
   inherit (builtins)
@@ -45,6 +45,12 @@ let
       throw "tack: ${location} must be an array of strings"
     else
       value;
+
+  pinsOf =
+    toml:
+    mapAttrs (_: pin: if pin ? group then (toml.groups or { }).${pin.group} or { } // pin else pin) (
+      toml.inputs or { }
+    );
 
   knownTypes = [
     "github"
@@ -124,7 +130,7 @@ let
         then
           throw "tack: '_meta', '_patched' and '_nested' are reserved by tack, rename that input"
         else
-          pins.inputs or { };
+          pinsOf pins;
       all_follow_raw = pins.all_follow or { };
       # tackOverrides carries this reserved entry across nested resolver boundaries
       inheritedPolicy = overrides.__tack_policy or { };
@@ -389,7 +395,7 @@ let
           dir = root + "/.tack";
           pinsFile = fromTOML (readFile (dir + "/pins.toml"));
           lockFile = fromJSON (readFile (dir + "/pins.lock.json"));
-          inputs = if isAttrs (pinsFile.inputs or null) then pinsFile.inputs else { };
+          inputs = if isAttrs (pinsFile.inputs or null) then pinsOf pinsFile else { };
         in
         if !isType "regular" root ".tack/pins.toml" || !isType "regular" root ".tack/pins.lock.json" then
           null
