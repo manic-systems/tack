@@ -1145,7 +1145,7 @@ let
                 childNode = upLock.nodes.${childName};
                 childSrc = fetchLocked {
                   what = "flake.lock node '${childName}'";
-                  inherit (childNode) locked;
+                  locked = removeAttrs childNode.locked [ "dir" ];
                 };
               in
               if isList ref && ref != [ ] then
@@ -1155,7 +1155,14 @@ let
                   inherit upLock rootInputs omit;
                   nodeName = childName;
                   sourceInfo = childSrc;
+                  dir = childNode.locked.dir or null;
                   follows = deepFollows;
+                }
+              else if childNode.locked ? dir then
+                childSrc
+                // {
+                  outPath = childSrc.outPath + "/" + childNode.locked.dir;
+                  sourceInfo = childSrc;
                 }
               else
                 childSrc
@@ -1245,6 +1252,7 @@ let
           upLock,
           nodeName,
           sourceInfo,
+          dir,
           follows,
           omit,
           rootInputs,
@@ -1257,7 +1265,7 @@ let
             omit
             rootInputs
             ;
-          flakeDir = sourceInfo.outPath;
+          flakeDir = sourceInfo.outPath + (if dir == null then "" else "/" + dir);
           levelFollows = follows;
           deepFollows = follows;
         };
