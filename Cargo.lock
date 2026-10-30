@@ -84,11 +84,11 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "caress"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4d004238ba4fd5eed796d853ab8207163bf6e8b9c8c19c95a2952f11a0e3860"
+checksum = "c8769b95e8254ef7093e5b44e11dc1f43a5550c1944079298f0a47955bd30b12"
 dependencies = [
- "pound",
+ "pound 0.6.1",
 ]
 
 [[package]]
@@ -1499,6 +1499,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pound"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31904757f773044425cafb499e2491363863fa2c65c0843c0e955e002a8f9412"
+
+[[package]]
 name = "pound-derive"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1827,7 +1833,7 @@ dependencies = [
  "jiff",
  "misstep",
  "percent-encoding",
- "pound",
+ "pound 0.5.1",
  "rustls-native-certs",
  "serde",
  "serde_json",

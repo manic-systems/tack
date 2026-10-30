@@ -17,7 +17,7 @@ name = "tack"
 path = "src/main.rs"
 
 [dependencies]
-caress = "0.2.0"
+caress = "0.3.0"
 data-encoding = "2.11.1"
 diffy = { features = [ "std" ], version = "0.5.2" }
 etcetera = "0.11.0"
