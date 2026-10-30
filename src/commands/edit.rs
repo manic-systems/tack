@@ -105,7 +105,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         eprintln!("tack: {warning}");
     }
     let fetched = tag::follow(name, follow.as_ref(), &localized.url).and_then(|followed| {
-        update::fetch_input(pin_type, unpack, submodules, &followed.url)
+        update::fetch_input(pin_type, unpack, submodules, false, &followed.url)
             .map(|pin| (pin, followed.tag))
     });
     match fetched {

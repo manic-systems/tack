@@ -26,6 +26,7 @@ fn inputs(names: &[&str]) -> Vec<pins::Input> {
                 tag:         None,
                 group:       None,
                 frozen:      None,
+                build_fetch: None,
             }
         })
         .collect()

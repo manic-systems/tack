@@ -42,6 +42,7 @@ use crate::{
     },
     pins::{
         self,
+        BuildFetch,
         Frozen,
         PinType,
         Unpack,
@@ -99,13 +100,18 @@ pub fn fetch_input(
     pin_type: PinType,
     unpack: Option<Unpack>,
     submodules: bool,
+    patched: bool,
     expanded: &str,
 ) -> Result<FetchedPin> {
     match pin_type {
         PinType::Fixed => fetch::fetch_fixed_pin(expanded, unpack),
         PinType::Flake | PinType::Fetch => {
-            let source = expanded.parse::<Source>()?;
-            fetch::fetch_pin(&source, submodules)
+            let fetched = fetch::fetch_pin(&expanded.parse::<Source>()?, submodules)?;
+            Ok(if pin_type == PinType::Fetch && !patched {
+                fetched.offer_archive()
+            } else {
+                fetched
+            })
         },
     }
 }
@@ -321,7 +327,13 @@ fn classify(
         return PinResolution::unchanged(warning);
     }
 
-    let mut fetched = match fetch_input(input.pin_type, input.unpack, input.submodules, expanded) {
+    let mut fetched = match fetch_input(
+        input.pin_type,
+        input.unpack,
+        input.submodules,
+        !input.patches.is_empty(),
+        expanded,
+    ) {
         Ok(fetched) => fetched,
         Err(err) => return PinResolution::failed(&err, warning),
     };
@@ -421,7 +433,8 @@ impl PinRun<'_> {
         let lock = self.lock;
         let localized = source::localize_path_url_with_warning(url, self.project.dir());
         let old = lock.get(&input.name);
-        let stale = declared_changed(input, lock, url, &localized.url);
+        let stale = declared_changed(input, lock, url, &localized.url)
+            || input.frozen.is_none() && old.is_some_and(|node| archive_missing(input, node));
         let freeze = input
             .frozen
             .as_ref()
@@ -485,6 +498,7 @@ impl PinRun<'_> {
         let recorded = lock.signed_by(&input.name);
         let mut mark = check_signers(input, old, recorded, self.keyring, &mut resolution);
         settle_patches(self.project, input, lock, &mut resolution);
+        note_unfit(input, old, &mut resolution);
         if matches!(resolution.outcome, UpdateOutcome::Failed(_)) {
             mark = SignerMark::Keep;
         }
@@ -524,6 +538,35 @@ fn record_pin(
     changed |=
         mem::replace(&mut resolution.patched, Settled::Current).record_into(lock, &input.name);
     (changed, moved)
+}
+
+fn note_unfit(input: &pins::Input, old: Option<&LockedNode>, resolution: &mut PinResolution) {
+    let fresh = resolution.node.is_some();
+    let Some(locked) = resolution.node.as_ref().or(old) else {
+        return;
+    };
+    let asked = match input.build_fetch {
+        Some(BuildFetch::Pinned) => true,
+        Some(BuildFetch::Global) => fresh,
+        None => false,
+    };
+    if !asked || !locked.archive_checked() || locked.archive().is_some() {
+        return;
+    }
+    let unfit = format!(
+        "{}: cannot fetch at build time, falling back to eval",
+        input.name
+    );
+    resolution.warning = Some(
+        resolution
+            .warning
+            .take()
+            .map_or_else(|| unfit.clone(), |prev| format!("{prev} {unfit}")),
+    );
+}
+
+fn archive_missing(input: &pins::Input, node: &LockedNode) -> bool {
+    input.build_fetch == Some(BuildFetch::Pinned) && node.takes_archive() && !node.archive_checked()
 }
 
 fn declared_changed(

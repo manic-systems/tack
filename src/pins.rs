@@ -197,12 +197,20 @@ pub struct Input {
     pub tag:         Option<TagFollow>,
     pub group:       Option<String>,
     pub frozen:      Option<Frozen>,
+    pub build_fetch: Option<BuildFetch>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildFetch {
+    Pinned,
+    Global,
 }
 
 impl Input {
-    const KEYS: [&str; 16] = [
+    const KEYS: [&str; 17] = [
         "dir",
         "exclude_follow",
+        "fetch_mode",
         "flake",
         "follows",
         "frozen",
@@ -224,6 +232,7 @@ impl Input {
         input_item: &Item,
         defaults: Option<&dyn TableLike>,
         shorturls: &ShortUrls<'_>,
+        global_build: bool,
     ) -> Result<Self> {
         check_name(name)?;
 
@@ -252,14 +261,7 @@ impl Input {
                 })
                 .transpose()
         };
-        let pin_type = match str_field("type")? {
-            Some(typ) => {
-                typ.parse::<PinType>()
-                    .with_context(|| format!("input '{name}'"))?
-            },
-            None if bool_field("flake")? == Some(false) => PinType::Fetch,
-            None => PinType::Flake,
-        };
+        let pin_type = type_field(name, str_field("type")?, bool_field("flake")?)?;
         let unpack = str_field("unpack")?
             .map(|unpack| {
                 unpack
@@ -304,7 +306,6 @@ impl Input {
         let tags_from = str_field("tags_from")?;
         let tag = tag_field(name, str_field("tag")?, tags_from, pin_type, url, shorturls)?;
         let group = str_field("group")?;
-        let frozen = frozen_field(name, entry.get("frozen"))?;
         let submodules = bool_field("submodules")?.unwrap_or(false);
         Ok(Self {
             name: name.to_owned(),
@@ -318,12 +319,56 @@ impl Input {
             omit_inputs,
             keep_inputs,
             signers,
+            build_fetch: fetch_mode_field(
+                name,
+                str_field("fetch_mode")?,
+                global_build,
+                pin_type,
+                &patches,
+            )?,
             patches,
             tag,
             group: group.map(str::to_owned),
-            frozen,
+            frozen: frozen_field(name, entry.get("frozen"))?,
         })
     }
+}
+
+fn type_field(name: &str, raw: Option<&str>, flake: Option<bool>) -> Result<PinType> {
+    Ok(match (raw, flake) {
+        (Some(typ), _) => {
+            typ.parse::<PinType>()
+                .with_context(|| format!("input '{name}'"))?
+        },
+        (None, Some(false)) => PinType::Fetch,
+        (None, _) => PinType::Flake,
+    })
+}
+
+fn fetch_mode_field(
+    name: &str,
+    raw: Option<&str>,
+    global_build: bool,
+    pin_type: PinType,
+    patches: &[PatchSource],
+) -> Result<Option<BuildFetch>> {
+    Ok(match raw {
+        None => {
+            (global_build && pin_type == PinType::Fetch && patches.is_empty())
+                .then_some(BuildFetch::Global)
+        },
+        Some("eval") => None,
+        Some("build") if pin_type != PinType::Fetch => {
+            user_bail!("input '{name}': fetch_mode = \"build\" is only valid for type = \"fetch\"")
+        },
+        Some("build") if !patches.is_empty() => {
+            user_bail!("input '{name}': fetch_mode = \"build\" is not valid with patches")
+        },
+        Some("build") => Some(BuildFetch::Pinned),
+        Some(other) => {
+            user_bail!("input '{name}': fetch_mode must be \"eval\" or \"build\", got {other:?}")
+        },
+    })
 }
 
 fn frozen_field(name: &str, field: Option<&Item>) -> Result<Option<Frozen>> {
@@ -542,12 +587,19 @@ impl PinsDoc {
 
         let groups = self.groups()?;
         let shorturls = self.shorturls();
+        let global_build = self.global_build_fetch()?;
         for (name, item) in table.iter() {
             let defaults = item
                 .get("group")
                 .and_then(Item::as_str)
                 .and_then(|group| groups.get(group).copied());
-            out.push(Input::from_item(name, item, defaults, &shorturls)?);
+            out.push(Input::from_item(
+                name,
+                item,
+                defaults,
+                &shorturls,
+                global_build,
+            )?);
         }
 
         if let Some(group) = groups.keys().find(|&&group| table.contains_key(group)) {
@@ -800,6 +852,17 @@ impl PinsDoc {
             .and_then(Item::as_table_mut)
             .and_then(|tbl| tbl.remove(name))
             .is_some()
+    }
+
+    fn global_build_fetch(&self) -> Result<bool> {
+        let Some(item) = self.doc.get("tack").and_then(|tack| tack.get("fetch_mode")) else {
+            return Ok(false);
+        };
+        match item.as_str() {
+            Some("eval") => Ok(false),
+            Some("build") => Ok(true),
+            _ => user_bail!("[tack] fetch_mode must be \"eval\" or \"build\""),
+        }
     }
 
     pub fn mark_recomposable(&mut self) {
