@@ -8,11 +8,13 @@ let
     all
     attrNames
     attrValues
+    compareVersions
     concatMap
     concatStringsSep
     any
     elem
     elemAt
+    fetchGit
     filter
     foldl'
     fromJSON
@@ -27,6 +29,8 @@ let
     listToAttrs
     mapAttrs
     match
+    nixVersion
+    path
     pathExists
     readFile
     readFileType
@@ -109,6 +113,110 @@ let
     unpack = null;
     treeHash = null;
   };
+
+  fetchGitAttrs = {
+    url = null;
+    ref = null;
+    rev = null;
+    narHash = null;
+    submodules = null;
+    shallow = null;
+    allRefs = null;
+    lfs = null;
+    verifyCommit = null;
+    keytype = null;
+    publicKey = null;
+    publicKeys = null;
+  };
+
+  # fetchTarball ignores access-tokens, so prefer fetchTree when available
+  fetchLocked =
+    { what, locked }:
+    let
+      type = locked.type or "";
+      host = default: locked.host or default;
+      verifyCommit = locked.verifyCommit or (locked ? publicKey || locked ? publicKeys);
+      archiveUrl = {
+        github = "https://${host "github.com"}/${locked.owner}/${locked.repo}/archive/${locked.rev}.tar.gz";
+        gitlab = "https://${host "gitlab.com"}/api/v4/projects/${locked.owner}%2F${locked.repo}/repository/archive.tar.gz?sha=${locked.rev}";
+        sourcehut = "https://${host "git.sr.ht"}/${locked.owner}/${locked.repo}/archive/${locked.rev}.tar.gz";
+      };
+      revInfo =
+        if locked ? rev then
+          {
+            inherit (locked) rev;
+            shortRev = substring 0 7 locked.rev;
+          }
+        else
+          { };
+      dateInfo =
+        if locked ? lastModified then
+          {
+            inherit (locked) lastModified;
+            lastModifiedDate = formatEpoch locked.lastModified;
+          }
+        else
+          { };
+      tarball = url: {
+        outPath = fetchTarball {
+          inherit url;
+          sha256 = locked.narHash;
+        };
+        inherit (locked) narHash;
+      };
+    in
+    if builtins ? fetchTree then
+      builtins.fetchTree locked
+    else if !(locked ? narHash) then
+      throw "tack: ${what} has no narHash and requires builtins.fetchTree"
+    else if archiveUrl ? ${type} && locked ? rev then
+      tarball archiveUrl.${type} // revInfo // dateInfo
+    else if type == "tarball" then
+      tarball locked.url // revInfo // dateInfo
+    else if type == "git" && locked ? rev then
+      dateInfo
+      // {
+        submodules = locked.submodules or false;
+      }
+      // removeAttrs (fetchGit (
+        removeAttrs (intersectAttrs fetchGitAttrs locked) (
+          (if locked.lfs or false then [ ] else [ "lfs" ])
+          ++ (
+            if verifyCommit then
+              [ ]
+            else
+              [
+                "verifyCommit"
+                "keytype"
+                "publicKey"
+                "publicKeys"
+              ]
+          )
+        )
+        # nix 2.20 added exportIgnore and enabled it by default, and lix and older nix reject
+        # it, lfs and verifyCommit outright. lix reports 2.18.3-lix
+        // (
+          if compareVersions nixVersion "2.20" >= 0 then
+            { exportIgnore = locked.exportIgnore or false; }
+          else
+            { }
+        )
+        // (if locked.allRefs or false then { } else { shallow = locked.shallow or true; })
+      )) [ "revCount" ]
+      // (if locked ? revCount then { inherit (locked) revCount; } else { })
+    else if type == "path" && substring 0 1 locked.path == "/" then
+      {
+        outPath = path {
+          inherit (locked) path;
+          sha256 = locked.narHash;
+          name = "source";
+        };
+        inherit (locked) narHash;
+        lastModified = locked.lastModified or 0;
+        lastModifiedDate = formatEpoch (locked.lastModified or 0);
+      }
+    else
+      throw "tack: ${what} has type '${type}', which requires builtins.fetchTree";
 
   call =
     {
@@ -236,7 +344,10 @@ let
         else if !(elem type knownTypes) then
           throw "tack: unknown lock type '${type}' for pin '${name}'"
         else
-          fetchTree (intersectAttrs fetchTreeAttrs node);
+          fetchLocked {
+            what = "pin '${name}'";
+            locked = intersectAttrs fetchTreeAttrs node;
+          };
 
       fetchPin =
         name:
@@ -305,15 +416,14 @@ let
           fetched =
             addErrorContext
               "tack: the patched tree of '${name}' is not in the store, run tack materialize or nix-build .tack -A _patched -o .tack/patched, or tack update ${name} if the lock was edited by hand"
-              (
-                fetchTree (
-                  {
-                    type = "path";
-                    inherit (tree) path narHash;
-                  }
-                  // (if tree ? lastModified then { inherit (tree) lastModified; } else { })
-                )
-              );
+              (fetchLocked {
+                what = "the patched tree of '${name}'";
+                locked = {
+                  type = "path";
+                  inherit (tree) path narHash;
+                }
+                // (if tree ? lastModified then { inherit (tree) lastModified; } else { });
+              });
         in
         fetched
         // (
@@ -1033,7 +1143,10 @@ let
                   spec = ref;
                 };
                 childNode = upLock.nodes.${childName};
-                childSrc = fetchTree childNode.locked;
+                childSrc = fetchLocked {
+                  what = "flake.lock node '${childName}'";
+                  inherit (childNode) locked;
+                };
               in
               if isList ref && ref != [ ] then
                 followed
