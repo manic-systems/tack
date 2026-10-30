@@ -23,6 +23,8 @@ use misstep::{
 use xz2::read::XzDecoder;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
+use crate::nar::HashingReader;
+
 #[derive(Clone, Copy)]
 pub(super) enum TarFormat {
     Gz,
@@ -111,21 +113,43 @@ pub(super) fn unpack_tar_stream<R>(reader: R, format: TarFormat, into: &Path) ->
 where
     R: Read,
 {
-    let boxed: Box<dyn Read> = match format {
-        TarFormat::Gz => Box::new(GzDecoder::new(reader)),
-        TarFormat::Xz => Box::new(XzDecoder::new(reader)),
-        TarFormat::Zstd => Box::new(ZstdDecoder::new(reader)?),
-        TarFormat::Plain => Box::new(reader),
-    };
-    let mut ar = tar::Archive::new(boxed);
-    ar.unpack(into)?;
+    unpack_hashed(reader, format, into).map(|unpacked| unpacked.root)
+}
+
+pub(super) struct Unpacked {
+    pub root:       PathBuf,
+    pub sha256:     String,
+    pub single_dir: bool,
+}
+
+pub(super) fn unpack_hashed<R>(reader: R, format: TarFormat, into: &Path) -> Result<Unpacked>
+where
+    R: Read,
+{
+    let mut hashed = HashingReader::new(reader);
+    {
+        let boxed: Box<dyn Read + '_> = match format {
+            TarFormat::Gz => Box::new(GzDecoder::new(&mut hashed)),
+            TarFormat::Xz => Box::new(XzDecoder::new(&mut hashed)),
+            TarFormat::Zstd => Box::new(ZstdDecoder::new(&mut hashed)?),
+            TarFormat::Plain => Box::new(&mut hashed),
+        };
+        tar::Archive::new(boxed).unpack(into)?;
+    }
+    let sha256 = hashed.finish()?;
 
     let mut entries = fs::read_dir(into)?
         .filter_map(StdResult::ok)
         .collect::<Vec<_>>();
-    if entries.len() == 1 && entries[0].file_type()?.is_dir() {
-        Ok(entries.remove(0).path())
+    let single_dir = entries.len() == 1 && entries[0].file_type()?.is_dir();
+    let root = if single_dir {
+        entries.remove(0).path()
     } else {
-        Ok(into.to_owned())
-    }
+        into.to_owned()
+    };
+    Ok(Unpacked {
+        root,
+        sha256,
+        single_dir,
+    })
 }

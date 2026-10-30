@@ -378,6 +378,20 @@ pub enum FlakeInputRef {
 type ExtraFields = BTreeMap<String, Value>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct Archive {
+    pub hash:     String,
+    #[serde(rename = "outHash")]
+    pub out_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum Archived {
+    Fetchable(Box<Archive>),
+    Unfit(()),
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum LockedNode {
     #[serde(rename = "github")]
@@ -390,6 +404,12 @@ pub enum LockedNode {
         nar_hash:      Option<String>,
         #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
         last_modified: Option<i64>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        archive:       Option<Archived>,
         #[serde(flatten)]
         extra:         ExtraFields,
     },
@@ -437,6 +457,12 @@ pub enum LockedNode {
         nar_hash:      Option<String>,
         #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
         last_modified: Option<i64>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        archive:       Option<Archived>,
         #[serde(flatten)]
         extra:         ExtraFields,
     },
@@ -540,6 +566,7 @@ impl LockedNode {
             rev:           Some(rev.into()),
             nar_hash:      Some(nar_hash.into()),
             last_modified: Some(last_modified),
+            archive:       None,
             extra:         BTreeMap::new(),
         }
     }
@@ -607,6 +634,7 @@ impl LockedNode {
             rev:           None,
             nar_hash:      Some(nar_hash.into()),
             last_modified: Some(last_modified),
+            archive:       None,
             extra:         BTreeMap::new(),
         }
     }
@@ -629,6 +657,7 @@ impl LockedNode {
             rev: Some(rev.into()),
             nar_hash: Some(nar_hash.into()),
             last_modified,
+            archive: None,
             extra: BTreeMap::new(),
         }
     }
@@ -741,6 +770,54 @@ impl LockedNode {
         }
     }
 
+    pub fn archive(&self) -> Option<&Archive> {
+        match self {
+            Self::Github { archive, .. } | Self::Tarball { archive, .. } => {
+                match archive.as_ref()? {
+                    Archived::Fetchable(found) => Some(found),
+                    Archived::Unfit(()) => None,
+                }
+            },
+            Self::Gitlab { .. }
+            | Self::Git { .. }
+            | Self::Fixed { .. }
+            | Self::Indirect { .. }
+            | Self::Path { .. } => None,
+        }
+    }
+
+    pub const fn takes_archive(&self) -> bool {
+        matches!(self, Self::Github { .. } | Self::Tarball { .. })
+    }
+
+    pub const fn archive_checked(&self) -> bool {
+        matches!(
+            self,
+            Self::Github {
+                archive: Some(_),
+                ..
+            } | Self::Tarball {
+                archive: Some(_),
+                ..
+            }
+        )
+    }
+
+    pub fn set_archive(&mut self, value: Option<Archive>) {
+        match self {
+            Self::Github { archive, .. } | Self::Tarball { archive, .. } => {
+                *archive = Some(value.map_or(Archived::Unfit(()), |found| {
+                    Archived::Fetchable(Box::new(found))
+                }));
+            },
+            Self::Gitlab { .. }
+            | Self::Git { .. }
+            | Self::Fixed { .. }
+            | Self::Indirect { .. }
+            | Self::Path { .. } => {},
+        }
+    }
+
     pub fn forge_rev(&self) -> Option<&str> {
         match self {
             Self::Github { rev, .. } | Self::Gitlab { rev, .. } | Self::Git { rev, .. } => {
@@ -837,6 +914,14 @@ where
     };
     let kind = lock_type(&value).to_owned();
     Ok(LockedNode::from_value(value).map_or(LockedEntry::Unknown(kind), LockedEntry::Known))
+}
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_host<'de, D>(deserializer: D) -> Result<String, D::Error>
