@@ -29,6 +29,7 @@ pub const PATCHED_DIFF: &str = "patchedDiff";
 pub const TAG: &str = "tag";
 pub const VERSION: &str = "version";
 pub const SIGNED: &str = "signedBy";
+pub const GROUPS: &str = "groups";
 
 /// lock features an older resolver can safely ignore
 const OPTIONAL: [&str; 1] = [PATCHED_DIFF];
@@ -42,6 +43,18 @@ fn declared(resolver: &str) -> Vec<&str> {
 }
 
 pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
+    let pins = project.load_pins()?;
+    let groups = pins.groups()?;
+    let inputs = pins.inputs()?;
+    let grouped = inputs
+        .iter()
+        .filter(|input| {
+            input
+                .group
+                .as_deref()
+                .is_some_and(|group| groups.contains_key(group))
+        })
+        .map(|input| (input.name.as_str(), GROUPS));
     let needs = lock
         .keys()
         .flat_map(|name| {
@@ -60,6 +73,7 @@ pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
             .filter(|&(used, _)| used)
             .map(move |(_, feature)| (name.as_str(), feature))
         })
+        .chain(grouped)
         .collect::<Vec<_>>();
     ensure(project, &needs)
 }
