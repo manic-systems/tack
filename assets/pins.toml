@@ -24,6 +24,10 @@
 [signers]
 # alice = "ssh-ed25519 AAAA..."
 
+# default fetch_mode for fetch pins ("eval" or "build")
+# [tack]
+# fetch_mode = "build"
+
 # inputs.<name> fields
 #   url             required, shorturl ok, ?rev=<sha> pins an exact commit
 #   type            flake (default), fetch, or fixed
@@ -35,6 +39,7 @@
 #   dir             subdir holding flake.nix
 #   submodules      fetch git submodules
 #   unpack          fixed-only tarball or file
+#   fetch_mode      fetch-only "eval" (default) or "build" to defer fetching to build time
 #   signers         names from [signers], one of whom must have signed the locked commit
 #   patches         patch urls or files relative to this dir, applied in order
 #   tag             follow the newest tag like "v{version}", where {version} is numbers
