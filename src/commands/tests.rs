@@ -55,7 +55,10 @@ fn exclude_drops_pins_from_an_unnamed_update() {
 #[test]
 fn exclude_outranks_a_pin_named_on_the_same_run() {
     let all = inputs(&["nixpkgs", "home-manager"]);
-    assert!(selected(&all, &["nixpkgs"], &["nixpkgs"]).is_empty());
+    assert_eq!(
+        selected(&all, &["nixpkgs"], &["nixpkgs"]),
+        Vec::<String>::new()
+    );
     assert_eq!(
         selected(&all, &["nixpkgs", "home-manager"], &["nixpkgs"]),
         ["home-manager"]
