@@ -417,9 +417,7 @@ fn serves_diff(url: &str) -> bool {
 impl RemotePatch {
     fn file_name(&self) -> String {
         match self.kind {
-            Remote::Pull {
-                ref repo, number, ..
-            } => {
+            Remote::Pull { ref repo, number } => {
                 match repo.forge {
                     Forge::Gitlab { .. } => format!("mr-{number}.patch"),
                     Forge::Github | Forge::Gitea { .. } => format!("pr-{number}.patch"),
