@@ -200,6 +200,25 @@ pub struct Input {
 }
 
 impl Input {
+    const KEYS: [&str; 16] = [
+        "dir",
+        "exclude_follow",
+        "flake",
+        "follows",
+        "frozen",
+        "group",
+        "keep_inputs",
+        "omit_inputs",
+        "patches",
+        "signers",
+        "submodules",
+        "tag",
+        "tags_from",
+        "type",
+        "unpack",
+        "url",
+    ];
+
     fn from_item(
         name: &str,
         input_item: &Item,
@@ -207,6 +226,7 @@ impl Input {
         shorturls: &ShortUrls<'_>,
     ) -> Result<Self> {
         check_name(name)?;
+
         let entry = input_item
             .as_table_like()
             .with_context(|| format!("input '{name}' is not a table"))?;
@@ -424,6 +444,16 @@ pub struct PinsDoc {
 }
 
 impl PinsDoc {
+    const TOP_KEYS: [&str; 7] = [
+        "all_follow",
+        "groups",
+        "inputs",
+        "omit_inputs",
+        "shorturls",
+        "signers",
+        "tack",
+    ];
+
     pub fn parse(raw: &str) -> Result<Self, toml_edit::TomlError> {
         raw.parse().map(|doc| Self { doc })
     }
@@ -474,11 +504,42 @@ impl PinsDoc {
             .collect())
     }
 
+    /// keys tack doesn't know at the top level and in each input and group
+    pub fn unknown_keys(&self) -> Vec<String> {
+        let mut tables = vec![(
+            "pins.toml".to_owned(),
+            self.doc.as_table() as &dyn TableLike,
+            &Self::TOP_KEYS[..],
+        )];
+        for (kind, root) in [("input", "inputs"), ("group", "groups")] {
+            let Some(table) = self.doc.get(root).and_then(Item::as_table_like) else {
+                continue;
+            };
+            tables.extend(table.iter().filter_map(|(name, item)| {
+                Some((
+                    format!("{kind} '{name}'"),
+                    item.as_table_like()?,
+                    &Input::KEYS[..],
+                ))
+            }));
+        }
+        tables
+            .into_iter()
+            .flat_map(|(context, table, known)| {
+                table
+                    .iter()
+                    .filter(move |&(key, _)| !known.contains(&key))
+                    .map(move |(key, _)| format!("{context}: unknown key '{key}'"))
+            })
+            .collect()
+    }
+
     pub fn inputs(&self) -> Result<Vec<Input>> {
         let mut out = Vec::new();
         let Some(table) = self.doc.get("inputs").and_then(Item::as_table_like) else {
             return Ok(out);
         };
+
         let groups = self.groups()?;
         let shorturls = self.shorturls();
         for (name, item) in table.iter() {
@@ -488,17 +549,21 @@ impl PinsDoc {
                 .and_then(|group| groups.get(group).copied());
             out.push(Input::from_item(name, item, defaults, &shorturls)?);
         }
+
         if let Some(group) = groups.keys().find(|&&group| table.contains_key(group)) {
             user_bail!("group '{group}' is also an input name");
         }
+
         self.signers()?;
         let declared = self.doc.get("signers").and_then(Item::as_table_like);
+
         for input in &out {
             if let Some(signer) = input.signers.iter().find(|signer| {
                 !declared.is_some_and(|signers| signers.contains_key(signer.as_str()))
             }) {
                 user_bail!("input '{}': no signer '{signer}' in [signers]", input.name);
             }
+
             if let Some(ref group) = input.group
                 && out.iter().any(|other| other.name == *group)
             {
@@ -508,25 +573,28 @@ impl PinsDoc {
                 );
             }
         }
+
         Ok(out)
     }
 
-    /// the settings each `[groups.<name>]` table gives its pins
+    /// each `[groups.<name>]` table by name, rejecting keys a group can't set
     pub fn groups(&self) -> Result<BTreeMap<&str, &dyn TableLike>> {
         let Some(table) = self.doc.get("groups").and_then(Item::as_table_like) else {
             return Ok(BTreeMap::new());
         };
+
         table
             .iter()
             .map(|(group, item)| {
                 let settings = item
                     .as_table_like()
                     .with_context(|| format!("group '{group}' is not a table"))?;
+
                 if let Some(key) = ["url", "group", "frozen"]
                     .into_iter()
                     .find(|&key| settings.contains_key(key))
                 {
-                    user_bail!("group '{group}': {key} can only be set on a pin");
+                    user_bail!("group '{group}': {key} can only be set on an input");
                 }
                 Ok((group, settings))
             })

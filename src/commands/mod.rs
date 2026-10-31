@@ -46,6 +46,15 @@ pub fn warn_stale_resolver(project: &Project) {
     );
 }
 
+pub fn warn_unknown_keys(project: &Project) {
+    let Ok(doc) = project.load_pins() else {
+        return;
+    };
+    for warning in doc.unknown_keys() {
+        eprintln!("tack: {warning}");
+    }
+}
+
 pub fn stale_resolver(project: &Project) -> bool {
     fs::read_to_string(project.resolver_path())
         .is_ok_and(|current| current.contains(MARKER) && current != RESOLVER_NIX)
