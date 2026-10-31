@@ -172,7 +172,9 @@ fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
     unroot(&project, name)?;
     match fs::remove_dir_all(project.patches_dir().join(name)) {
         Err(err) if err.kind() != ErrorKind::NotFound => {
-            return Err(err).with_context(|| format!("remove patches/{name}"));
+            return Err(err)
+                .with_context(|| format!("remove patches/{name}"))
+                .erase();
         },
         _ => {},
     }

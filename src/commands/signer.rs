@@ -95,7 +95,7 @@ fn write_files(dir: &Path, values: &[KeyValue]) -> Result<Vec<PathBuf>> {
             Ok(existing) if existing == *contents => continue,
             Ok(_) => user_bail!("{path} already exists, move it out of the way first"),
             Err(err) if err.kind() == ErrorKind::NotFound => {},
-            Err(err) => return Err(err).with_context(|| format!("read {path}")),
+            Err(err) => return Err(err).with_context(|| format!("read {path}")).erase(),
         }
         let parent = Path::new(path).parent().unwrap_or_else(|| Path::new(""));
         fs::create_dir_all(dir.join(parent))?;
@@ -110,7 +110,9 @@ fn write_files(dir: &Path, values: &[KeyValue]) -> Result<Vec<PathBuf>> {
     for (temp, target) in staged {
         if let Err(err) = temp.persist_noclobber(&target) {
             remove_files(&created);
-            return Err(err.error).with_context(|| format!("write {}", target.display()));
+            return Err(err.error)
+                .with_context(|| format!("write {}", target.display()))
+                .erase();
         }
         created.push(target);
     }
@@ -279,7 +281,9 @@ fn rm(project: &Project, name: &SignerName) -> Result<()> {
     for file in &owned {
         match fs::remove_file(project.dir().join(file)) {
             Err(err) if err.kind() != ErrorKind::NotFound => {
-                return Err(err).with_context(|| format!("remove {}", file.display()));
+                return Err(err)
+                    .with_context(|| format!("remove {}", file.display()))
+                    .erase();
             },
             _ => {},
         }

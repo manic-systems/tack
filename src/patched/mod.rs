@@ -492,7 +492,11 @@ pub fn prune_roots(project: &Project, names: &[&str], departed: &[&str]) -> Resu
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("read {}", dir.display())),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("read {}", dir.display()))
+                .erase();
+        },
     };
     for listed in entries {
         let entry = listed?;
@@ -506,7 +510,9 @@ pub fn prune_roots(project: &Project, names: &[&str], departed: &[&str]) -> Resu
 fn remove_stale(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Err(err) if err.kind() != ErrorKind::NotFound => {
-            Err(err).with_context(|| format!("remove {}", path.display()))
+            Err(err)
+                .with_context(|| format!("remove {}", path.display()))
+                .erase()
         },
         _ => Ok(()),
     }

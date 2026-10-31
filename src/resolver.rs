@@ -135,7 +135,11 @@ pub fn ignore_out_links(dir: &Path) -> Result<()> {
     let current = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("read {}", path.display()))
+                .erase();
+        },
     };
     let missing = OUT_LINKS
         .into_iter()

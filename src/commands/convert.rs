@@ -81,7 +81,9 @@ fn eval_inputs(flake_path: &Path) -> Result<BTreeMap<String, FlakeInput>> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    serde_json::from_slice(&out.stdout).context("parse `nix eval` json")
+    serde_json::from_slice(&out.stdout)
+        .context("parse `nix eval` json")
+        .erase()
 }
 
 #[derive(Deserialize)]

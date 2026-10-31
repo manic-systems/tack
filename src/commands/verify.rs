@@ -311,9 +311,8 @@ fn load_base(project: &Project, rev: &str) -> Result<Base> {
             keyring: Keyring::default(),
         });
     };
-    let doc = PinsDoc::parse(&raw)
-        .map_err(misstep::Report::from)
-        .with_context(|| format!("parse pins.toml at {}", printable(rev)))?;
+    let doc =
+        PinsDoc::parse(&raw).with_context(|| format!("parse pins.toml at {}", printable(rev)))?;
     let signers = doc
         .inputs()?
         .into_iter()

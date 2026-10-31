@@ -408,6 +408,7 @@ fn local_ref_id(repo: &gix::Repository, name: &str) -> Result<gix::ObjectId> {
             |id| Ok(id.detach()),
         )
         .with_context(|| format!("resolve local ref {name}"))
+        .erase()
 }
 
 fn copy_reachable_object(

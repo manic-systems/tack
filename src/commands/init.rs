@@ -92,7 +92,11 @@ fn write_resolver(dir: &Path, path: &Path, force: bool) -> Result<()> {
     let existing = match fs::read_to_string(path) {
         Ok(current) => Some(current),
         Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("read {}", path.display()))
+                .erase();
+        },
     };
     if let Some(current) = existing {
         if current == RESOLVER_NIX {
