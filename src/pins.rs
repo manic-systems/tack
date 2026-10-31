@@ -233,6 +233,7 @@ impl Input {
         defaults: Option<&dyn TableLike>,
         shorturls: &ShortUrls<'_>,
         global_build: bool,
+        default_type: PinType,
     ) -> Result<Self> {
         check_name(name)?;
 
@@ -261,14 +262,7 @@ impl Input {
                 })
                 .transpose()
         };
-        let pin_type = match str_field("type")? {
-            Some(typ) => {
-                typ.parse::<PinType>()
-                    .with_context(|| format!("input '{name}'"))?
-            },
-            None if bool_field("flake")? == Some(false) => PinType::Fetch,
-            None => PinType::Flake,
-        };
+        let pin_type = type_field(name, str_field("type")?, bool_field("flake")?, default_type)?;
         let unpack = str_field("unpack")?
             .map(|unpack| {
                 unpack
@@ -339,6 +333,23 @@ impl Input {
             frozen: frozen_field(name, entry.get("frozen"))?,
         })
     }
+}
+
+fn type_field(
+    name: &str,
+    raw: Option<&str>,
+    flake: Option<bool>,
+    default_type: PinType,
+) -> Result<PinType> {
+    Ok(match (raw, flake) {
+        (Some(typ), _) => {
+            typ.parse::<PinType>()
+                .with_context(|| format!("input '{name}'"))?
+        },
+        (None, Some(true)) => PinType::Flake,
+        (None, Some(false)) => PinType::Fetch,
+        (None, None) => default_type,
+    })
 }
 
 fn fetch_mode_field(
@@ -584,6 +595,7 @@ impl PinsDoc {
         let groups = self.groups()?;
         let shorturls = self.shorturls();
         let global_build = self.global_build_fetch()?;
+        let default_type = self.default_type()?;
         for (name, item) in table.iter() {
             let defaults = item
                 .get("group")
@@ -595,6 +607,7 @@ impl PinsDoc {
                 defaults,
                 &shorturls,
                 global_build,
+                default_type,
             )?);
         }
 
@@ -725,9 +738,10 @@ impl PinsDoc {
             .is_some_and(|tbl| tbl.contains_key(name))
     }
 
-    pub fn add_input(&mut self, name: &str, url: &str, opts: &AddInputOpts<'_>) {
-        self.ensure_table("inputs")
-            .insert(name, Item::Table(opts.to_table(url)));
+    pub fn add_input(&mut self, name: &str, url: &str, opts: &AddInputOpts<'_>) -> Result<()> {
+        let table = opts.to_table(url, self.default_type()?);
+        self.ensure_table("inputs").insert(name, Item::Table(table));
+        Ok(())
     }
 
     pub fn remove_input(&mut self, name: &str) -> bool {
@@ -861,6 +875,18 @@ impl PinsDoc {
         }
     }
 
+    pub fn default_type(&self) -> Result<PinType> {
+        self.doc
+            .get("tack")
+            .and_then(|tack| tack.get("type"))
+            .map_or(Ok(PinType::Flake), |item| {
+                item.as_str()
+                    .context("[tack] type must be a string")?
+                    .parse::<PinType>()
+                    .context("[tack] type")
+            })
+    }
+
     pub fn mark_recomposable(&mut self) {
         self.ensure_table("tack")
             .insert("recomposable", value(true));
@@ -981,11 +1007,11 @@ pub struct AddInputOpts<'a> {
 }
 
 impl AddInputOpts<'_> {
-    fn to_table(&self, url: &str) -> Table {
+    fn to_table(&self, url: &str, default_type: PinType) -> Table {
         let mut entry = Table::new();
         entry.set_implicit(false);
         entry.insert("url", value(url));
-        if self.pin_type != PinType::Flake {
+        if self.pin_type != default_type {
             entry.insert("type", value(self.pin_type.as_str()));
         }
         if let Some(unpak) = self.unpack {

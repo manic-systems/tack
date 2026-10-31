@@ -17,6 +17,7 @@ use crate::{
         LockFile,
         LockedNode,
     },
+    pins::PinType,
     project::{
         self,
         Project,
@@ -34,6 +35,7 @@ pub const VERSION: &str = "version";
 pub const SIGNED: &str = "signedBy";
 pub const GROUPS: &str = "groups";
 pub const ARCHIVE: &str = "archive";
+pub const DEFAULT_TYPE: &str = "defaultType";
 
 /// lock features an older resolver can safely ignore
 const OPTIONAL: [&str; 2] = [PATCHED_DIFF, ARCHIVE];
@@ -82,6 +84,7 @@ pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
             .map(move |(_, feature)| (name.as_str(), feature))
         })
         .chain(grouped)
+        .chain((pins.default_type()? != PinType::Flake).then_some(("[tack] type", DEFAULT_TYPE)))
         .collect::<Vec<_>>();
     ensure(project, &needs)
 }
