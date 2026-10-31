@@ -18,6 +18,10 @@ pub fn run(cmd: Command) -> misstep::Result<()> {
         Project::discover()?
     };
 
+    if !scaffolding {
+        commands::warn_unknown_keys(&project);
+    }
+
     // resolver nag trails successful output
     let check_resolver = !scaffolding;
 
