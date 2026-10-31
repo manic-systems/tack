@@ -285,7 +285,8 @@ pub fn confined(dir: &Path, relative: &Path) -> Result<Option<PathBuf>> {
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(err)
-                .with_context(|| format!("resolve {}", printable(&relative.to_string_lossy())));
+                .with_context(|| format!("resolve {}", printable(&relative.to_string_lossy())))
+                .erase();
         },
     };
     if !resolved.starts_with(&root) {
@@ -713,6 +714,6 @@ fn run(program: &str, command: &mut Command) -> Result<Output> {
         Err(err) if err.kind() == ErrorKind::NotFound => {
             user_bail!("this needs {program} on PATH")
         },
-        Err(err) => Err(err).with_context(|| format!("run {program}")),
+        Err(err) => Err(err).with_context(|| format!("run {program}")).erase(),
     }
 }

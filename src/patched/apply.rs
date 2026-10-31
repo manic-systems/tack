@@ -490,7 +490,9 @@ impl SourceTree {
             Ok(()) => {},
             Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
             Err(err) => {
-                return Err(err).with_context(|| format!("delete {}", target.display()));
+                return Err(err)
+                    .with_context(|| format!("delete {}", target.display()))
+                    .erase();
             },
         }
         for dir in target
@@ -548,7 +550,11 @@ fn writable(path: &Path) -> Result<()> {
     let mode = match fs::metadata(path) {
         Ok(meta) => meta.permissions().mode(),
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("read {}", path.display()))
+                .erase();
+        },
     };
     if mode & 0o200 == 0 {
         fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
@@ -1003,7 +1009,11 @@ fn on_disk(target: &Path) -> Result<Option<(Vec<u8>, FileMode)>> {
         {
             Ok(None)
         },
-        Err(err) => Err(err).with_context(|| format!("read {}", target.display())),
+        Err(err) => {
+            Err(err)
+                .with_context(|| format!("read {}", target.display()))
+                .erase()
+        },
     }
 }
 

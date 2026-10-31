@@ -17,7 +17,7 @@ name = "tack"
 path = "src/main.rs"
 
 [dependencies]
-caress = "0.2.0"
+caress = "0.3.0"
 data-encoding = "2.11.1"
 diffy = { features = [ "std" ], version = "0.5.2" }
 etcetera = "0.11.0"
@@ -40,9 +40,9 @@ gix-transport = { default-features = false, features = [
 ], version = "0.61.0" }
 hmac-sha256 = "1.1.15"
 jiff = "0.2.38"
-misstep = { features = [ "pretty" ], version = "0.3.0" }
+misstep = { features = [ "pretty" ], version = "0.4.1" }
 percent-encoding = "2.3.2"
-pound = "0.5.1"
+pound = "0.6.1"
 rustls-native-certs = "0.8.5"
 serde = { features = [ "derive" ], version = "1.0.229" }
 serde_json = "1.0.151"

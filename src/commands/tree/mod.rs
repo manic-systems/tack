@@ -109,8 +109,12 @@ fn pin_tree(
             found.map_or_else(|| fetch::locked_file(node, &path), |raw| Ok(Some(raw)))
         })
         .and_then(|raw| {
-            raw.map(|body| FlakeLock::parse(&body).with_context(|| format!("parse {path}")))
-                .transpose()
+            raw.map(|body| {
+                FlakeLock::parse(&body)
+                    .with_context(|| format!("parse {path}"))
+                    .erase()
+            })
+            .transpose()
         });
     let flake_lock = match parsed {
         Ok(Some(flake_lock)) => flake_lock,
@@ -141,7 +145,11 @@ fn patched_file(lock: &LockFile, name: &str, path: &str) -> Result<Option<String
     match fs::read_to_string(tree.path.as_path().join(path)) {
         Ok(body) => Ok(Some(body)),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("read patched {path}")),
+        Err(err) => {
+            Err(err)
+                .with_context(|| format!("read patched {path}"))
+                .erase()
+        },
     }
 }
 

@@ -298,7 +298,9 @@ fn prune_if_empty(project: &Project, pin: &str) {
 fn remove_if_present(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Err(err) if err.kind() != ErrorKind::NotFound => {
-            Err(err).with_context(|| format!("remove {}", path.display()))
+            Err(err)
+                .with_context(|| format!("remove {}", path.display()))
+                .erase()
         },
         _ => Ok(()),
     }

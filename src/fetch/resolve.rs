@@ -834,7 +834,7 @@ pub fn locked_file(node: &LockedNode, path: &str) -> Result<Option<String>> {
     let file = match root.join(path).canonicalize() {
         Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).with_context(|| format!("resolve {path}")),
+        Err(err) => return Err(err).with_context(|| format!("resolve {path}")).erase(),
     };
     if !file.starts_with(&root) {
         bail!("{path} links outside the locked tree");
@@ -842,6 +842,7 @@ pub fn locked_file(node: &LockedNode, path: &str) -> Result<Option<String>> {
     fs::read_to_string(&file)
         .map(Some)
         .with_context(|| format!("read {path}"))
+        .erase()
 }
 
 /// [`None`] when no forge serves raw files for `node`
