@@ -27,10 +27,12 @@ use super::{
     FetchedPin,
     archive::{
         TarFormat,
-        unpack_tar_stream,
+        Unpacked,
+        unpack_hashed,
     },
     auth::with_credential_fallback,
     http::HttpClient,
+    resolve::Download,
     time::epoch_from_iso,
     topology::{
         CommitLog,
@@ -131,17 +133,16 @@ impl GithubClient {
         Ok(ResolvedGithubRef { rev, last_modified })
     }
 
-    fn download_tarball(self, owner: &str, repo: &str, rev: &str, into: &Path) -> Result<PathBuf> {
-        let url = format!("https://codeload.github.com/{owner}/{repo}/tar.gz/{rev}");
+    fn download_tarball(self, url: &str, into: &Path) -> Result<Unpacked> {
         with_credential_fallback("github.com", true, |credential| {
-            let request = HttpClient::with_credential(self.http.get(&url), credential);
+            let request = HttpClient::with_credential(self.http.get(url), credential);
             let mut resp = request
                 .call()
-                .map_err(|err| FetchError::from_ureq(err, &url))?;
+                .map_err(|err| FetchError::from_ureq(err, url))?;
             if resp.status() != 200 {
-                return Err(FetchError::from_response(&mut resp, &url));
+                return Err(FetchError::from_response(&mut resp, url));
             }
-            unpack_tar_stream(resp.body_mut().as_reader(), TarFormat::Gz, into)
+            unpack_hashed(resp.body_mut().as_reader(), TarFormat::Gz, into)
                 .map_err(|err| FetchError::Transport(format!("download {url}: {err}")))
         })
         .map_err(|err| misstep::report!("download {url}: {err}"))
@@ -265,7 +266,13 @@ pub(super) fn fetch_locked_tree_into(
     rev: &str,
     dir: &Path,
 ) -> Result<PathBuf> {
-    GithubClient::global().download_tarball(owner, repo, rev, dir)
+    GithubClient::global()
+        .download_tarball(&tarball_url(owner, repo, rev), dir)
+        .map(|unpacked| unpacked.root)
+}
+
+fn tarball_url(owner: &str, repo: &str, rev: &str) -> String {
+    format!("https://codeload.github.com/{owner}/{repo}/tar.gz/{rev}")
 }
 
 pub(super) fn fetch_tree_into(
@@ -282,7 +289,9 @@ pub(super) fn fetch_tree_into(
         let ref_str = reff.unwrap_or("HEAD");
         github.commit(owner, repo, ref_str)?.0
     };
-    github.download_tarball(owner, repo, &tree_rev, dir)
+    github
+        .download_tarball(&tarball_url(owner, repo, &tree_rev), dir)
+        .map(|unpacked| unpacked.root)
 }
 
 pub(super) fn fetch_pin(
@@ -294,11 +303,19 @@ pub(super) fn fetch_pin(
     let github = GithubClient::global();
     let resolved = github.resolve_for_pin(owner, repo, reff, pinned)?;
     let dir = tempfile::tempdir()?;
-    let root = github.download_tarball(owner, repo, &resolved.rev, dir.path())?;
-    let nar_hash = nar::hash_path(&root)?;
+    let url = tarball_url(owner, repo, &resolved.rev);
+    let Unpacked {
+        root,
+        sha256,
+        single_dir,
+    } = github.download_tarball(&url, dir.path())?;
+    let (nar_hash, out_hash) = nar::hash_path_and_wrapped(&root, "source")?;
     let rev = resolved.rev;
     let node = LockedNode::new_github(owner, repo, rev.clone(), nar_hash, resolved.last_modified);
-    Ok(FetchedPin::rev(node, rev).with_tree(dir, root))
+    let download = Download::new(url, sha256, single_dir, out_hash, Some("github.com"));
+    Ok(FetchedPin::rev(node, rev)
+        .with_download(download)
+        .with_tree(dir, root))
 }
 
 struct ResolvedGithubRef {

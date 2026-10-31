@@ -13,7 +13,10 @@ use misstep::{
 
 use crate::{
     error::user_bail,
-    lock::LockFile,
+    lock::{
+        LockFile,
+        LockedNode,
+    },
     project::{
         self,
         Project,
@@ -30,9 +33,10 @@ pub const TAG: &str = "tag";
 pub const VERSION: &str = "version";
 pub const SIGNED: &str = "signedBy";
 pub const GROUPS: &str = "groups";
+pub const ARCHIVE: &str = "archive";
 
 /// lock features an older resolver can safely ignore
-const OPTIONAL: [&str; 1] = [PATCHED_DIFF];
+const OPTIONAL: [&str; 2] = [PATCHED_DIFF, ARCHIVE];
 
 fn declared(resolver: &str) -> Vec<&str> {
     resolver
@@ -68,6 +72,10 @@ pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
                 (lock.tag(name).is_some(), TAG),
                 (lock.version(name).is_some(), VERSION),
                 (lock.signed_by(name).is_some(), SIGNED),
+                (
+                    lock.get(name).and_then(LockedNode::archive).is_some(),
+                    ARCHIVE,
+                ),
             ]
             .into_iter()
             .filter(|&(used, _)| used)

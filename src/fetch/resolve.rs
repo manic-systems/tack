@@ -33,9 +33,11 @@ use super::{
     FetchResult,
     RemoteTag,
     archive::{
+        Unpacked,
         detect_tar_format,
         newest_mtime,
         sniff_reader,
+        unpack_hashed,
         unpack_tar_stream,
     },
     auth::{
@@ -53,6 +55,7 @@ use super::{
 use crate::{
     error::user_bail,
     lock::{
+        Archive,
         LockedNode,
         PathFingerprint,
     },
@@ -72,6 +75,34 @@ pub struct FetchedPin {
     node:     LockedNode,
     identity: FetchIdentity,
     tree:     Option<FetchedTree>,
+    download: Option<Download>,
+}
+
+#[derive(Debug)]
+pub(super) struct Download {
+    url:             String,
+    sha256:          String,
+    out_hash:        String,
+    single_dir:      bool,
+    credential_host: Option<String>,
+}
+
+impl Download {
+    pub(super) fn new(
+        url: String,
+        sha256: String,
+        single_dir: bool,
+        out_hash: String,
+        credential_host: Option<&str>,
+    ) -> Self {
+        Self {
+            url,
+            sha256,
+            out_hash,
+            single_dir,
+            credential_host: credential_host.map(str::to_owned),
+        }
+    }
 }
 
 /// the unpacked tree a pin was hashed from, kept so patching can reuse it
@@ -94,6 +125,7 @@ impl FetchedPin {
             node,
             identity: FetchIdentity::Rev(rev),
             tree: None,
+            download: None,
         }
     }
 
@@ -102,6 +134,7 @@ impl FetchedPin {
             node,
             identity: FetchIdentity::ContentHash(hash),
             tree: None,
+            download: None,
         }
     }
 
@@ -110,6 +143,7 @@ impl FetchedPin {
             node,
             identity: FetchIdentity::ImmutableUrl(url),
             tree: None,
+            download: None,
         }
     }
 
@@ -118,6 +152,7 @@ impl FetchedPin {
             node,
             identity: FetchIdentity::Path(path),
             tree: None,
+            download: None,
         }
     }
 
@@ -126,6 +161,32 @@ impl FetchedPin {
             tree: Some(FetchedTree { _dir: dir, root }),
             ..self
         }
+    }
+
+    pub(super) fn with_download(self, download: Download) -> Self {
+        Self {
+            download: Some(download),
+            ..self
+        }
+    }
+
+    pub fn offer_archive(mut self) -> Self {
+        let fit = self.download.take().filter(|download| {
+            let anonymous = download
+                .credential_host
+                .as_deref()
+                .is_none_or(|host| token_for_host(host).is_none() || serves(&download.url));
+            download.single_dir
+                && anonymous
+                && self.tree.as_ref().is_some_and(|tree| !has_tack(&tree.root))
+        });
+        self.node.set_archive(fit.map(|download| {
+            Archive {
+                hash:     download.sha256,
+                out_hash: download.out_hash,
+            }
+        }));
+        self
     }
 
     pub const fn take_tree(&mut self) -> Option<FetchedTree> {
@@ -420,9 +481,15 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
                 .or_else(|_| detect_tar_format(url))
                 .with_context(|| format!("tarball {url}"))?;
 
+            let served_from =
+                (resp.get_uri().to_string() == immutable_url).then(|| immutable_url.clone());
             let dir = tempfile::tempdir()?;
-            let root = unpack_tar_stream(resp.body_mut().as_reader(), format, dir.path())?;
-            let nar_hash = nar::hash_path(&root)?;
+            let Unpacked {
+                root,
+                sha256,
+                single_dir,
+            } = unpack_hashed(resp.body_mut().as_reader(), format, dir.path())?;
+            let (nar_hash, out_hash) = nar::hash_path_and_wrapped(&root, "source")?;
             // record a shipped rev so fetchTree exposes rev/shortRev
             let node = git_revision_of(&root).map_or_else(
                 || LockedNode::new_tarball(immutable_url.clone(), nar_hash.clone(), last_modified),
@@ -436,7 +503,14 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
                     )
                 },
             );
-            Ok(FetchedPin::immutable_url(node, immutable_url).with_tree(dir, root))
+            let pin = FetchedPin::immutable_url(node, immutable_url);
+            let downloaded = match served_from {
+                Some(served) => {
+                    pin.with_download(Download::new(served, sha256, single_dir, out_hash, None))
+                },
+                None => pin,
+            };
+            Ok(downloaded.with_tree(dir, root))
         },
         Source::Path { ref path } => {
             let target = Path::new(path);
@@ -458,6 +532,25 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
             ))
         },
     }
+}
+
+fn has_tack(root: &Path) -> bool {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if dir.join(".tack/pins.toml").exists() {
+            return true;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return true;
+        };
+        pending.extend(
+            entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .map(|entry| entry.path()),
+        );
+    }
+    false
 }
 
 fn path_fingerprint(root: &Path) -> Result<PathFingerprint> {

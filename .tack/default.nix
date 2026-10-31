@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
-# tack-resolver: patched patchedDiff tag version signedBy groups
+# tack-resolver: patched patchedDiff tag version signedBy groups archive
 
 let
   inherit (builtins)
@@ -224,6 +224,7 @@ let
       resolverDir ? ./.,
       pkgs ? null,
       system ? builtins.currentSystem or null,
+      fetch_mode ? null,
     }:
     let
       pins = fromTOML (readFile (resolverDir + "/pins.toml"));
@@ -248,6 +249,26 @@ let
       inheritedOmitted = inheritedPolicy.omitted or [ ];
       inheritedOmitLayers = (inheritedPolicy.omit or { }).layers or [ ];
       pinOverrides = removeAttrs overrides [ "__tack_policy" ];
+      forcedMode =
+        let
+          value = if fetch_mode != null then fetch_mode else inheritedPolicy.fetchMode or null;
+        in
+        if
+          elem value [
+            null
+            "build"
+            "eval"
+          ]
+        then
+          value
+        else
+          throw "tack: fetch_mode must be 'build' or 'eval', got '${toString value}'";
+      pinFetchMode =
+        pin:
+        if forcedMode != null then
+          forcedMode
+        else
+          pin.fetch_mode or (pins.tack or { }).fetch_mode or "eval";
 
       all_omit_inputs =
         if !(pins ? omit_inputs) then
@@ -381,6 +402,46 @@ let
           };
         in
         if (entry.unpack or "file") == "tarball" then unpacked.outPath + "/" + name else raw.outPath;
+
+      # lix's builtin:fetchurl requires outputHashAlgo
+      fetchArchive =
+        node:
+        let
+          raw = derivation {
+            name = "source-archive";
+            url =
+              {
+                github = "https://codeload.github.com/${node.owner}/${node.repo}/tar.gz/${node.rev}";
+                tarball = node.url;
+              }
+              .${node.type};
+            builder = "builtin:fetchurl";
+            system = "builtin";
+            outputHash = node.archive.hash;
+            outputHashAlgo = "sha256";
+            outputHashMode = "flat";
+            preferLocalBuild = true;
+            impureEnvVars = [
+              "http_proxy"
+              "https_proxy"
+              "ftp_proxy"
+              "all_proxy"
+              "no_proxy"
+            ];
+          };
+          unpacked = derivation {
+            name = "source";
+            builder = "builtin:unpack-channel";
+            system = "builtin";
+            src = raw;
+            channelName = "source";
+            outputHash = node.archive.outHash;
+            outputHashAlgo = "sha256";
+            outputHashMode = "recursive";
+            preferLocalBuild = true;
+          };
+        in
+        unpacked.outPath + "/source";
 
       patchedTree =
         { name, pin }:
@@ -1031,6 +1092,7 @@ let
           override = {
             __tack_policy = {
               inherit omit omitted meta;
+              fetchMode = forcedMode;
               follows = followValues;
               followMeta = scopedFollowValues "tack" (followMetaForSide {
                 side = "tack";
@@ -1229,7 +1291,7 @@ let
           # upstream declares its outputs forward tackOverrides; a closed `{ self }:`
           # would throw on the extra kwarg, so forward only when declared
           extraArgs =
-            if tackCall.supportsOverrides && tackCall.needed then
+            if tackCall.supportsOverrides && (tackCall.needed || forcedMode != null) then
               { tackOverrides = tackCall.overrides; }
             else
               { };
@@ -1363,6 +1425,7 @@ let
                 sourceInfo =
                   if (pin.patches or [ ]) == [ ] then fetchPin name else fetchPatched { inherit name pin; };
                 subdir = if pin ? dir then "/" + pin.dir else "";
+                node = lock.${name} or { };
               in
               if pinType == "flake" then
                 evalTopFlake {
@@ -1373,6 +1436,11 @@ let
                     omit
                     ;
                 }
+              # archive is only locked for trees without .tack
+              else if
+                pinFetchMode pin == "build" && node.archive or null != null && (pin.patches or [ ]) == [ ]
+              then
+                fetchArchive node + subdir
               else
                 evalFetch {
                   inherit
