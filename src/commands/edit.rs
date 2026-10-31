@@ -45,7 +45,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     let AddArgs {
         ref name,
         ref url,
-        pin_type,
+        pin_type: asked_type,
         unpack,
         ref dir,
         submodules,
@@ -55,6 +55,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     } = *args;
     pins::check_name(name)?;
     let mut doc = project.load_pins()?;
+    let pin_type = asked_type.map_or_else(|| doc.default_type(), Ok)?;
     if doc.has_input(name) {
         user_bail!("input '{name}' already exists");
     }
@@ -91,7 +92,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         follows,
         tag: template.as_ref(),
         tags_from: tags_from.as_deref(),
-    });
+    })?;
     // a load's own checks, so no flag combination saves an unloadable pins.toml
     let follow = doc
         .inputs()?

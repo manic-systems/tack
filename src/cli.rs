@@ -78,7 +78,7 @@ pub enum Command {
 pub struct AddArgs {
     pub name:       String,
     pub url:        String,
-    pub pin_type:   PinType,
+    pub pin_type:   Option<PinType>,
     pub unpack:     Option<Unpack>,
     pub dir:        Option<String>,
     pub submodules: bool,
@@ -183,6 +183,9 @@ enum Cli {
         name:       String,
         /// pin url (shorturl ok; ?rev=<sha> pins a commit)
         url:        String,
+        /// pin a flake, overriding [tack] type
+        #[pound(long, group = kind)]
+        flake:      bool,
         /// pin a source tree only, no flake eval
         #[pound(long, group = kind)]
         fetch:      bool,
@@ -464,6 +467,7 @@ impl From<Cli> for Command {
             Cli::Add {
                 name,
                 url,
+                flake,
                 fetch,
                 fixed,
                 unpack,
@@ -474,11 +478,11 @@ impl From<Cli> for Command {
                 tags_from,
             } => {
                 let pin_type = if fixed {
-                    PinType::Fixed
+                    Some(PinType::Fixed)
                 } else if fetch {
-                    PinType::Fetch
+                    Some(PinType::Fetch)
                 } else {
-                    PinType::Flake
+                    flake.then_some(PinType::Flake)
                 };
                 Self::Add(AddArgs {
                     name,

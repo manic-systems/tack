@@ -27,10 +27,11 @@
 # default fetch_mode for fetch pins ("eval" or "build")
 # [tack]
 # fetch_mode = "build"
+# type = "fetch"
 
 # inputs.<name> fields
 #   url             required, shorturl ok, ?rev=<sha> pins an exact commit
-#   type            flake (default), fetch, or fixed
+#   type            flake (default), fetch, or fixed, overrides [tack] type
 #   flake           legacy false means type = "fetch"
 #   follows         { child = "pin" } immediate-input override map
 #   exclude_follow  all_follow names to skip, flake:/tack: scoped or *
