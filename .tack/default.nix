@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
-# tack-resolver: patched patchedDiff tag version signedBy groups archive
+# tack-resolver: patched patchedDiff tag version signedBy groups archive defaultType
 
 let
   inherit (builtins)
@@ -1397,7 +1397,10 @@ let
       loadPin =
         { name, pin }:
         let
-          pinType = pin.type or (if pin.flake or true then "flake" else "fetch");
+          pinType =
+            pin.type or (
+              if pin ? flake then (if pin.flake then "flake" else "fetch") else (pins.tack or { }).type or "flake"
+            );
           omit = omitsFor { inherit name pin; };
           follows = checkFollowKeys {
             follows = pin.follows or { };

@@ -56,7 +56,7 @@ pub(super) fn convert(project: &Project, flake_path: &Path) -> Result<usize> {
             follows:    &follows,
             tag:        None,
             tags_from:  None,
-        });
+        })?;
         added += 1;
     }
     project.save_pins(&doc)?;
