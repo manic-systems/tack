@@ -41,7 +41,6 @@ use super::{
     auth::{
         Credential,
         record_fetch_warning,
-        token_for_host,
         with_credential_fallback,
     },
     error::{
@@ -247,13 +246,6 @@ impl HttpClient {
     where
         T: DeserializeOwned,
     {
-        if token_for_host(host).is_none() {
-            record_fetch_warning(format!(
-                "no access token for {host}; gitlab comparison may be rate-limited or unavailable \
-                 for private projects (set GITLAB_TOKEN, or opt into nix.conf access-tokens with \
-                 TACK_NIX_CONF_TOKENS=1)"
-            ));
-        }
         with_credential_fallback(host, true, |credential| {
             let mut req =
                 Self::with_credential(self.get(url).header(ACCEPT, APPLICATION_JSON), credential);
@@ -272,15 +264,6 @@ impl HttpClient {
         V: Serialize,
         T: DeserializeOwned,
     {
-        if token_for_host("github.com").is_none() {
-            record_fetch_warning(
-                "no GitHub token; rev comparison falls back to commit lookup plus git DAG compare \
-                 (set GITHUB_TOKEN or GH_TOKEN, or opt into nix.conf access-tokens with \
-                 TACK_NIX_CONF_TOKENS=1)"
-                    .to_owned(),
-            );
-        }
-
         let payload = serde_json::to_string(&GraphqlRequest { query, variables })
             .map_err(|err| FetchError::Github(format!("serialize graphql request: {err}")))?;
 
