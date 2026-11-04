@@ -9,6 +9,7 @@ use std::{
     fmt,
     fs,
     mem,
+    net::IpAddr,
     path::{
         Path,
         PathBuf,
@@ -25,6 +26,7 @@ use std::{
 };
 
 use etcetera::BaseStrategy as _;
+use ureq::http::Uri;
 
 use super::error::{
     FetchError,
@@ -37,7 +39,7 @@ pub(super) fn token_for_host(host: &str) -> Option<&'static str> {
         "gitlab.com" => gitlab_env_token(),
         _ => None,
     };
-    env_token.or_else(|| nix_conf_tokens().get(host).map(String::as_str))
+    env_token.or_else(|| nix_conf().tokens.get(host).map(String::as_str))
 }
 
 fn github_env_token() -> Option<&'static str> {
@@ -58,16 +60,22 @@ fn non_empty_env(key: &str) -> Option<String> {
     env::var(key).ok().filter(|value| !value.is_empty())
 }
 
-fn nix_conf_tokens() -> &'static HashMap<String, String> {
-    static TOKENS: OnceLock<HashMap<String, String>> = OnceLock::new();
-    TOKENS.get_or_init(|| {
-        let mut tokens = HashMap::new();
+#[derive(Default)]
+struct NixConf {
+    tokens:     HashMap<String, String>,
+    netrc_file: Option<PathBuf>,
+}
+
+fn nix_conf() -> &'static NixConf {
+    static CONF: OnceLock<NixConf> = OnceLock::new();
+    CONF.get_or_init(|| {
+        let mut conf = NixConf::default();
         if nix_conf_scrape_enabled() {
             for file in nix_conf_files() {
-                scrape_access_tokens(&file, &mut tokens, 0);
+                scrape_nix_conf(&file, &mut conf, 0);
             }
         }
-        tokens
+        conf
     })
 }
 
@@ -93,7 +101,7 @@ fn nix_conf_files() -> Vec<PathBuf> {
     files
 }
 
-fn scrape_access_tokens(path: &Path, tokens: &mut HashMap<String, String>, depth: u8) {
+fn scrape_nix_conf(path: &Path, conf: &mut NixConf, depth: u8) {
     const MAX_INCLUDE_DEPTH: u8 = 16;
 
     if depth > MAX_INCLUDE_DEPTH {
@@ -114,14 +122,19 @@ fn scrape_access_tokens(path: &Path, tokens: &mut HashMap<String, String>, depth
                     .parent()
                     .filter(|_| !Path::new(target).is_absolute())
                     .map_or_else(|| PathBuf::from(target), |base| base.join(target));
-                scrape_access_tokens(&included, tokens, depth + 1);
+                scrape_nix_conf(&included, conf, depth + 1);
             }
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        if matches!(key.trim(), "access-tokens" | "extra-access-tokens") {
+        let setting = key.trim();
+        if setting == "netrc-file" {
+            let target = value.trim();
+            conf.netrc_file = (!target.is_empty()).then(|| PathBuf::from(target));
+        }
+        if matches!(setting, "access-tokens" | "extra-access-tokens") {
             for pair in value.split_whitespace() {
                 // nix types gitlab tokens as `PAT:`/`OAuth2:`, bearer takes
                 // both bare
@@ -133,7 +146,7 @@ fn scrape_access_tokens(path: &Path, tokens: &mut HashMap<String, String>, depth
                     && !host.is_empty()
                     && !token.is_empty()
                 {
-                    tokens.insert(host.to_owned(), token.to_owned());
+                    conf.tokens.insert(host.to_owned(), token.to_owned());
                 }
             }
         }
@@ -233,10 +246,85 @@ pub(super) fn cached_http_credential(host: &str) -> Option<HttpCredential> {
         .flatten()
 }
 
+/// private servers often answer an anonymous request with 404, so both get
+/// the hint, but only when nix has a netrc tack skipped
+pub(super) fn with_netrc_hint(err: FetchError) -> FetchError {
+    const HINT: &str = "nix's netrc-file is only read with TACK_NIX_CONF_TOKENS=1";
+    match err {
+        FetchError::Auth { what } if nix_netrc_skipped() => {
+            FetchError::Auth {
+                what: format!("{what} ({HINT})"),
+            }
+        },
+        FetchError::NotFound { what } if nix_netrc_skipped() => {
+            FetchError::NotFound {
+                what: format!("{what} ({HINT})"),
+            }
+        },
+        FetchError::Auth { .. }
+        | FetchError::NotFound { .. }
+        | FetchError::RateLimited { .. }
+        | FetchError::Transport(_)
+        | FetchError::Decode { .. }
+        | FetchError::Github(_)
+        | FetchError::Gitlab(_)
+        | FetchError::Forge(_) => err,
+    }
+}
+
+fn nix_netrc_skipped() -> bool {
+    if nix_conf_scrape_enabled() {
+        return false;
+    }
+    let mut conf = NixConf::default();
+    for file in nix_conf_files() {
+        scrape_nix_conf(&file, &mut conf, 0);
+    }
+    conf.netrc_file
+        .unwrap_or_else(|| PathBuf::from("/etc/nix/netrc"))
+        .exists()
+}
+
+pub(super) fn netrc_credential_for_url(url: &str) -> Option<HttpCredential> {
+    let host = credential_host(url)?;
+    netrc_credential(&host)
+}
+
 fn netrc_credential(host: &str) -> Option<HttpCredential> {
-    let path = etcetera::home_dir().ok()?.join(".netrc");
-    let contents = fs::read_to_string(path).ok()?;
-    parse_netrc(&contents, host)
+    netrc_contents()
+        .iter()
+        .find_map(|contents| parse_netrc(contents, host))
+}
+
+fn netrc_contents() -> &'static [String] {
+    static CONTENTS: OnceLock<Vec<String>> = OnceLock::new();
+    CONTENTS.get_or_init(|| {
+        let nix = nix_conf_scrape_enabled().then(|| {
+            nix_conf()
+                .netrc_file
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("/etc/nix/netrc"))
+        });
+        let home = etcetera::home_dir().ok().map(|dir| dir.join(".netrc"));
+        nix.into_iter()
+            .chain(home)
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .collect()
+    })
+}
+
+/// credentials are cached per host, so never send them in cleartext off this
+/// machine. parsed as ureq dials it, gix reads `https://a?@b` as host `b`
+pub(super) fn credential_host(url: &str) -> Option<String> {
+    let uri = url.parse::<Uri>().ok()?;
+    let host = uri.host()?;
+    let loopback = host == "localhost"
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    (uri.scheme_str() == Some("https") || loopback).then(|| host.to_owned())
 }
 
 fn parse_netrc(contents: &str, host: &str) -> Option<HttpCredential> {

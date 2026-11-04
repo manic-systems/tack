@@ -15,6 +15,7 @@ use ureq::{
     Agent,
     Body,
     RequestBuilder,
+    config::RedirectAuthHeaders,
     http::{
         Response,
         header::{
@@ -40,8 +41,10 @@ use ureq::{
 use super::{
     auth::{
         Credential,
+        netrc_credential_for_url,
         record_fetch_warning,
         with_credential_fallback,
+        with_netrc_hint,
     },
     error::{
         FetchError,
@@ -140,12 +143,12 @@ impl HttpClient {
             } else {
                 self.agent.get(&current)
             };
-            let resp = Self::with_tack_headers(request)
+            let resp = Self::with_netrc(Self::with_tack_headers(request), &current)
                 .config()
                 .max_redirects(0)
                 .build()
                 .call()
-                .map_err(|err| FetchError::from_ureq(err, &current))?;
+                .map_err(|err| with_netrc_hint(FetchError::from_ureq(err, &current)))?;
             immutable = immutable.or_else(|| link_immutable_of(&resp));
             let Some(location) = redirect_location(&resp) else {
                 return Ok((resp, immutable));
@@ -162,6 +165,27 @@ impl HttpClient {
 
     fn post(self, url: &str) -> RequestBuilder<WithBody> {
         Self::with_tack_headers(self.agent.post(url))
+    }
+
+    /// a plain url fetch authenticated from netrc, as nix's own fetchers do
+    pub(super) fn get_netrc(self, url: &str) -> RequestBuilder<WithoutBody> {
+        Self::with_netrc(self.get(url), url)
+            .config()
+            .redirect_auth_headers(RedirectAuthHeaders::SameHost)
+            .build()
+    }
+
+    pub(super) fn call_netrc(self, url: &str) -> FetchResult<Response<Body>> {
+        self.get_netrc(url)
+            .call()
+            .map_err(|err| with_netrc_hint(FetchError::from_ureq(err, url)))
+    }
+
+    fn with_netrc<B>(request: RequestBuilder<B>, url: &str) -> RequestBuilder<B> {
+        match netrc_credential_for_url(url) {
+            Some(credential) => request.header(AUTHORIZATION, credential.authorization()),
+            None => request,
+        }
     }
 
     fn with_tack_headers<B>(request: RequestBuilder<B>) -> RequestBuilder<B> {
@@ -301,15 +325,17 @@ impl HttpClient {
 
     pub(super) fn raw_text(self, url: &str, credential_host: Option<&str>) -> FetchResult<String> {
         credential_host.map_or_else(
-            || self.text_with(url, Credential::Anonymous),
+            || Self::read_text(self.get_netrc(url), url).map_err(with_netrc_hint),
             |host| {
-                with_credential_fallback(host, true, |credential| self.text_with(url, credential))
+                with_credential_fallback(host, true, |credential| {
+                    Self::read_text(Self::with_credential(self.get(url), credential), url)
+                })
             },
         )
     }
 
-    fn text_with(self, url: &str, credential: Credential) -> FetchResult<String> {
-        let mut resp = Self::with_credential(self.get(url), credential)
+    fn read_text(request: RequestBuilder<WithoutBody>, url: &str) -> FetchResult<String> {
+        let mut resp = request
             .config()
             .timeout_global(Some(DIFF_TIMEOUT))
             .build()
