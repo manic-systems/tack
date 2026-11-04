@@ -16,7 +16,6 @@ use super::scan::{
     walk_flake_lock,
 };
 use crate::{
-    commands::tolerate,
     dispatcher,
     fetch::{
         self,
@@ -35,10 +34,7 @@ use crate::{
         ScanDiagnostic,
         ScanFile,
     },
-    source::{
-        forge::Forge,
-        id::SourceId,
-    },
+    source::id::SourceId,
 };
 
 const AUTO_DEDUP_SCAN_IN_FLIGHT: usize = 16;
@@ -244,34 +240,20 @@ fn scan_input(
     lock: &lock::LockFile,
 ) -> Option<ScanBatch> {
     let node = lock.get(&input.name)?;
+    if matches!(node, LockedNode::Path { .. } | LockedNode::Indirect { .. }) {
+        return None;
+    }
     let path = vec![input.name.clone()];
     let mut batch = ScanBatch::default();
-    let (mut maybe_raw, maybe_cause) =
-        tolerate(fetch::raw_file(node, ScanFile::FlakeLock.as_path()));
-    if let Some(cause) = maybe_cause {
-        batch
-            .diagnostics
-            .insert(ScanDiagnostic::fetch(&path, ScanFile::FlakeLock, cause));
-    } else if maybe_raw.is_none()
-        && let Some(forge) = Forge::from_locked(node)
-        && fetch::forge_miss_untrusted(&forge)
-    {
-        let sparse = fetch::fetch_locked_scan_files(node, &[ScanFile::FlakeLock.as_path()])
-            .ok()
-            .flatten()
-            .and_then(|files| files.into_iter().next());
-        if sparse.is_some() {
-            maybe_raw = sparse;
-        } else {
-            batch.diagnostics.insert(ScanDiagnostic::private_repo(
-                &path,
-                ScanFile::FlakeLock,
-                forge.base(),
-            ));
-        }
-    }
-    let Some(raw_body) = maybe_raw.flatten() else {
-        return (!batch.diagnostics.is_empty()).then_some(batch);
+    let raw_body = match fetch::locked_file(node, ScanFile::FlakeLock.as_path()) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return None,
+        Err(err) => {
+            batch
+                .diagnostics
+                .insert(ScanDiagnostic::fetch(&path, ScanFile::FlakeLock, err));
+            return Some(batch);
+        },
     };
     let parsed = match lock::FlakeLock::parse(&raw_body) {
         Ok(parsed) => parsed,

@@ -606,12 +606,20 @@ impl ScanDocuments {
     }
 
     fn from_tree(root: &Path) -> Self {
-        let flake_lock = fs::read_to_string(root.join("flake.lock")).ok();
-        let td = root.join(".tack");
+        let Ok(tree_root) = root.canonicalize() else {
+            return Self::empty();
+        };
+        let read = |file: &str| {
+            let path = tree_root.join(file).canonicalize().ok()?;
+            if !path.starts_with(&tree_root) {
+                return None;
+            }
+            fs::read_to_string(path).ok()
+        };
         Self {
-            flake_lock,
-            tack_pins: fs::read_to_string(td.join("pins.toml")).ok(),
-            tack_lock: fs::read_to_string(td.join("pins.lock.json")).ok(),
+            flake_lock: read("flake.lock"),
+            tack_pins:  read(".tack/pins.toml"),
+            tack_lock:  read(".tack/pins.lock.json"),
         }
     }
 

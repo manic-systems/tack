@@ -516,7 +516,12 @@ fn read_scan_file(
         Some((dir, name)) => {
             match tree_entry(repo, root, dir)? {
                 Some((kind, id)) if is_expected_kind(kind, true) => (id, name),
-                Some(_) | None => return Ok(None),
+                Some(_) => {
+                    return Err(FetchError::Transport(format!(
+                        "can't read {path} through a non-tree entry with sparse git"
+                    )));
+                },
+                None => return Ok(None),
             }
         },
         None => (root, path),
@@ -525,7 +530,9 @@ fn read_scan_file(
         return Ok(None);
     };
     if !is_expected_kind(kind, false) {
-        return Ok(None);
+        return Err(FetchError::Transport(format!(
+            "can't read {path} with sparse git, it isn't a blob"
+        )));
     }
     let blob = repo
         .find_object(id)
@@ -535,7 +542,9 @@ fn read_scan_file(
             "git blob {id} for {path} exceeds {SCAN_FILE_BYTE_LIMIT} bytes"
         )));
     }
-    Ok(String::from_utf8(blob.data.clone()).ok())
+    String::from_utf8(blob.data.clone())
+        .map(Some)
+        .map_err(|err| FetchError::Transport(format!("decode git blob {id} for {path}: {err}")))
 }
 
 fn filtered_commit_fetch(
