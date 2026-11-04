@@ -179,6 +179,47 @@ tag = "Linphone-{version}-x86_64.AppImage"
 tags_from = "https://download.linphone.org/releases/linux/app/"
 ```
 
+when an asset filename reuses another part of the tag, like a nightly's commit
+hash, a template can capture it with a named placeholder for a fixed pin's url
+to use alongside `{tag}` and `{version}`
+
+```toml
+[inputs.app-nightly]
+url = "https://github.com/acme/app/releases/download/{tag}/app-{commit}-linux.tar.gz"
+type = "fixed"
+tag = "nightly-{version}.{commit}"
+```
+
+the tag `nightly-20261105.a1b2c3d` ranks by `20261105` and fetches
+`.../download/nightly-20261105.a1b2c3d/app-a1b2c3d-linux.tar.gz`. any brace name
+of letters, digits or `_` besides `{version}` and `{tag}` works, like `{build}`
+or `{rev}`. each name can appear once in a template, and the url can only use
+names its template defines.
+
+a named placeholder matches a run of letters and digits, so template text right
+after it can't start with a letter or digit. two placeholders also need text
+between them. pins fail to load with `v{version}.{commit}x` or
+`v{version}{commit}`. a hash that starts with digits, like
+`nightly-20261105.0f3e9a1`, still splits, since `{version}` gives digits back
+until the rest fits.
+
+unlike a trailing `*`, a named placeholder has a clear end, so it also works
+with a `tags_from` page
+
+```toml
+[inputs.nightly]
+url = "https://nightly.example.org/{tag}/app-{commit}-x86_64.AppImage"
+type = "fixed"
+unpack = "file"
+tag = "v{version}.{commit}"
+tags_from = "https://nightly.example.org/latest/release.json"
+```
+
+if `release.json` mentions `v1792353251.de7e6e01d4`, the pin fetches
+`https://nightly.example.org/v1792353251.de7e6e01d4/app-de7e6e01d4-x86_64.AppImage`.
+the page is scanned as plain text instead of parsed, so anything on it that
+fits the template counts as a tag.
+
 ## groups
 
 tag pins with a `group` to print them under headers in `tack look` and

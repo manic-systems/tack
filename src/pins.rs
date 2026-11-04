@@ -406,7 +406,10 @@ fn tag_field(
 ) -> Result<Option<TagFollow>> {
     let Some(template) = raw else {
         if pin_type == PinType::Fixed && tag::names_asset(url) {
-            user_bail!("input '{name}': {{tag}} in a fixed pin's url needs a `tag` template");
+            user_bail!(
+                "input '{name}': placeholders like {{tag}} in a fixed pin's url need a `tag` \
+                 template"
+            );
         }
         if raw_from.is_some() {
             user_bail!("input '{name}': tags_from needs a `tag` template");
@@ -417,6 +420,9 @@ fn tag_field(
         .parse::<TagTemplate>()
         .with_context(|| format!("input '{name}'"))?;
     let expanded = shorturls.expand(url)?;
+    if let Some(unknown) = parsed.unknown_placeholder(&expanded) {
+        user_bail!("input '{name}': tag template '{parsed}' has no {{{unknown}}} placeholder");
+    }
     let from = match (pin_type, raw_from) {
         (PinType::Fixed, Some(from)) => {
             if !tag::names_asset(&expanded) {
