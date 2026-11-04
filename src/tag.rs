@@ -324,9 +324,6 @@ impl TagSource {
     fn ranked(&self, template: &TagTemplate, window: usize) -> Result<Vec<String>> {
         match *self {
             Self::Repo(ref source) => ranked_in_repo(source, template, window),
-            Self::Page(_) if template.open_end => {
-                user_bail!("tag template '{template}' cannot end in * when reading a page")
-            },
             Self::Page(ref url) => {
                 let tags = template.scan(&fetch::raw(url, None)?);
                 let ranked = template.ranked(tags.iter().map(String::as_str));
@@ -380,11 +377,20 @@ fn ranked_in_repo(source: &Source, template: &TagTemplate, window: usize) -> Res
 /// a tag template and where its tags come from, [`None`] for the url's own repo
 #[derive(Clone, Debug)]
 pub struct TagFollow {
-    pub template: TagTemplate,
-    pub from:     Option<TagSource>,
+    template: TagTemplate,
+    from:     Option<TagSource>,
 }
 
 impl TagFollow {
+    pub fn new(name: &str, template: TagTemplate, from: Option<TagSource>) -> Result<Self> {
+        if template.open_end && matches!(from, Some(TagSource::Page(_))) {
+            user_bail!(
+                "input '{name}': tag template '{template}' cannot end in * when reading a page"
+            );
+        }
+        Ok(Self { template, from })
+    }
+
     pub fn locked(&self, tag: String) -> LockedTag {
         let version = self.template.asset_version(&tag).to_owned();
         LockedTag { tag, version }
