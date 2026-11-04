@@ -334,6 +334,22 @@ pub fn drain_fetch_warnings() -> Vec<String> {
     mem::take(&mut *guard).into_iter().collect()
 }
 
+pub(super) fn record_token_hint(host: &str) {
+    if env_flag_enabled(env::var("TACK_NO_TOKEN").ok().as_deref()) {
+        return;
+    }
+    let remedy = match host {
+        "github.com" => {
+            "set GITHUB_TOKEN, GH_TOKEN, or TACK_NIX_CONF_TOKENS=1 to pull from nix.conf"
+        },
+        "gitlab.com" => "set GITLAB_TOKEN, or TACK_NIX_CONF_TOKENS=1 to pull from nix.conf",
+        _ => "set nix.conf access-tokens and TACK_NIX_CONF_TOKENS=1",
+    };
+    record_fetch_warning(format!(
+        "{host} needs a token here ({remedy}). hide this with TACK_NO_TOKEN=1"
+    ));
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Credential {
     Token(&'static str),
@@ -371,7 +387,12 @@ fn run_credentials<T>(
         }));
     }
     match attempt(Credential::Anonymous) {
-        Err(anon_failure) => Err(most_actionable(token_failure, anon_failure)),
+        Err(anon_failure) => {
+            if token.is_none() && anon_failure.is_credential_failure() {
+                record_token_hint(host);
+            }
+            Err(most_actionable(token_failure, anon_failure))
+        },
         result => result,
     }
 }
