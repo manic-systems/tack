@@ -448,14 +448,36 @@ pub fn dedup_report(project: &Project) -> Result<DedupReport> {
 fn dedup_report_inner(project: &Project, emit_diagnostics: bool) -> Result<DedupReport> {
     let doc = project.load_pins()?;
     let lock = project.load_lock()?;
-    let inputs = doc.inputs()?;
+    let mut inputs = doc.inputs()?;
     let shorturls = doc.shorturls();
     let all_follow = doc.all_follows()?;
     let omit_inputs = doc.omit_inputs()?;
+    let pending = auto::pending_targets(&inputs, &all_follow, &lock);
+    let is_pending =
+        |target: &str| pending.contains(target.split_once('/').map_or(target, |(head, _)| head));
+    if emit_diagnostics {
+        for target in &pending {
+            eprintln!(
+                "tack: follow target '{}' is not locked yet, scanning its followers' own inputs \
+                 instead. run `tack update` to lock it",
+                render::printable(target)
+            );
+        }
+    }
+    // until a synthetic target is locked, leave its followers on their own
+    // inputs
+    for input in &mut inputs {
+        input.follows.retain(|_, target| !is_pending(target));
+    }
+    let scan_follow = all_follow
+        .iter()
+        .filter(|&(_, target)| !is_pending(target))
+        .map(|(alias, target)| (alias.clone(), target.clone()))
+        .collect::<BTreeMap<_, _>>();
     let top_revs = top_map(&inputs, &lock, |node| {
         node.source_identity().map(Identity::from_lock)
     });
-    let targets = target_registry(&inputs, &lock, &shorturls, &omit_inputs, &all_follow)?;
+    let targets = target_registry(&inputs, &lock, &shorturls, &omit_inputs, &scan_follow)?;
     let mut groups = BTreeMap::<SourceId, Vec<Entry>>::new();
 
     for input in &inputs {
@@ -486,7 +508,7 @@ fn dedup_report_inner(project: &Project, emit_diagnostics: bool) -> Result<Dedup
                 submodules: input.submodules,
                 pin_type:   input.pin_type,
                 omit:       OmitPolicy::for_input(&omit_inputs, input),
-                follow:     FollowPolicy::for_input(&all_follow, input),
+                follow:     FollowPolicy::for_input(&scan_follow, input),
                 ancestors:  BTreeSet::new(),
             })
         })
