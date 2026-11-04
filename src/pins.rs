@@ -442,10 +442,7 @@ fn tag_field(
             None
         },
     };
-    Ok(Some(TagFollow {
-        template: parsed,
-        from,
-    }))
+    TagFollow::new(name, parsed, from).map(Some)
 }
 
 fn follows_table(name: &str, item: Option<&Item>) -> Result<BTreeMap<String, String>> {
