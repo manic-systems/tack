@@ -179,6 +179,23 @@ tag = "Linphone-{version}-x86_64.AppImage"
 tags_from = "https://download.linphone.org/releases/linux/app/"
 ```
 
+a template can also capture named placeholders like `{commit}` to use in the url
+alongside `{tag}` and `{version}`, when an asset filename only includes part of
+the tag
+
+```toml
+[inputs.nightly]
+url = "https://nightly.example.org/{tag}/app-{commit}-x86_64.AppImage"
+type = "fixed"
+unpack = "file"
+tag = "v{version}.{commit}"
+tags_from = "https://nightly.example.org/latest/release.json"
+```
+
+named placeholders match letters and digits, so any text after one must start
+with a delimiter like `.` or `-`. unlike `*`, they also work with a `tags_from`
+page.
+
 ## groups
 
 tag pins with a `group` to print them under headers in `tack look` and
