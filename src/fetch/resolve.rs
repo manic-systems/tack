@@ -360,8 +360,7 @@ pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> 
         } => git::fetch_tree_into(url, reff.as_deref(), rev.as_deref(), submodules, dir),
         LockedNode::Tarball { ref url, .. } => {
             let mut resp = HttpClient::global()
-                .get(url)
-                .call()
+                .call_netrc(url)
                 .with_context(|| format!("GET {url}"))?;
             // the lock keeps the immutable url, which often drops the extension
             let (sniffed, body) = sniff_reader(resp.body_mut().as_reader())?;
@@ -430,8 +429,7 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
         },
         Source::Tarball { ref url } => {
             let mut resp = HttpClient::global()
-                .get(url.as_str())
-                .call()
+                .call_netrc(url.as_str())
                 .with_context(|| format!("GET {url}"))?;
             let format = detect_tar_format(url).with_context(|| format!("tarball {url}"))?;
             unpack_tar_stream(resp.body_mut().as_reader(), format, dir)
@@ -887,7 +885,7 @@ pub fn channel_rev(url: &str) -> Option<String> {
 pub fn serves(url: &str) -> bool {
     // Forgejo redirects assets to S3 urls presigned for GET
     HttpClient::global()
-        .get(url)
+        .get_netrc(url)
         .header("Range", "bytes=0-0")
         .call()
         .is_ok_and(|resp| resp.status().is_success())

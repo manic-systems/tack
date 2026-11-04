@@ -24,7 +24,8 @@ in
     };
 
     nixConfTokens = lib.mkEnableOption ''
-      tack reading `access-tokens` from nix.conf when comparing forge revisions.
+      tack reading `access-tokens` and `netrc-file` from nix.conf when fetching
+      and comparing forge revisions.
       off by default: it widens which credentials tack may replay to a forge
       beyond the ones in the environment
     '';
