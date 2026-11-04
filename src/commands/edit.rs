@@ -72,7 +72,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     }
     if pin_type == PinType::Fixed && (template.is_some() || tag::names_asset(&expanded)) {
         if template.is_none() {
-            user_bail!("{{tag}} in a fixed pin's url needs --tag to fill it");
+            user_bail!("placeholders like {{tag}} in a fixed pin's url need --tag to fill them");
         }
         if tags_from.is_none() {
             tag::asset_repo(name, &expanded)?;

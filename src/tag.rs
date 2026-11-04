@@ -21,38 +21,104 @@ use crate::{
     source::Source,
 };
 
-/// a tag name with one `{version}` slot, which only matches integers joined
-/// by `.`, `-` or `_`, so `v{version}` skips `v2.0.3-purple` and `v2.1-rc1`
+/// a tag name with `{version}`, integers joined by `.`, `-` or `_`, and named
+/// placeholders like `{commit}` matching letters and digits
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagTemplate {
-    prefix:   String,
-    suffix:   String,
-    /// a trailing `*`, matching anything after the suffix
-    open_end: bool,
+    pieces:     Vec<Piece>,
+    version_at: usize,
+    /// a trailing `*`, matching anything after the last piece
+    open_end:   bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Piece {
+    Text(String),
+    Version,
+    Named(String),
+}
+
+impl Display for Piece {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match *self {
+            Self::Text(ref text) => f.write_str(text),
+            Self::Version => f.write_str("{version}"),
+            Self::Named(ref name) => write!(f, "{{{name}}}"),
+        }
+    }
 }
 
 impl FromStr for TagTemplate {
     type Err = misstep::Report;
 
     fn from_str(raw: &str) -> Result<Self> {
-        let Some((prefix, tail)) = raw.split_once("{version}") else {
-            user_bail!("tag template '{raw}' needs a {{version}} placeholder");
-        };
-        if tail.contains("{version}") {
-            user_bail!("tag template '{raw}' has more than one {{version}}");
-        }
         if raw.contains(['&', '#', '?']) {
             user_bail!("tag template '{raw}' cannot contain &, # or ?");
         }
-        let (suffix, open_end) = tail
+        let (body, open_end) = raw
             .strip_suffix('*')
-            .map_or((tail, false), |closed| (closed, true));
-        if prefix.contains('*') || suffix.contains('*') {
+            .map_or((raw, false), |closed| (closed, true));
+        if body.contains('*') {
             user_bail!("tag template '{raw}' can only use * at its end");
         }
+
+        let mut pieces = Vec::new();
+        let mut rest = body;
+        while let Some((text, opened)) = rest.split_once('{') {
+            let Some((name, after)) = opened.split_once('}') else {
+                user_bail!("tag template '{raw}' has a {{ with no closing }}");
+            };
+            let piece = match name {
+                "version" => Piece::Version,
+                "tag" => user_bail!("tag template '{raw}' cannot have a {{tag}} placeholder"),
+                _ if !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') =>
+                {
+                    Piece::Named(name.to_owned())
+                },
+                _ => {
+                    user_bail!(
+                        "tag template '{raw}' has a placeholder name that isn't letters, digits \
+                         or _"
+                    )
+                },
+            };
+            if pieces.contains(&piece) {
+                user_bail!("tag template '{raw}' has more than one {piece}");
+            }
+            if !text.is_empty() {
+                pieces.push(Piece::Text(text.to_owned()));
+            } else if let Some(last) = pieces.last() {
+                user_bail!("tag template '{raw}' needs text between {last} and {piece}");
+            }
+            pieces.push(piece);
+            rest = after;
+        }
+        if !rest.is_empty() {
+            pieces.push(Piece::Text(rest.to_owned()));
+        }
+        let crowded = pieces.windows(2).find_map(|pair| {
+            match *pair {
+                [ref named @ Piece::Named(_), Piece::Text(ref text)]
+                    if text.starts_with(|ch: char| ch.is_ascii_alphanumeric()) =>
+                {
+                    Some(named)
+                },
+                _ => None,
+            }
+        });
+        if let Some(named) = crowded {
+            user_bail!("tag template '{raw}' has a letter or digit right after {named}");
+        }
+
+        let Some(version_at) = pieces.iter().position(|piece| *piece == Piece::Version) else {
+            user_bail!("tag template '{raw}' needs a {{version}} placeholder");
+        };
         Ok(Self {
-            prefix: prefix.to_owned(),
-            suffix: suffix.to_owned(),
+            pieces,
+            version_at,
             open_end,
         })
     }
@@ -60,8 +126,11 @@ impl FromStr for TagTemplate {
 
 impl Display for TagTemplate {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        for piece in &self.pieces {
+            write!(f, "{piece}")?;
+        }
         let star = if self.open_end { "*" } else { "" };
-        write!(f, "{}{{version}}{}{star}", self.prefix, self.suffix)
+        f.write_str(star)
     }
 }
 
@@ -79,13 +148,22 @@ impl TagTemplate {
         matching
     }
 
-    /// the version a release asset's name carries, `{version}` plus any dotted
-    /// number run that ends the prefix on its own
+    /// `{version}` for asset urls, including a standalone `x.y.` prefix from
+    /// templates like `v0.60.{version}`
     fn asset_version<'tag>(&self, tag: &'tag str) -> &'tag str {
-        let Some((middle, _)) = self.matched(tag) else {
+        let Some(parts) = self.parts(tag) else {
             return tag;
         };
-        let mut head = self.prefix.as_str();
+        let start = parts[..self.version_at]
+            .iter()
+            .map(|part| part.len())
+            .sum::<usize>();
+        let end = start + parts[self.version_at].len();
+        let literal = match self.version_at.checked_sub(1).map(|at| &self.pieces[at]) {
+            Some(&Piece::Text(ref text)) => text.as_str(),
+            Some(&(Piece::Version | Piece::Named(_))) | None => "",
+        };
+        let mut head = literal;
         while let Some(before_dot) = head.strip_suffix('.') {
             let digits = before_dot.trim_end_matches(|ch: char| ch.is_ascii_digit());
             if digits.len() == before_dot.len() {
@@ -94,36 +172,33 @@ impl TagTemplate {
             head = digits;
         }
         let lead = head.strip_suffix(['v', 'V']).unwrap_or(head);
-        let start = if lead.ends_with(|ch: char| ch.is_ascii_alphanumeric()) {
-            self.prefix.len()
+        let literal_at = start - literal.len();
+        let (before_lead, _) = tag.split_at(literal_at + lead.len());
+        let from = if before_lead.ends_with(|ch: char| ch.is_ascii_alphanumeric()) {
+            start
         } else {
-            head.len()
+            literal_at + head.len()
         };
-        tag.get(start..self.prefix.len() + middle.len())
-            .unwrap_or(tag)
+        tag.get(from..end).unwrap_or(tag)
     }
 
     /// the tags in `text`, skipping matches that `runs_into` from either side
     fn scan(&self, text: &str) -> Vec<String> {
+        let (anchor, starts_open) = match self.pieces[0] {
+            Piece::Text(ref literal) => (literal.as_str(), false),
+            Piece::Version => ("", true),
+            Piece::Named(_) => ("", false),
+        };
+        let ends_open = self.pieces.last() == Some(&Piece::Version);
+        let fits = |after: &str| !runs_into(after.chars(), ends_open);
         let mut found = text
-            .match_indices(self.prefix.as_str())
+            .match_indices(anchor)
             .filter_map(|(at, _)| {
-                let (before, from_prefix) = text.split_at(at);
-                if runs_into(before.chars().rev(), self.prefix.is_empty()) {
+                let (before, from_anchor) = text.split_at(at);
+                if runs_into(before.chars().rev(), starts_open) {
                     return None;
                 }
-                let rest = from_prefix.strip_prefix(self.prefix.as_str())?;
-                let run = rest
-                    .find(|ch: char| !(ch.is_ascii_digit() || SEPARATORS.contains(&ch)))
-                    .unwrap_or(rest.len());
-                (1..=run).rev().find_map(|len| {
-                    let (middle, past_middle) = rest.split_at(len);
-                    let after = past_middle.strip_prefix(self.suffix.as_str())?;
-                    let tag = format!("{}{middle}{}", self.prefix, self.suffix);
-                    let fits = !runs_into(after.chars(), self.suffix.is_empty())
-                        && self.version(&tag).is_some();
-                    fits.then_some(tag)
-                })
+                self.split(from_anchor, &fits).map(|parts| parts.concat())
             })
             .collect::<Vec<_>>();
         found.sort_unstable();
@@ -132,29 +207,98 @@ impl TagTemplate {
     }
 
     fn version(&self, tag: &str) -> Option<Vec<u64>> {
-        self.matched(tag).map(|(_, parts)| parts)
+        version_parts(self.parts(tag)?[self.version_at])
     }
 
-    /// a matching tag's `{version}` text and numbers, the longest that fits
-    /// when an open end lets anything follow the suffix
-    fn matched<'tag>(&self, tag: &'tag str) -> Option<(&'tag str, Vec<u64>)> {
-        let rest = tag.strip_prefix(self.prefix.as_str())?;
-        if !self.open_end {
-            let middle = rest.strip_suffix(self.suffix.as_str())?;
-            return Some((middle, version_parts(middle)?));
-        }
-        rest.char_indices()
-            .map(|(at, _)| at)
-            .chain([rest.len()])
-            .rev()
-            .find_map(|at| {
-                let (middle, after) = rest.split_at(at);
-                after
-                    .starts_with(self.suffix.as_str())
-                    .then(|| Some((middle, version_parts(middle)?)))
-                    .flatten()
-            })
+    fn parts<'tag>(&self, tag: &'tag str) -> Option<Vec<&'tag str>> {
+        self.split(tag, &|rest: &str| self.open_end || rest.is_empty())
     }
+
+    fn split<'text>(
+        &self,
+        text: &'text str,
+        fits: &impl Fn(&str) -> bool,
+    ) -> Option<Vec<&'text str>> {
+        let mut parts = Vec::with_capacity(self.pieces.len());
+        split_into(&self.pieces, text, fits, &mut parts).then_some(parts)
+    }
+
+    fn fill(&self, url: &str, tag: &str) -> String {
+        let parts = self.parts(tag).unwrap_or_default();
+        let value = |name: &str| {
+            match name {
+                "tag" => Some(tag),
+                "version" => Some(self.asset_version(tag)),
+                _ => {
+                    self.pieces.iter().zip(&parts).find_map(|(piece, &part)| {
+                        matches!(*piece, Piece::Named(ref named) if named == name).then_some(part)
+                    })
+                },
+            }
+        };
+        let mut filled = String::with_capacity(url.len());
+        let mut rest = url;
+        while let Some((before, opened)) = rest.split_once('{') {
+            filled.push_str(before);
+            let named = opened
+                .split_once('}')
+                .and_then(|(name, after)| Some((value(name)?, after)));
+            if let Some((text, after)) = named {
+                filled.push_str(text);
+                rest = after;
+            } else {
+                filled.push('{');
+                rest = opened;
+            }
+        }
+        filled.push_str(rest);
+        filled
+    }
+
+    pub fn unknown_placeholder<'url>(&self, url: &'url str) -> Option<&'url str> {
+        placeholders(url).find(|&name| {
+            !matches!(name, "tag" | "version")
+                && !self.pieces.contains(&Piece::Named(name.to_owned()))
+        })
+    }
+}
+
+fn split_into<'text>(
+    pieces: &[Piece],
+    text: &'text str,
+    fits: &impl Fn(&str) -> bool,
+    parts: &mut Vec<&'text str>,
+) -> bool {
+    let Some((piece, later)) = pieces.split_first() else {
+        return fits(text);
+    };
+    let run = |within: fn(char) -> bool| text.find(|ch| !within(ch)).unwrap_or(text.len());
+    let lens = match *piece {
+        Piece::Text(ref literal) if text.starts_with(literal.as_str()) => {
+            literal.len()..=literal.len()
+        },
+        Piece::Text(_) => return false,
+        Piece::Version => 1..=run(|ch| ch.is_ascii_digit() || SEPARATORS.contains(&ch)),
+        Piece::Named(_) => 1..=run(|ch| ch.is_ascii_alphanumeric()),
+    };
+    for len in lens.rev() {
+        let (part, after) = text.split_at(len);
+        if *piece == Piece::Version && version_parts(part).is_none() {
+            continue;
+        }
+        parts.push(part);
+        if split_into(later, after, fits, parts) {
+            return true;
+        }
+        parts.pop();
+    }
+    false
+}
+
+fn placeholders(url: &str) -> impl Iterator<Item = &str> {
+    url.split('{')
+        .skip(1)
+        .filter_map(|opened| opened.split_once('}').map(|(name, _)| name))
 }
 
 /// where a fixed pin reads its tags, a repo or an http(s) page
@@ -340,13 +484,11 @@ pub fn followable(name: &str, expanded: &str) -> Result<Source> {
 /// release can be tagged before its assets are uploaded, and some tags never
 /// get a release at all
 const ASSET_TRIES: usize = 10;
-const TAG_SLOT: &str = "{tag}";
-const VERSION_SLOT: &str = "{version}";
 
-/// whether a fixed pin's url names its release asset with `{tag}` or
-/// `{version}`
+/// whether a fixed pin's url names its release asset with placeholders like
+/// `{tag}`
 pub fn names_asset(expanded: &str) -> bool {
-    expanded.contains(TAG_SLOT) || expanded.contains(VERSION_SLOT)
+    placeholders(expanded).next().is_some()
 }
 
 /// the repo whose tags pick a release asset, from a url like
@@ -380,10 +522,7 @@ fn follow_asset(name: &str, follow: &TagFollow, expanded: &str) -> Result<Follow
         user_bail!("input '{name}': no tag matches {template}");
     }
     for tag in ranked.iter().take(ASSET_TRIES) {
-        let version = template.asset_version(tag);
-        let url = expanded
-            .replace(TAG_SLOT, tag)
-            .replace(VERSION_SLOT, version);
+        let url = template.fill(expanded, tag);
         if fetch::serves(&url) {
             return Ok(Followed {
                 url: Cow::Owned(url),
