@@ -42,6 +42,7 @@ use super::{
     },
     auth::{
         record_fetch_warning,
+        record_token_hint,
         token_for_host,
     },
     forge,
@@ -752,7 +753,14 @@ pub fn commit_range(anchor: &str, node: &LockedNode) -> Result<Option<CommitRang
     let Some((url, rev)) = commit_url(node) else {
         return Ok(None);
     };
-    Ok(Some(git::commit_range(&url, anchor, rev)?))
+    let range = git::commit_range(&url, anchor, rev)?;
+    if matches!(range, CommitRange::TooLarge)
+        && matches!(*node, LockedNode::Github { .. })
+        && token_for_host("github.com").is_none()
+    {
+        record_token_hint("github.com");
+    }
+    Ok(Some(range))
 }
 
 fn api_unavailable(owner: &str, repo: &str, err: &FetchError) {
@@ -797,12 +805,6 @@ fn api_commits(owner: &str, repo: &str, oids: &[String]) -> Result<Option<Vec<Co
 
 fn api_range(owner: &str, repo: &str, anchor: &str, rev: &str) -> Result<Option<CommitRange>> {
     if token_for_host("github.com").is_none() {
-        record_fetch_warning(
-            "no GitHub token; checking signatures over git, which fails on large ranges (set \
-             GITHUB_TOKEN or GH_TOKEN, or opt into nix.conf access-tokens with \
-             TACK_NIX_CONF_TOKENS=1)"
-                .to_owned(),
-        );
         return Ok(None);
     }
     let listed = match github_commits::compare_range(HttpClient::global(), owner, repo, anchor, rev)
