@@ -341,6 +341,17 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<FetchedPin> 
     Ok(FetchedPin::content_hash(node, sha256))
 }
 
+pub fn fetch_verified_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> {
+    let root = fetch_locked_tree_into(node, dir)?;
+    if let Some(expected) = node.hash() {
+        let actual = nar::hash_path(&root)?;
+        if actual != expected {
+            bail!("the fetched source hashes to {actual}, but the lock has {expected}");
+        }
+    }
+    Ok(root)
+}
+
 pub fn fetch_locked_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> {
     match *node {
         LockedNode::Github {
@@ -916,16 +927,64 @@ pub fn forge_miss_untrusted(forge: &Forge) -> bool {
 /// `url` must be on `host`, the only place its credential is sent
 /// [`None`] when the locked tree has no file at `path`
 pub fn locked_file(node: &LockedNode, path: &str) -> Result<Option<String>> {
+    read_locked_file(node, path, true)
+}
+
+/// [`locked_file`] without the full tree download, so [`None`] also when only
+/// a full download could read `path`
+pub fn locked_scan_file(node: &LockedNode, path: &str) -> Result<Option<String>> {
+    read_locked_file(node, path, false)
+}
+
+fn read_locked_file(node: &LockedNode, path: &str, full_tree: bool) -> Result<Option<String>> {
+    let mut anonymous_miss = None;
     if let (Some(forge), Some(rev)) = (Forge::from_locked(node), node.forge_rev()) {
         match forge_raw_file(&forge, rev, path) {
             Ok(raw) => return Ok(Some(raw)),
             Err(FetchError::NotFound { .. }) if !forge_miss_untrusted(&forge) => return Ok(None),
+            Err(FetchError::NotFound { .. }) => anonymous_miss = Some(forge),
             // ssh remotes and private repos have no raw file url that answers
             Err(_) => {},
         }
     }
+    let found = if full_tree {
+        locked_tree_file(node, path)
+    } else {
+        sparse_file(node, path, anonymous_miss.is_some())
+    };
+    match anonymous_miss {
+        Some(forge) => found.with_context(|| private_repo_hint(forge.base())),
+        None => found,
+    }
+}
+
+pub fn private_repo_hint(base: &str) -> String {
+    format!(
+        "{} not readable anonymously, the repository may be private (set GITHUB_TOKEN or \
+         GH_TOKEN, GITLAB_TOKEN for gitlab, or TACK_NIX_CONF_TOKENS=1)",
+        printable(base)
+    )
+}
+
+fn sparse_file(node: &LockedNode, path: &str, anonymous_miss: bool) -> Result<Option<String>> {
+    match fetch_locked_scan_files(node, &[path]).erase()? {
+        Some(files) => Ok(files.into_iter().next().flatten()),
+        None if anonymous_miss => bail!("no git remote to read {path} from"),
+        None => Ok(None),
+    }
+}
+
+fn locked_tree_file(node: &LockedNode, path: &str) -> Result<Option<String>> {
+    if !path.contains('/')
+        && let Some(raw) = fetch_locked_scan_files(node, &[path])
+            .ok()
+            .flatten()
+            .and_then(|files| files.into_iter().next())
+    {
+        return Ok(raw);
+    }
     let scratch = tempfile::tempdir()?;
-    let root = fetch_locked_tree_into(node, scratch.path())?.canonicalize()?;
+    let root = fetch_verified_tree_into(node, scratch.path())?.canonicalize()?;
     let file = match root.join(path).canonicalize() {
         Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
@@ -938,14 +997,6 @@ pub fn locked_file(node: &LockedNode, path: &str) -> Result<Option<String>> {
         .map(Some)
         .with_context(|| format!("read {path}"))
         .erase()
-}
-
-/// [`None`] when no forge serves raw files for `node`
-pub fn raw_file(node: &LockedNode, path: &str) -> FetchResult<Option<String>> {
-    let (Some(forge), Some(rev)) = (Forge::from_locked(node), node.forge_rev()) else {
-        return Ok(None);
-    };
-    forge_raw_file(&forge, rev, path).map(Some)
 }
 
 pub fn forge_raw_file(forge: &Forge, rev: &str, path: &str) -> FetchResult<String> {

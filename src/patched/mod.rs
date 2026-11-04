@@ -342,14 +342,8 @@ impl<'a> PatchedPin<'a> {
         } else {
             let upstream_dir = scratch.path().join("upstream");
             fs::create_dir_all(&upstream_dir)?;
-            let upstream = fetch::fetch_locked_tree_into(self.node, &upstream_dir)
+            let upstream = fetch::fetch_verified_tree_into(self.node, &upstream_dir)
                 .context("fetch the locked source")?;
-            if let Some(expected) = self.node.hash() {
-                let actual = nar::hash_path(&upstream)?;
-                if actual != expected {
-                    bail!("fetched source hashes to {actual}, but the lock says {expected}");
-                }
-            }
             fs::rename(&upstream, &tree)?;
         }
 
