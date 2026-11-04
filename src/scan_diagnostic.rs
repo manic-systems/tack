@@ -6,7 +6,7 @@ use std::fmt::{
     Formatter,
 };
 
-use crate::render::printable;
+use crate::fetch;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ScanDiagnostic {
@@ -27,11 +27,7 @@ impl ScanDiagnostic {
         Self::new(
             path,
             file,
-            ScanDiagnosticKind::Fetch(format!(
-                "{} not readable anonymously, the repository may be private (set GITHUB_TOKEN or \
-                 GH_TOKEN, GITLAB_TOKEN for gitlab, or TACK_NIX_CONF_TOKENS=1)",
-                printable(base)
-            )),
+            ScanDiagnosticKind::Fetch(fetch::private_repo_hint(base)),
         )
     }
 

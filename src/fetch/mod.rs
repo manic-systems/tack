@@ -38,14 +38,16 @@ pub use resolve::{
     fetch_locked_tree_into,
     fetch_pin,
     fetch_tree_into,
+    fetch_verified_tree_into,
     forge_miss_untrusted,
     forge_raw_file,
     has_token,
     is_local_url,
     list_tags,
     locked_file,
+    locked_scan_file,
+    private_repo_hint,
     raw,
-    raw_file,
     serves,
 };
 pub use topology::{
