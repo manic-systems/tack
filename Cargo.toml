@@ -27,7 +27,7 @@ gix = { default-features = false, features = [
   "revision",
   "sha1",
 ], version = "0.89.0" }
-gix-pack = "0.76.0"
+gix-pack = "0.77.0"
 gix-protocol = { default-features = false, features = [
   "blocking-client",
   "fetch",
