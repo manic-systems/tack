@@ -231,6 +231,20 @@ url = "gh:niri-wm/niri"
 group = "desktop"
 ```
 
+or nest them under the group name
+
+```toml
+[inputs.desktop.niri]
+url = "gh:niri-wm/niri"
+
+[inputs.desktop.hyprlock]
+url = "gh:hyprwm/hyprlock"
+```
+
+a table under `[inputs]` with no `url` that holds only tables, at least one of
+them with a `url`, is read as a group. a nested pin can't set `group` itself,
+and pin names stay unique across groups.
+
 `tack update desktop` updates every pin in the group, and
 `--exclude desktop` leaves them all alone. names and groups mix freely, so
 `tack look desktop --exclude niri` works. a group can't share its name with

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
-# tack-resolver: patched patchedDiff tag version signedBy groups archive defaultType
+# tack-resolver: patched patchedDiff tag version signedBy groups archive defaultType nestedGroups
 
 let
   inherit (builtins)
@@ -50,10 +50,39 @@ let
     else
       value;
 
+  isPinGroup =
+    entry:
+    isAttrs entry
+    && !(entry ? url)
+    && all isAttrs (attrValues entry)
+    && any (pin: pin ? url) (attrValues entry);
+
+  flattenInputs =
+    inputs:
+    foldl' (
+      acc: name:
+      let
+        entry = inputs.${name};
+        pins =
+          if isPinGroup entry then
+            mapAttrs (
+              pin: value:
+              if value ? group then
+                throw "tack: input '${pin}' sits under [inputs.${name}], so it can't also set group"
+              else
+                value // { group = name; }
+            ) entry
+          else
+            { ${name} = entry; };
+        clashes = filter (pin: acc ? ${pin}) (attrNames pins);
+      in
+      if clashes != [ ] then throw "tack: input '${head clashes}' is defined twice" else acc // pins
+    ) { } (attrNames inputs);
+
   pinsOf =
     toml:
     mapAttrs (_: pin: if pin ? group then (toml.groups or { }).${pin.group} or { } // pin else pin) (
-      toml.inputs or { }
+      flattenInputs (toml.inputs or { })
     );
 
   knownTypes = [
