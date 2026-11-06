@@ -529,8 +529,9 @@ pins that follow one.
 | `fixed` | `url`, `tag`?, `version`?, `sha256`, `unpack` |
 | `upstream` | none |
 
-`host` defaults to `github.com` or `gitlab.com`, and `unpack` to `file`. a pin a
-downstream project replaces through follows takes that project's entry, or
+a pin in a [group](#groups) also carries its `group`. `host` defaults to
+`github.com` or `gitlab.com`, and `unpack` to `file`. a pin a downstream
+project replaces through follows takes that project's entry, or
 `{ type = "upstream"; }` when it isn't known. omitted pins have no entry.
 
 a `fetch` pin that overrides or policy reach carries the upstream project's own
