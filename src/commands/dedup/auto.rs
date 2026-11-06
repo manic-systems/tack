@@ -31,6 +31,7 @@ use crate::{
         self,
         PinType,
     },
+    render::printable,
     scan_diagnostic::{
         ScanDiagnostic,
         ScanFile,
@@ -48,6 +49,7 @@ pub struct AutoDedupReport {
     pub changed:               bool,
     pub scan_diagnostics:      BTreeSet<ScanDiagnostic>,
     pub surfaced_fetch_causes: BTreeSet<String>,
+    pub unseeded:              Vec<String>,
 }
 
 struct AutoFollowAliases {
@@ -88,6 +90,55 @@ impl AutoFollowAliases {
     fn targets(&self) -> impl Iterator<Item = &String> {
         self.targets_by_alias.values()
     }
+
+    /// aliases for targets not in the lock yet
+    fn missing(&self, lock: &lock::LockFile) -> Self {
+        Self {
+            targets_by_alias: self
+                .targets_by_alias
+                .iter()
+                .filter(|&(_, target)| {
+                    lock.get(target).is_none() && !lock.unknown_nodes().any(|name| name == target)
+                })
+                .map(|(alias, target)| (alias.clone(), target.clone()))
+                .collect(),
+        }
+    }
+
+    fn unobserved<T>(&self, observed: &BTreeMap<String, T>) -> Vec<String> {
+        let mut unobserved = BTreeMap::<&str, Vec<String>>::new();
+        for (alias, target) in &self.targets_by_alias {
+            if !observed.contains_key(target) {
+                unobserved
+                    .entry(target)
+                    .or_default()
+                    .push(format!("'{}'", printable(alias)));
+            }
+        }
+        unobserved
+            .into_iter()
+            .map(|(target, aliases)| {
+                format!(
+                    "follow target '{}' was not locked, no flake pin locks an input named {}",
+                    printable(target),
+                    aliases.join(" or "),
+                )
+            })
+            .collect()
+    }
+}
+
+/// synthetic `[all_follow]` targets that `tack update` hasn't locked yet
+pub(super) fn pending_targets(
+    inputs: &[pins::Input],
+    all_follow: &BTreeMap<String, String>,
+    lock: &lock::LockFile,
+) -> BTreeSet<String> {
+    AutoFollowAliases::from_inputs(inputs, all_follow)
+        .missing(lock)
+        .targets()
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone)]
@@ -172,21 +223,25 @@ fn auto_dedup_inner(
     if aliases.is_empty() {
         return AutoDedupReport {
             changed,
-            scan_diagnostics: BTreeSet::new(),
-            surfaced_fetch_causes: BTreeSet::new(),
+            ..AutoDedupReport::default()
         };
     }
 
-    let scan_inputs = match only {
-        Some(names) if !names.is_empty() => {
-            inputs
-                .iter()
-                .filter(|inp| names.contains(&inp.name))
-                .collect::<Vec<_>>()
-        },
-        _ => inputs.iter().collect::<Vec<_>>(),
-    };
-    let batches = scan_batches(&scan_inputs, &aliases, lock);
+    // seed missing targets from every pin, and only refresh locked ones from
+    // pins that moved
+    let missing = aliases.missing(lock);
+    let scan_jobs = inputs
+        .iter()
+        .filter_map(|inp| {
+            let refresh = only.is_none_or(|names| names.contains(&inp.name));
+            if refresh {
+                Some((inp, &aliases))
+            } else {
+                (!missing.is_empty()).then_some((inp, &missing))
+            }
+        })
+        .collect::<Vec<_>>();
+    let batches = scan_batches(scan_jobs, lock);
     let mut observations = BTreeMap::<String, Vec<LockObservation>>::new();
     let mut scan_diagnostics = BTreeSet::<ScanDiagnostic>::new();
     for batch in batches {
@@ -196,8 +251,14 @@ fn auto_dedup_inner(
         }
     }
 
+    let unseeded = if scan_diagnostics.is_empty() {
+        missing.unobserved(&observations)
+    } else {
+        Vec::new()
+    };
+
     for (target, mut obs) in observations {
-        if lock.patched(&target).is_some() {
+        if lock.patched(&target).is_some() || lock.unknown_nodes().any(|name| name == target) {
             continue;
         }
         if let Some(current) = lock.get(&target) {
@@ -217,22 +278,23 @@ fn auto_dedup_inner(
         changed,
         scan_diagnostics,
         surfaced_fetch_causes: comparator.into_surfaced(),
+        unseeded,
     }
 }
 
 fn scan_batches(
-    inputs: &[&pins::Input],
-    aliases: &AutoFollowAliases,
+    jobs: Vec<(&pins::Input, &AutoFollowAliases)>,
     lock: &lock::LockFile,
 ) -> Vec<ScanBatch> {
-    let scan_jobs = inputs
-        .iter()
-        .copied()
-        .filter(|inp| inp.pin_type == PinType::Flake)
+    let scan_jobs = jobs
+        .into_iter()
+        .filter(|&(inp, _)| inp.pin_type == PinType::Flake)
         .collect::<Vec<_>>();
-    dispatcher::ordered(scan_jobs, AUTO_DEDUP_SCAN_IN_FLIGHT, |_, input| {
-        scan_input(input, aliases, lock)
-    })
+    dispatcher::ordered(
+        scan_jobs,
+        AUTO_DEDUP_SCAN_IN_FLIGHT,
+        |_, (input, aliases)| scan_input(input, aliases, lock),
+    )
     .into_iter()
     .flatten()
     .collect::<Vec<ScanBatch>>()

@@ -840,7 +840,8 @@ pub(super) fn update(
 
     changed |= prune_departed(project, &mut lock, &all)?;
 
-    let auto_dedup = if drift == 0 && !changed_names.is_empty() {
+    // runs even if no pin moved, so new `[all_follow]` targets still get locked
+    let auto_dedup = if drift == 0 {
         dedup::auto_dedup_scoped(&all, &all_follow, &mut lock, &changed_names)
     } else {
         dedup::AutoDedupReport::default()
@@ -858,6 +859,7 @@ pub(super) fn update(
     for diagnostic in auto_dedup.scan_diagnostics {
         warnings.push(render::scan_diagnostic(&diagnostic));
     }
+    warnings.extend(auto_dedup.unseeded);
     warnings.extend(session.into_surfaced());
     warnings.extend(auto_dedup.surfaced_fetch_causes);
     warnings.extend(fetch::drain_fetch_warnings());
