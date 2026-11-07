@@ -70,7 +70,7 @@ fn sparse_scan_reads_regular_files() {
 }
 
 #[test]
-fn sparse_scan_ignores_hostile_entry_kinds() {
+fn sparse_scan_rejects_hostile_entry_kinds() {
     let mut remote = LocalRemote::new();
     let rev = remote.commit_nodes(
         vec![
@@ -90,16 +90,10 @@ fn sparse_scan_ignores_hostile_entry_kinds() {
         ],
         "nested",
     );
-    let paths = ["flake.lock", ".tack/pins.toml"];
-
-    assert_eq!(
-        fetch_scan_files(&remote.url(), &rev, &paths).unwrap(),
-        vec![None, None]
-    );
-    assert_eq!(
-        fetch_scan_files(&nested.url(), &nested_rev, &paths).unwrap(),
-        vec![None, None]
-    );
+    for path in ["flake.lock", ".tack/pins.toml"] {
+        fetch_scan_files(&remote.url(), &rev, &[path]).unwrap_err();
+        fetch_scan_files(&nested.url(), &nested_rev, &[path]).unwrap_err();
+    }
 }
 
 #[test]

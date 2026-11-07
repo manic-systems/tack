@@ -44,8 +44,8 @@ pub use resolve::{
     is_local_url,
     list_tags,
     locked_file,
+    private_repo_hint,
     raw,
-    raw_file,
     serves,
 };
 pub use topology::{
