@@ -460,8 +460,8 @@ fn resolve_location(base: &str, location: &str) -> Option<String> {
         return Some(format!("{scheme}:{location}"));
     }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    if let Some(path) = location.strip_prefix('/') {
-        return Some(format!("{scheme}://{authority}{path}"));
+    if location.starts_with('/') {
+        return Some(format!("{scheme}://{authority}{location}"));
     }
     let stem = base.split(['?', '#']).next().unwrap_or(base);
     if location.starts_with('?') {
