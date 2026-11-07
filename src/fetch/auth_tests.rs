@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::{
-    collections::HashMap,
     fs,
+    path::Path,
 };
 
 use super::{
     Credential,
     FetchError,
     FetchResult,
+    NixConf,
     run_credentials,
-    scrape_access_tokens,
+    scrape_nix_conf,
 };
 
 fn label(credential: Credential) -> &'static str {
@@ -47,20 +48,25 @@ fn credential_ladder_falls_back_only_for_credential_failures() {
 }
 
 #[test]
-fn access_tokens_scrape_follows_include_and_later_lines_win() {
+fn nix_conf_scrape_follows_include_and_later_lines_win() {
     let dir = tempfile::tempdir().unwrap();
     let included = dir.path().join("extra.conf");
-    fs::write(&included, "access-tokens = gitlab.example.com=inc\n").unwrap();
+    fs::write(
+        &included,
+        "access-tokens = gitlab.example.com=inc\nnetrc-file = /run/secrets/netrc\n",
+    )
+    .unwrap();
     let main = dir.path().join("nix.conf");
     fs::write(
         &main,
         "access-tokens = github.com=gh gitlab.com=gl\nextra-access-tokens = \
-         gitlab.com=override\n!include extra.conf\n",
+         gitlab.com=override\nnetrc-file = /etc/nix/netrc\n!include extra.conf\n",
     )
     .unwrap();
 
-    let mut tokens = HashMap::new();
-    scrape_access_tokens(&main, &mut tokens, 0);
+    let mut conf = NixConf::default();
+    scrape_nix_conf(&main, &mut conf, 0);
+    let tokens = &conf.tokens;
 
     assert_eq!(tokens.get("github.com").map(String::as_str), Some("gh"));
     assert_eq!(
@@ -70,5 +76,9 @@ fn access_tokens_scrape_follows_include_and_later_lines_win() {
     assert_eq!(
         tokens.get("gitlab.example.com").map(String::as_str),
         Some("inc")
+    );
+    assert_eq!(
+        conf.netrc_file.as_deref(),
+        Some(Path::new("/run/secrets/netrc"))
     );
 }

@@ -10,7 +10,6 @@ use std::{
         Read,
         Write,
     },
-    net::IpAddr,
     sync::{
         Arc,
         Mutex,
@@ -508,20 +507,6 @@ fn send_once(
     Ok(SendOutcome::Response(response))
 }
 
-/// credentials are cached per host, so never send them in cleartext off this
-/// machine. parsed as ureq dials it, gix reads `https://a?@b` as host `b`
-fn credential_host(url: &str) -> Option<String> {
-    let uri = url.parse::<Uri>().ok()?;
-    let host = uri.host()?;
-    let loopback = host == "localhost"
-        || host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
-    (uri.scheme_str() == Some("https") || loopback).then(|| host.to_owned())
-}
-
 fn has_authorization(header_lines: &[String]) -> bool {
     header_lines
         .iter()
@@ -564,7 +549,7 @@ fn send_ureq(
         .into_iter()
         .map(|header| header.as_ref().to_owned())
         .collect::<Vec<_>>();
-    let host = credential_host(url);
+    let host = auth::credential_host(url);
 
     let mut sent_auth = has_authorization(&header_lines);
     if !sent_auth
