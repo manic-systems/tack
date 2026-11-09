@@ -20,7 +20,7 @@
 recomposable = true
 
 [inputs.nixpkgs]
-url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz"
+url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.zst"
 
 # nightly rust for the `fmt` devshell only.
 [inputs.fenix]
