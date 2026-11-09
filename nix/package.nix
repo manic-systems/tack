@@ -4,6 +4,8 @@
   rustPlatform,
   stdenv,
   buildPackages,
+  pkg-config,
+  zstd,
 }:
 let
   inherit (buildPackages) clang wild;
@@ -17,10 +19,15 @@ rustPlatform.buildRustPackage {
   src = ../.;
   cargoLock.lockFile = ../Cargo.lock;
 
-  nativeBuildInputs = lib.optionals hasWild [
+  nativeBuildInputs = [
+    pkg-config
+  ]
+  ++ lib.optionals hasWild [
     wild
     clang
   ];
+
+  buildInputs = [ zstd ];
 
   env = lib.optionalAttrs hasWild {
     RUSTFLAGS = "-Clinker=${clang}/bin/${clang.targetPrefix}clang -Clink-arg=--ld-path=wild";
