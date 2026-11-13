@@ -493,6 +493,17 @@ fn signer_values(item: &Item) -> Option<Vec<&str>> {
         .collect()
 }
 
+enum Slot {
+    Top,
+    Nested(String),
+}
+
+fn is_pin_group(table: &dyn TableLike) -> bool {
+    !table.contains_key("url")
+        && table.iter().all(|(_, item)| item.is_table_like())
+        && table.iter().any(|(_, item)| item.get("url").is_some())
+}
+
 #[derive(Debug)]
 pub struct PinsDoc {
     doc: DocumentMut,
@@ -566,13 +577,17 @@ impl PinsDoc {
             self.doc.as_table() as &dyn TableLike,
             &Self::TOP_KEYS[..],
         )];
-        for (kind, root) in [("input", "inputs"), ("group", "groups")] {
-            let Some(table) = self.doc.get(root).and_then(Item::as_table_like) else {
-                continue;
-            };
+        tables.extend(self.input_entries().filter_map(|(_, name, item)| {
+            Some((
+                format!("input '{name}'"),
+                item.as_table_like()?,
+                &Input::KEYS[..],
+            ))
+        }));
+        if let Some(table) = self.doc.get("groups").and_then(Item::as_table_like) {
             tables.extend(table.iter().filter_map(|(name, item)| {
                 Some((
-                    format!("{kind} '{name}'"),
+                    format!("group '{name}'"),
                     item.as_table_like()?,
                     &Input::KEYS[..],
                 ))
@@ -591,30 +606,38 @@ impl PinsDoc {
 
     pub fn inputs(&self) -> Result<Vec<Input>> {
         let mut out = Vec::new();
-        let Some(table) = self.doc.get("inputs").and_then(Item::as_table_like) else {
-            return Ok(out);
-        };
-
+        let mut names = BTreeSet::new();
         let groups = self.groups()?;
         let shorturls = self.shorturls();
         let global_build = self.global_build_fetch()?;
         let default_type = self.default_type()?;
-        for (name, item) in table.iter() {
-            let defaults = item
-                .get("group")
-                .and_then(Item::as_str)
+        for (nest, name, item) in self.input_entries() {
+            if !names.insert(name) {
+                user_bail!("input '{name}' is defined twice");
+            }
+            let defaults = nest
+                .or_else(|| item.get("group").and_then(Item::as_str))
                 .and_then(|group| groups.get(group).copied());
-            out.push(Input::from_item(
-                name,
-                item,
-                defaults,
-                &shorturls,
-                global_build,
-                default_type,
-            )?);
+            let parsed =
+                Input::from_item(name, item, defaults, &shorturls, global_build, default_type);
+            let input = match nest {
+                Some(outer) => {
+                    let mut input = parsed.with_context(|| format!("group '{outer}'"))?;
+                    if input.group.is_some() {
+                        user_bail!(
+                            "input '{name}' sits under [inputs.{outer}], so it can't also set \
+                             group"
+                        );
+                    }
+                    input.group = Some(outer.to_owned());
+                    input
+                },
+                None => parsed?,
+            };
+            out.push(input);
         }
 
-        if let Some(group) = groups.keys().find(|&&group| table.contains_key(group)) {
+        if let Some(group) = groups.keys().find(|&&group| names.contains(group)) {
             user_bail!("group '{group}' is also an input name");
         }
 
@@ -629,7 +652,7 @@ impl PinsDoc {
             }
 
             if let Some(ref group) = input.group
-                && out.iter().any(|other| other.name == *group)
+                && names.contains(group.as_str())
             {
                 user_bail!(
                     "input '{}' is in group '{group}', which is also an input name",
@@ -639,6 +662,30 @@ impl PinsDoc {
         }
 
         Ok(out)
+    }
+
+    fn input_entries(&self) -> impl Iterator<Item = (Option<&str>, &str, &Item)> + '_ {
+        self.doc
+            .get("inputs")
+            .and_then(Item::as_table_like)
+            .into_iter()
+            .flat_map(TableLike::iter)
+            .flat_map(|(name, item)| {
+                let nest = item.as_table_like().filter(|&nested| is_pin_group(nested));
+                nest.into_iter()
+                    .flat_map(move |nested| {
+                        nested
+                            .iter()
+                            .map(move |(pin, pin_item)| (Some(name), pin, pin_item))
+                    })
+                    .chain(nest.is_none().then_some((None, name, item)))
+            })
+    }
+
+    pub fn nested_pin(&self) -> Option<&str> {
+        self.input_entries()
+            .find(|&(nest, ..)| nest.is_some())
+            .map(|(_, pin, _)| pin)
     }
 
     /// each `[groups.<name>]` table by name, rejecting keys a group can't set
@@ -735,24 +782,44 @@ impl PinsDoc {
     }
 
     pub fn has_input(&self, name: &str) -> bool {
-        self.doc
-            .get("inputs")
-            .and_then(Item::as_table_like)
-            .is_some_and(|tbl| tbl.contains_key(name))
+        self.input_entries().any(|(_, pin, _)| pin == name)
     }
 
     pub fn add_input(&mut self, name: &str, url: &str, opts: &AddInputOpts<'_>) -> Result<()> {
+        if self
+            .doc
+            .get("inputs")
+            .and_then(|inputs| inputs.get(name))
+            .is_some()
+        {
+            user_bail!("'{name}' is already taken under [inputs]");
+        }
         let table = opts.to_table(url, self.default_type()?);
         self.ensure_table("inputs").insert(name, Item::Table(table));
         Ok(())
     }
 
     pub fn remove_input(&mut self, name: &str) -> bool {
-        self.doc
-            .get_mut("inputs")
-            .and_then(Item::as_table_like_mut)
-            .and_then(|tbl| tbl.remove(name))
-            .is_some()
+        self.take_input(name).is_some()
+    }
+
+    fn take_input(&mut self, name: &str) -> Option<Item> {
+        let slot = self.input_slot(name)?;
+        let inputs = self.doc.get_mut("inputs")?.as_table_like_mut()?;
+        let Slot::Nested(outer) = slot else {
+            return inputs.remove(name);
+        };
+        let group = inputs.get_mut(&outer)?.as_table_like_mut()?;
+        let removed = group.remove(name);
+        if group.is_empty() {
+            inputs.remove(&outer);
+        }
+        removed
+    }
+
+    fn input_slot(&self, name: &str) -> Option<Slot> {
+        let (nest, ..) = self.input_entries().find(|&(_, pin, _)| pin == name)?;
+        Some(nest.map_or(Slot::Top, |outer| Slot::Nested(outer.to_owned())))
     }
 
     /// # Panics
@@ -760,9 +827,8 @@ impl PinsDoc {
     /// if `name` isn't an input table, so pass names from `inputs`
     pub fn set_frozen(&mut self, name: &str, frozen: Option<&Frozen>) {
         let entry = self
-            .doc
-            .get_mut("inputs")
-            .and_then(|inputs| inputs.get_mut(name))
+            .input_item_mut(name)
+            .ok()
             .and_then(Item::as_table_like_mut)
             .expect("input listed by inputs()");
         match frozen {
@@ -848,10 +914,22 @@ impl PinsDoc {
     }
 
     fn input_item_mut(&mut self, name: &str) -> Result<&mut Item> {
-        self.doc
+        let slot = self
+            .input_slot(name)
+            .with_context(|| format!("no input '{name}'"))?;
+        let mut parent = self
+            .doc
             .get_mut("inputs")
             .and_then(Item::as_table_like_mut)
-            .and_then(|tbl| tbl.get_mut(name))
+            .with_context(|| format!("no input '{name}'"))?;
+        if let Slot::Nested(outer) = slot {
+            parent = parent
+                .get_mut(&outer)
+                .and_then(Item::as_table_like_mut)
+                .with_context(|| format!("no input '{name}'"))?;
+        }
+        parent
+            .get_mut(name)
             .with_context(|| format!("no input '{name}'"))
     }
 

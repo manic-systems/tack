@@ -36,6 +36,7 @@ pub const SIGNED: &str = "signedBy";
 pub const GROUPS: &str = "groups";
 pub const ARCHIVE: &str = "archive";
 pub const DEFAULT_TYPE: &str = "defaultType";
+pub const NESTED_GROUPS: &str = "nestedGroups";
 
 /// lock features an older resolver can safely ignore
 const OPTIONAL: [&str; 2] = [PATCHED_DIFF, ARCHIVE];
@@ -85,6 +86,7 @@ pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
         })
         .chain(grouped)
         .chain((pins.default_type()? != PinType::Flake).then_some(("[tack] type", DEFAULT_TYPE)))
+        .chain(pins.nested_pin().map(|pin| (pin, NESTED_GROUPS)))
         .collect::<Vec<_>>();
     ensure(project, &needs)
 }
