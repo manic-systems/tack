@@ -491,8 +491,8 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
                 .or_else(|_| detect_tar_format(url))
                 .with_context(|| format!("tarball {url}"))?;
 
-            let served_from =
-                (resp.get_uri().to_string() == immutable_url).then(|| immutable_url.clone());
+            let served_from = (with_sorted_query(&resp.get_uri().to_string()) == immutable_url)
+                .then(|| immutable_url.clone());
             let dir = tempfile::tempdir()?;
             let Unpacked {
                 root,
@@ -690,18 +690,30 @@ fn immutable_url_of(
     immutable: Option<String>,
     fallback: &str,
 ) -> String {
-    if let Some(url) = immutable {
-        return url;
-    }
+    let url = immutable.unwrap_or_else(|| {
+        let uri = resp.get_uri().to_string();
+        // a redirect to another host is usually a signed download link that
+        // expires
+        if uri.is_empty() || host_of(&uri) != host_of(fallback) {
+            fallback.to_owned()
+        } else {
+            uri
+        }
+    });
+    with_sorted_query(&url)
+}
 
-    let uri = resp.get_uri().to_string();
-    // a redirect to another host is usually a signed download link that
-    // expires, as GitHub release assets are, so keep what was asked for
-    if uri.is_empty() || host_of(&uri) != host_of(fallback) {
-        fallback.to_owned()
-    } else {
-        uri
-    }
+/// nix stores tarball cache entries key-sorted but looks them up as supplied
+/// so channels with `?rev=..&lastModified=..` always miss
+/// waiting on nix#16639 for a fix
+fn with_sorted_query(url: &str) -> String {
+    let (base, Some(query)) = split_query_fragment(url) else {
+        return url.to_owned();
+    };
+    let fragment = url.find('#').and_then(|at| url.get(at..)).unwrap_or("");
+    let mut pairs: Vec<&str> = query.split('&').collect();
+    pairs.sort_by_key(|pair| pair.split_once('=').map_or(*pair, |(key, _)| key));
+    format!("{base}?{}{fragment}", pairs.join("&"))
 }
 
 /// channel tarballs stamp every mtime 1980
