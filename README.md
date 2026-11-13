@@ -494,9 +494,9 @@ keep_inputs = ["nixpkgs", "cachix"]
 ```
 
 names take the `flake:` and `tack:` prefixes and `*` like `exclude_follow`
-does, and a follow wins over an omit. evaluating an omitted input throws, so
-frameworks that walk every input, like flake-parts modules or blueprint, can't
-use one.
+does, and a follow wins over an omit. evaluating an omitted input warns, so
+frameworks that walk every input, like flake-parts modules or blueprint. Will pick up
+omitted inputs as null.
 
 omits and follows reach an upstream's tack pins only when it is
 [recomposable](#publishing), and the consumer wins. your `keep_inputs` can undo
