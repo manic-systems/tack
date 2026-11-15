@@ -75,8 +75,9 @@ impl GitlabClient {
         let url = archive_url(host, owner, repo, rev);
         with_credential_fallback(host, true, |credential| {
             let request = HttpClient::with_credential(self.http.get(&url), credential);
-            let mut resp = request
-                .call()
+            let mut resp = self
+                .http
+                .call(request)
                 .map_err(|err| FetchError::from_ureq(err, &url))?;
             if resp.status() != 200 {
                 return Err(FetchError::from_response(&mut resp, &url));

@@ -17,11 +17,13 @@ use ureq::{
     RequestBuilder,
     config::RedirectAuthHeaders,
     http::{
+        Method,
         Response,
         header::{
             ACCEPT,
             AUTHORIZATION,
             CONTENT_TYPE,
+            COOKIE,
             LINK,
             LOCATION,
             USER_AGENT,
@@ -50,6 +52,11 @@ use super::{
         FetchError,
         FetchResult,
     },
+    extra_header::{
+        self,
+        Reach,
+    },
+    git_http::same_request_origin,
 };
 
 const TACK_USER_AGENT: &str = "tack";
@@ -128,6 +135,63 @@ impl HttpClient {
         Self::with_tack_headers(self.agent.get(url))
     }
 
+    pub(super) fn call(
+        self,
+        request: RequestBuilder<WithoutBody>,
+    ) -> Result<Response<Body>, ureq::Error> {
+        self.call_reaching(request, Reach::Scoped)
+    }
+
+    /// ureq forwards custom headers across redirects, so follow them by hand
+    pub(super) fn call_reaching(
+        self,
+        request: RequestBuilder<WithoutBody>,
+        reach: Reach,
+    ) -> Result<Response<Body>, ureq::Error> {
+        let Some(start) = request.uri_ref().map(ToString::to_string) else {
+            return request.call();
+        };
+        let extra = extra_header::for_url(&start, reach);
+        if extra.is_empty() {
+            return request.call();
+        }
+        let head = request.method_ref() == Some(&Method::HEAD);
+        let headers = request.headers_ref().cloned().unwrap_or_default();
+        let extensions = request.extensions_ref().cloned().unwrap_or_default();
+        let mut hop = extra_header::apply(request, &extra);
+        let mut current = start.clone();
+        for _ in 0..MAX_REDIRECT_HOPS {
+            let resp = hop.config().max_redirects(0).build().call()?;
+            let Some(next) = matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308)
+                .then(|| redirect_location(&resp))
+                .flatten()
+                .and_then(|location| resolve_location(&current, &location))
+            else {
+                return Ok(resp);
+            };
+            let same_origin = same_request_origin(&start, &next);
+            let mut next_request = if head {
+                self.agent.head(&next)
+            } else {
+                self.agent.get(&next)
+            };
+            if let Some(next_headers) = next_request.headers_mut() {
+                next_headers.clone_from(&headers);
+                if !same_origin {
+                    next_headers.remove(AUTHORIZATION);
+                    next_headers.remove(COOKIE);
+                }
+            }
+            if let Some(next_extensions) = next_request.extensions_mut() {
+                next_extensions.extend(extensions.clone());
+            }
+            let hop_reach = if same_origin { reach } else { Reach::Scoped };
+            hop = extra_header::apply(next_request, &extra_header::for_url(&next, hop_reach));
+            current = next;
+        }
+        Err(ureq::Error::TooManyRedirects)
+    }
+
     /// the final response plus the first immutable `Link` from any hop, because
     /// nixos channels send it on the redirect, which ureq's own following hides
     pub(super) fn through_redirects(
@@ -143,12 +207,15 @@ impl HttpClient {
             } else {
                 self.agent.get(&current)
             };
-            let resp = Self::with_netrc(Self::with_tack_headers(request), &current)
-                .config()
-                .max_redirects(0)
-                .build()
-                .call()
-                .map_err(|err| with_netrc_hint(FetchError::from_ureq(err, &current)))?;
+            let resp = extra_header::apply(
+                Self::with_netrc(Self::with_tack_headers(request), &current),
+                &extra_header::for_url(&current, Reach::Scoped),
+            )
+            .config()
+            .max_redirects(0)
+            .build()
+            .call()
+            .map_err(|err| with_netrc_hint(FetchError::from_ureq(err, &current)))?;
             immutable = immutable.or_else(|| link_immutable_of(&resp));
             let Some(location) = redirect_location(&resp) else {
                 return Ok((resp, immutable));
@@ -163,8 +230,15 @@ impl HttpClient {
         )))
     }
 
+    /// git only follows redirects on its first request
     fn post(self, url: &str) -> RequestBuilder<WithBody> {
-        Self::with_tack_headers(self.agent.post(url))
+        let extra = extra_header::for_url(url, Reach::Scoped);
+        let request = extra_header::apply(Self::with_tack_headers(self.agent.post(url)), &extra);
+        if extra.is_empty() {
+            request
+        } else {
+            request.config().max_redirects(0).build()
+        }
     }
 
     /// a plain url fetch authenticated from netrc, as nix's own fetchers do
@@ -176,8 +250,7 @@ impl HttpClient {
     }
 
     pub(super) fn call_netrc(self, url: &str) -> FetchResult<Response<Body>> {
-        self.get_netrc(url)
-            .call()
+        self.call(self.get_netrc(url))
             .map_err(|err| with_netrc_hint(FetchError::from_ureq(err, url)))
     }
 
@@ -235,7 +308,9 @@ impl HttpClient {
             if let Some(timeout) = timeout_limit {
                 req = req.config().timeout_global(Some(timeout)).build();
             }
-            let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
+            let mut resp = self
+                .call(req)
+                .map_err(|err| FetchError::from_ureq(err, url))?;
             let next = resp
                 .headers()
                 .get(LINK)
@@ -250,13 +325,14 @@ impl HttpClient {
 
     pub(super) fn github_diff(self, url: &str) -> FetchResult<String> {
         with_credential_fallback("github.com", true, |credential| {
-            let mut resp =
+            let request =
                 Self::with_credential(self.get(url).header(ACCEPT, GITHUB_DIFF_ACCEPT), credential)
                     .config()
                     .timeout_global(Some(DIFF_TIMEOUT))
-                    .build()
-                    .call()
-                    .map_err(|err| FetchError::from_ureq(err, url))?;
+                    .build();
+            let mut resp = self
+                .call(request)
+                .map_err(|err| FetchError::from_ureq(err, url))?;
             read_ok_body(&mut resp, url)
         })
     }
@@ -276,7 +352,9 @@ impl HttpClient {
             if let Some(timeout) = timeout_limit {
                 req = req.config().timeout_global(Some(timeout)).build();
             }
-            let mut resp = req.call().map_err(|err| FetchError::from_ureq(err, url))?;
+            let mut resp = self
+                .call(req)
+                .map_err(|err| FetchError::from_ureq(err, url))?;
             let body = read_ok_body(&mut resp, url)?;
             serde_json::from_str::<T>(&body)
                 .map_err(|err| FetchError::Gitlab(format!("api {url}: invalid json: {err}")))
@@ -325,21 +403,22 @@ impl HttpClient {
 
     pub(super) fn raw_text(self, url: &str, credential_host: Option<&str>) -> FetchResult<String> {
         credential_host.map_or_else(
-            || Self::read_text(self.get_netrc(url), url).map_err(with_netrc_hint),
+            || {
+                self.read_text(self.get_netrc(url), url)
+                    .map_err(with_netrc_hint)
+            },
             |host| {
                 with_credential_fallback(host, true, |credential| {
-                    Self::read_text(Self::with_credential(self.get(url), credential), url)
+                    self.read_text(Self::with_credential(self.get(url), credential), url)
                 })
             },
         )
     }
 
-    fn read_text(request: RequestBuilder<WithoutBody>, url: &str) -> FetchResult<String> {
-        let mut resp = request
-            .config()
-            .timeout_global(Some(DIFF_TIMEOUT))
-            .build()
-            .call()
+    fn read_text(self, request: RequestBuilder<WithoutBody>, url: &str) -> FetchResult<String> {
+        let timed = request.config().timeout_global(Some(DIFF_TIMEOUT)).build();
+        let mut resp = self
+            .call(timed)
             .map_err(|err| FetchError::from_ureq(err, url))?;
         read_ok_body(&mut resp, url)
     }

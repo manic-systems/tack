@@ -205,10 +205,15 @@ fn ladder_credential(host: &str) -> Option<HttpCredential> {
     if let Some(seeded) = test_credential_override(host) {
         return Some(seeded);
     }
+    token_or_netrc_credential(host).or_else(|| git_helper_credential(host))
+}
+
+/// git only asks a credential helper after a 401, so a helper login must not
+/// displace a configured `http.extraHeader`
+pub(super) fn token_or_netrc_credential(host: &str) -> Option<HttpCredential> {
     token_for_host(host)
         .map(|token| HttpCredential::new("oauth2".to_owned(), token))
         .or_else(|| netrc_credential(host))
-        .or_else(|| git_helper_credential(host))
 }
 
 #[cfg(test)]

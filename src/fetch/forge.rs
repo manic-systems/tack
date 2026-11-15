@@ -375,17 +375,15 @@ fn json_with<T>(url: &str, timeout: Duration, credential: Credential) -> FetchRe
 where
     T: for<'de> Deserialize<'de>,
 {
-    let mut resp = HttpClient::with_credential(
-        HttpClient::global()
-            .get(url)
-            .header(ACCEPT, APPLICATION_JSON),
-        credential,
-    )
-    .config()
-    .timeout_global(Some(timeout))
-    .build()
-    .call()
-    .map_err(|err| FetchError::from_ureq(err, url))?;
+    let http = HttpClient::global();
+    let request =
+        HttpClient::with_credential(http.get(url).header(ACCEPT, APPLICATION_JSON), credential)
+            .config()
+            .timeout_global(Some(timeout))
+            .build();
+    let mut resp = http
+        .call(request)
+        .map_err(|err| FetchError::from_ureq(err, url))?;
     let status = resp.status();
     if status != 200 {
         return Err(FetchError::from_status(status.as_u16(), url));
@@ -399,12 +397,10 @@ where
 }
 
 fn get_text(url: &str, timeout: Duration, limit: u64) -> FetchResult<ProbeResponse> {
-    let mut resp = HttpClient::global()
-        .get(url)
-        .config()
-        .timeout_global(Some(timeout))
-        .build()
-        .call()
+    let http = HttpClient::global();
+    let request = http.get(url).config().timeout_global(Some(timeout)).build();
+    let mut resp = http
+        .call(request)
         .map_err(|err| FetchError::from_ureq(err, url))?;
     let status = resp.status().as_u16();
     let headers = resp.headers().clone();

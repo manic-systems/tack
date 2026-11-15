@@ -8,6 +8,7 @@ mod archive;
 mod auth;
 pub mod compare_planner;
 mod error;
+mod extra_header;
 pub mod forge;
 mod git;
 mod git_http;
@@ -25,6 +26,7 @@ pub use error::{
     FetchError,
     FetchResult,
 };
+pub use extra_header::read_git_config_of;
 pub use resolve::{
     FetchedPin,
     FetchedTree,

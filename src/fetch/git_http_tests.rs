@@ -15,6 +15,7 @@ use std::{
 
 use super::{
     Method,
+    Reach,
     auth,
     http,
     send_ureq,
@@ -78,7 +79,15 @@ fn unauthorized_request_resolves_credential_and_retries_with_authorization() {
         requests
     });
 
-    let response = send_ureq(http::agent(), Method::Get, &url, Vec::<String>::new(), &[]).unwrap();
+    let response = send_ureq(
+        http::agent(),
+        Method::Get,
+        &url,
+        Vec::<String>::new(),
+        &[],
+        Reach::GitTransport,
+    )
+    .unwrap();
 
     assert!(response.headers.is_ok());
     let requests = server.join().unwrap();
