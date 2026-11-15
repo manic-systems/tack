@@ -56,7 +56,7 @@ pub fn tree(project: &Project, selection: Selection<'_>) -> Result<TreeReport> {
     let all_follow = doc.all_follows()?;
     let omit_inputs = doc.omit_inputs()?;
     let lock = project.load_lock()?;
-    let selected = select(&all, selection)?;
+    let selected = select(&doc, &all, selection)?;
     let trees = dispatcher::ordered(selected, TREE_IN_FLIGHT, |_, input| {
         pin_tree(input, &all_follow, &omit_inputs, &lock)
     });
@@ -69,7 +69,16 @@ pub fn tree(project: &Project, selection: Selection<'_>) -> Result<TreeReport> {
             pin
         })
         .collect::<Vec<_>>();
-    Ok(TreeReport { pins, warnings })
+    let top_follows = if selection.is_everything() {
+        doc.top_follows()?.clone()
+    } else {
+        BTreeMap::new()
+    };
+    Ok(TreeReport {
+        pins,
+        warnings,
+        top_follows,
+    })
 }
 
 pub fn tree_cli(project: &Project, selection: Selection<'_>) -> Result<()> {

@@ -29,6 +29,15 @@ const GLYPH_WIDTH: usize = 3;
 
 pub fn print(report: &TreeReport) {
     TreeView::new(report).print(&report.pins);
+    let style = Style::stdout();
+    for (name, target) in &report.top_follows {
+        let follows = format!("follows {}", render::printable(target));
+        println!(
+            "{}  {}",
+            style.paint(Sgr::Bold, &render::printable(name)),
+            style.paint(Sgr::Dim, &follows)
+        );
+    }
     for warning in &report.warnings {
         eprintln!("tack: {}", render::printable(warning));
     }

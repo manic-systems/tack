@@ -77,7 +77,7 @@ pub enum Command {
 #[derive(Debug, PartialEq, Eq)]
 pub struct AddArgs {
     pub name:       String,
-    pub url:        String,
+    pub url:        Option<String>,
     pub pin_type:   Option<PinType>,
     pub unpack:     Option<Unpack>,
     pub dir:        Option<String>,
@@ -174,6 +174,7 @@ enum Cli {
     #[pound(after_help = "examples:
   tack add nixpkgs github:NixOS/nixpkgs/nixos-unstable
   tack add bagel github:manic-systems/bagel --follows nixpkgs
+  tack add nixpkgs --follows hyprland/nixpkgs
   tack add nix git+https://github.com/NixOS/nix?ref=2.31-maintenance --fetch
   tack add proton-ge github:GloriousEggroll/proton-ge-custom --fetch --tag GE-Proton{version}
   tack add nvim 'https://github.com/neovim/neovim/releases/download/{tag}/nvim-linux-x86_64.tar.gz' \\
@@ -181,8 +182,9 @@ enum Cli {
     Add {
         /// input name
         name:       String,
-        /// pin url (shorturl ok; ?rev=<sha> pins a commit)
-        url:        String,
+        /// pin url (shorturl ok; ?rev=<sha> pins a commit), or none to follow
+        /// another pin's input given as --follows pin/input
+        url:        Option<String>,
         /// pin a flake, overriding [tack] type
         #[pound(long, group = kind)]
         flake:      bool,

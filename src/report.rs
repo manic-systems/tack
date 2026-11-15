@@ -316,8 +316,9 @@ pub struct LookReport {
 
 #[derive(Clone, Debug, Default)]
 pub struct TreeReport {
-    pub pins:     Vec<PinTree>,
-    pub warnings: Vec<String>,
+    pub pins:        Vec<PinTree>,
+    pub warnings:    Vec<String>,
+    pub top_follows: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug)]

@@ -18,6 +18,7 @@ use crate::{
         self,
         AddInputOpts,
         PinType,
+        PinsDoc,
     },
     project::Project,
 };
@@ -30,6 +31,7 @@ pub(super) fn convert(project: &Project, flake_path: &Path) -> Result<usize> {
 
     let mut doc = project.load_pins()?;
     let mut added = 0;
+    let mut pending = Vec::new();
     for (name, input) in inputs {
         if pins::is_reserved(&name) {
             eprintln!("tack: input '{name}' is reserved by tack, skipped");
@@ -44,7 +46,10 @@ pub(super) fn convert(project: &Project, flake_path: &Path) -> Result<usize> {
             continue;
         }
         let Some(url) = input.url.as_deref() else {
-            eprintln!("tack: input '{name}' has no url, skipped");
+            match input.follows {
+                Some(target) if !target.is_empty() => pending.push((name, target)),
+                _ => eprintln!("tack: input '{name}' has no url, skipped"),
+            }
             continue;
         };
         let follows = input.follows();
@@ -59,7 +64,35 @@ pub(super) fn convert(project: &Project, flake_path: &Path) -> Result<usize> {
         })?;
         added += 1;
     }
+    added += add_top_follows(&mut doc, pending)?;
     project.save_pins(&doc)?;
+    Ok(added)
+}
+
+/// a top-level follow can name another, so each pass keeps the ones that
+/// resolve until a pass adds nothing
+fn add_top_follows(doc: &mut PinsDoc, mut pending: Vec<(String, String)>) -> Result<usize> {
+    let mut added = 0;
+    loop {
+        let before = pending.len();
+        let mut unresolved = Vec::new();
+        for (name, target) in pending {
+            doc.add_top_follow(&name, &target)?;
+            if doc.top_follows().is_ok() {
+                added += 1;
+            } else {
+                doc.remove_input(&name);
+                unresolved.push((name, target));
+            }
+        }
+        pending = unresolved;
+        if pending.len() == before {
+            break;
+        }
+    }
+    for (name, target) in pending {
+        eprintln!("tack: input '{name}' follows '{target}', which doesn't resolve, skipped");
+    }
     Ok(added)
 }
 
@@ -92,6 +125,7 @@ struct FlakeInput {
     flake:      Option<bool>,
     dir:        Option<String>,
     submodules: Option<bool>,
+    follows:    Option<String>,
     #[serde(default)]
     inputs:     BTreeMap<String, Override>,
 }

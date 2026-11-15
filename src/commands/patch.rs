@@ -195,7 +195,7 @@ fn settle_selected(project: &Project, names: &[String], mode: Mode) -> Result<()
     let mut lock = project.load_lock()?;
     let mut changed = false;
     let mut failed = 0_usize;
-    for input in select(&inputs, Selection::new(names, &[]))? {
+    for input in select(&doc, &inputs, Selection::new(names, &[]))? {
         let Some(node) = lock.get(&input.name) else {
             continue;
         };

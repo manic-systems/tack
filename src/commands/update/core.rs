@@ -775,7 +775,7 @@ pub(super) fn update(
     let shorturls = doc.shorturls();
     let all = doc.inputs()?;
     let all_follow = doc.all_follows()?;
-    let selected = select(&all, selection)?;
+    let selected = select(&doc, &all, selection)?;
     if selected.is_empty() {
         return Ok(UpdateReport::default());
     }
@@ -991,7 +991,7 @@ pub(super) fn look(
     let doc = project.load_pins()?;
     let shorturls = doc.shorturls();
     let all = doc.inputs()?;
-    let selected = select(&all, selection)?;
+    let selected = select(&doc, &all, selection)?;
     if selected.is_empty() {
         return Ok(LookReport::default());
     }
