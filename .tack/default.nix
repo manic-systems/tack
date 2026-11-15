@@ -41,6 +41,7 @@ let
     substring
     tail
     trace
+    warn
     ;
 
   validateInputNames =
@@ -987,7 +988,7 @@ let
 
       omittedInput =
         { side, name }:
-        throw "tack: ${side} input '${name}' was omitted by omit_inputs";
+        warn "tack: ${side} input '${name}' was omitted by omit_inputs, ${name} will be null" null;
 
       # `pin/input/...` walks the inputs that pin was evaluated with, as a flake.nix follows does
       resolveFollows = mapAttrs (
