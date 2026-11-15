@@ -46,7 +46,15 @@ use ureq::{
 
 use super::{
     auth,
-    http,
+    extra_header::{
+        self,
+        ExtraHeader,
+        Reach,
+    },
+    http::{
+        self,
+        HttpClient,
+    },
 };
 
 pub(super) fn boxed(parsed_url: gix::Url) -> Box<dyn BlockingTransport + Send> {
@@ -102,7 +110,14 @@ impl Http for UreqHttp {
         base_url: &str,
         headers: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<GetResponse<Self::Headers, Self::ResponseBody>, HttpError> {
-        let response = send_ureq(self.agent, Method::Get, url, headers, &[])?;
+        let response = send_ureq(
+            self.agent,
+            Method::Get,
+            url,
+            headers,
+            &[],
+            Reach::GitTransport,
+        )?;
         self.remember_redirect(url, base_url, response.effective_url.as_deref());
         Ok(GetResponse {
             headers: LazyHeaders::ready(response.headers),
@@ -122,15 +137,19 @@ impl Http for UreqHttp {
             .into_iter()
             .map(|header| header.as_ref().to_owned())
             .collect::<Vec<_>>();
-        if effective_url != url && !same_request_origin(url, &effective_url) {
+        let reach = if effective_url != url && !same_request_origin(url, &effective_url) {
             header_lines.retain(|header| !is_authorization_header(header));
-        }
+            Reach::Scoped
+        } else {
+            Reach::GitTransport
+        };
         let state = Arc::new(Mutex::new(PendingPost {
-            agent:        self.agent,
-            url:          effective_url,
-            headers:      header_lines,
+            agent: self.agent,
+            url: effective_url,
+            headers: header_lines,
+            reach,
             request_body: Vec::new(),
-            response:     None,
+            response: None,
         }));
         Ok(PostResponse {
             post_body: LazyPostBody {
@@ -255,6 +274,7 @@ struct PendingPost {
     agent:        &'static Agent,
     url:          String,
     headers:      Vec<String>,
+    reach:        Reach,
     request_body: Vec<u8>,
     response:     Option<Result<PendingResponse, HttpFailure>>,
 }
@@ -421,6 +441,7 @@ fn ensure_pending_response(guard: &mut PendingPost) {
             &guard.url,
             guard.headers.iter(),
             &guard.request_body,
+            guard.reach,
         )
         .map(|response| {
             PendingResponse {
@@ -476,10 +497,21 @@ fn send_once(
     url: &str,
     header_lines: &[String],
     body: &[u8],
+    reach: Reach,
 ) -> Result<SendOutcome, HttpError> {
     let sent = match method {
-        Method::Get => apply_headers(agent.get(url), header_lines).call(),
-        Method::Post => apply_headers(agent.post(url), header_lines).send(body),
+        Method::Get => {
+            HttpClient::global().call_reaching(apply_headers(agent.get(url), header_lines), reach)
+        },
+        Method::Post => {
+            let extra = extra_header::for_url(url, reach);
+            let request = extra_header::apply(apply_headers(agent.post(url), header_lines), &extra);
+            if extra.is_empty() {
+                request.send(body)
+            } else {
+                request.config().max_redirects(0).build().send(body)
+            }
+        },
     };
     let response = match sent {
         Ok(response) => response,
@@ -544,6 +576,7 @@ fn send_ureq(
     url: &str,
     headers: impl IntoIterator<Item = impl AsRef<str>>,
     body: &[u8],
+    reach: Reach,
 ) -> Result<UreqResponse, HttpError> {
     let mut header_lines = headers
         .into_iter()
@@ -552,24 +585,34 @@ fn send_ureq(
     let host = auth::credential_host(url);
 
     let mut sent_auth = has_authorization(&header_lines);
-    if !sent_auth
-        && let Some(known_host) = host.as_deref()
-        && let Some(cred) = auth::cached_http_credential(known_host)
-    {
-        header_lines.push(format!("Authorization: {}", cred.authorization()));
-        sent_auth = true;
+    if !sent_auth && let Some(known_host) = host.as_deref() {
+        // auth failure gets 404 instead of 401
+        // our own credential has to come before the configured one
+        let own = auth::cached_http_credential(known_host).or_else(|| {
+            extra_header::for_url(url, reach)
+                .iter()
+                .any(ExtraHeader::is_authorization)
+                .then(|| auth::token_or_netrc_credential(known_host))?
+        });
+        if let Some(cred) = own.as_ref() {
+            header_lines.push(format!("Authorization: {}", cred.authorization()));
+        }
+        sent_auth = own.is_some();
     }
 
-    match send_once(agent, method, url, &header_lines, body)? {
+    match send_once(agent, method, url, &header_lines, body, reach)? {
         SendOutcome::Response(response) => Ok(ok_response(response)),
         SendOutcome::Failed(failure) => Ok(failed_response(failure)),
         SendOutcome::Unauthorized => {
             retry_with_auth(
                 agent,
-                method,
-                url,
+                Attempt {
+                    method,
+                    url,
+                    body,
+                    reach,
+                },
                 header_lines,
-                body,
                 host.as_deref(),
                 sent_auth,
             )
@@ -577,12 +620,18 @@ fn send_ureq(
     }
 }
 
+#[derive(Clone, Copy)]
+struct Attempt<'a> {
+    method: Method,
+    url:    &'a str,
+    body:   &'a [u8],
+    reach:  Reach,
+}
+
 fn retry_with_auth(
     agent: &'static Agent,
-    method: Method,
-    url: &str,
+    attempt: Attempt<'_>,
     mut header_lines: Vec<String>,
-    body: &[u8],
     host: Option<&str>,
     sent_auth: bool,
 ) -> Result<UreqResponse, HttpError> {
@@ -594,7 +643,14 @@ fn retry_with_auth(
         return Ok(failed_response(HttpFailure::no_usable_credential(label)));
     };
     header_lines.push(format!("Authorization: {}", cred.authorization()));
-    match send_once(agent, method, url, &header_lines, body)? {
+    match send_once(
+        agent,
+        attempt.method,
+        attempt.url,
+        &header_lines,
+        attempt.body,
+        attempt.reach,
+    )? {
         SendOutcome::Response(response) => Ok(ok_response(response)),
         SendOutcome::Failed(failure) => Ok(failed_response(failure)),
         SendOutcome::Unauthorized => Ok(failed_response(HttpFailure::no_usable_credential(label))),
@@ -629,18 +685,24 @@ fn replace_base_url(url: &str, base_url: &str, effective_base: &str) -> String {
     )
 }
 
-fn same_request_origin(left: &str, right: &str) -> bool {
+pub(super) fn same_request_origin(left: &str, right: &str) -> bool {
     request_origin(left)
         .zip(request_origin(right))
         .is_some_and(|(left_origin, right_origin)| left_origin == right_origin)
 }
 
-fn request_origin(url: &str) -> Option<(String, String, Option<u16>)> {
+fn request_origin(url: &str) -> Option<(String, Option<u16>, String)> {
     let uri = url.parse::<Uri>().ok()?;
+    let scheme = uri.scheme_str()?.to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
+    };
     Some((
-        uri.scheme_str()?.to_ascii_lowercase(),
         uri.host()?.to_ascii_lowercase(),
-        uri.port_u16(),
+        uri.port_u16().filter(|port| Some(*port) != default_port),
+        scheme,
     ))
 }
 

@@ -5,6 +5,7 @@ use misstep::Result;
 use crate::{
     cli::Command,
     commands,
+    fetch,
     history::{
         HistoryStore,
         Snapshot,
@@ -91,6 +92,7 @@ impl<'a> Tack<'a> {
     }
 
     pub fn run(&self, cmd: Command) -> Result<CommandResultSet> {
+        fetch::read_git_config_of(self.project.dir());
         let check_resolver = !matches!(cmd, Command::Init { .. });
         let label = cmd.history_label();
         let recorded = self.dispatch(cmd, &label)?;

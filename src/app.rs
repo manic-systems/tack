@@ -6,6 +6,7 @@ use crate::{
         SignerAction,
     },
     commands,
+    fetch,
     history::HistoryStore,
     project::Project,
 };
@@ -17,6 +18,7 @@ pub fn run(cmd: Command) -> misstep::Result<()> {
     } else {
         Project::discover()?
     };
+    fetch::read_git_config_of(project.dir());
 
     if !scaffolding {
         commands::warn_unknown_keys(&project);
