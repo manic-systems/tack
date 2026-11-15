@@ -204,8 +204,12 @@ impl<'a> Selection<'a> {
 
 /// clusters pins by `group` in first-seen order, ungrouped pins last, so each
 /// group header in `look` and `update` prints once
-fn select<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Result<Vec<&'a pins::Input>> {
-    let mut out = pick(inputs, selection)?;
+fn select<'a>(
+    doc: &pins::PinsDoc,
+    inputs: &'a [pins::Input],
+    selection: Selection<'_>,
+) -> Result<Vec<&'a pins::Input>> {
+    let mut out = pick(doc, inputs, selection)?;
     let mut groups = Vec::new();
     for group in out.iter().filter_map(|input| input.group.as_deref()) {
         if !groups.contains(&group) {
@@ -224,7 +228,11 @@ fn select<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Result<Vec
 
 /// a name selects the input it names or every member of the group it names,
 /// which [`PinsDoc::inputs`](crate::PinsDoc::inputs) keeps from overlapping
-fn pick<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Result<Vec<&'a pins::Input>> {
+fn pick<'a>(
+    doc: &pins::PinsDoc,
+    inputs: &'a [pins::Input],
+    selection: Selection<'_>,
+) -> Result<Vec<&'a pins::Input>> {
     let Selection { names, exclude } = selection;
     let members = |name: &str| {
         inputs
@@ -253,6 +261,10 @@ fn pick<'a>(inputs: &'a [pins::Input], selection: Selection<'_>) -> Result<Vec<&
     for name in names {
         let matched = members(name);
         if matched.is_empty() {
+            if let Some(target) = doc.top_follows()?.get(name.as_str()) {
+                let pin = target.split('/').next().unwrap_or(target);
+                user_bail!("'{name}' follows '{target}', so name '{pin}' instead");
+            }
             user_bail!("no input or group '{name}'");
         } else if excluded.contains(name.as_str()) {
             eprintln!("tack: input '{name}' is both named and excluded, leaving it alone");

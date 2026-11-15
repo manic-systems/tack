@@ -35,7 +35,7 @@ fn inputs(names: &[&str]) -> Vec<pins::Input> {
 fn selected(inputs: &[pins::Input], pick: &[&str], skip: &[&str]) -> Vec<String> {
     let names = pick.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
     let exclude = skip.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
-    select(inputs, Selection {
+    select(&pins::PinsDoc::parse("").unwrap(), inputs, Selection {
         names:   &names,
         exclude: &exclude,
     })

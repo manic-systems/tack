@@ -33,7 +33,9 @@
 #   url             required, shorturl ok, ?rev=<sha> pins an exact commit
 #   type            flake (default), fetch, or fixed, overrides [tack] type
 #   flake           legacy false means type = "fetch"
-#   follows         { child = "pin" } immediate-input override map
+#   follows         { child = "pin" } immediate-input override map, or a
+#                   "pin/input" string in place of every other field to make
+#                   this pin that input
 #   exclude_follow  all_follow names to skip, flake:/tack: scoped or *
 #   omit_inputs     upstream input names to omit recursively for this pin
 #   keep_inputs     omitted input names to allow recursively for this pin

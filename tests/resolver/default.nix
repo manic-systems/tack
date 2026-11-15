@@ -53,4 +53,11 @@ assert inputs.top._meta.mid.type == "path";
 assert inputs.top.mid._meta.dep == inputs._meta.replacement;
 assert !(inputs.top.mid._meta ? drop);
 assert inputs.top.mid._meta ? keepme;
+assert toString inputs.rechained == replacement;
+assert
+  inputs._meta.rechained == {
+    type = "follows";
+    follows = "replacement";
+  };
+assert !(builtins.tryEval inputs.loopa).success;
 true

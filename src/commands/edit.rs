@@ -44,7 +44,7 @@ use crate::{
 pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     let AddArgs {
         ref name,
-        ref url,
+        url: ref given_url,
         pin_type: asked_type,
         unpack,
         ref dir,
@@ -53,19 +53,13 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
         ref template,
         ref tags_from,
     } = *args;
+    let Some(url) = given_url.as_deref() else {
+        return add_top_follow(project, args);
+    };
     pins::check_name(name)?;
     let mut doc = project.load_pins()?;
     let pin_type = asked_type.map_or_else(|| doc.default_type(), Ok)?;
-    if doc.has_input(name) {
-        user_bail!("input '{name}' already exists");
-    }
-    if doc
-        .inputs()?
-        .iter()
-        .any(|input| input.group.as_deref() == Some(name))
-    {
-        user_bail!("'{name}' is already a group name");
-    }
+    check_free(&doc, name)?;
     let expanded = doc.shorturls().expand(url)?;
     if let Ok(parsed) = Source::parse_unchecked(&expanded) {
         parsed.full_rev(&expanded)?;
@@ -142,6 +136,46 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     Ok(())
 }
 
+fn check_free(doc: &pins::PinsDoc, name: &str) -> Result<()> {
+    if doc.has_input(name) {
+        user_bail!("input '{name}' already exists");
+    }
+    if doc
+        .inputs()?
+        .iter()
+        .any(|input| input.group.as_deref() == Some(name))
+    {
+        user_bail!("'{name}' is already a group name");
+    }
+    Ok(())
+}
+
+fn add_top_follow(project: &Project, args: &AddArgs) -> Result<()> {
+    let name = args.name.as_str();
+    let target = match *args.follows.as_slice() {
+        [(ref child, ref parent)] if child == parent => parent.as_str(),
+        _ => user_bail!("`tack add {name}` needs a url, or one --follows pin/input to follow"),
+    };
+    if args.pin_type.is_some()
+        || args.unpack.is_some()
+        || args.dir.is_some()
+        || args.submodules
+        || args.template.is_some()
+        || args.tags_from.is_some()
+    {
+        user_bail!("'{name}' follows '{target}', so it takes no other flags");
+    }
+    pins::check_name(name)?;
+    let mut doc = project.load_pins()?;
+    check_free(&doc, name)?;
+    doc.add_top_follow(name, target)?;
+    doc.inputs()?;
+    resolver::ensure(project, &[(name, resolver::TOP_FOLLOWS)])?;
+    project.save_pins(&doc)?;
+    println!("added {name} -> {target}");
+    Ok(())
+}
+
 pub fn rm(project: &Project, name: &str) -> Result<()> {
     let (removed_pin, removed_lock) = rm_in_dir(project.dir(), name)?;
     if removed_pin {
@@ -155,6 +189,9 @@ pub fn rm(project: &Project, name: &str) -> Result<()> {
 fn rm_in_dir(dir: &Path, name: &str) -> Result<(bool, bool)> {
     let project = Project::at(dir.to_owned());
     let mut doc = project.load_pins()?;
+    if let Some(follower) = doc.top_follows_into(name).first() {
+        user_bail!("input '{follower}' follows into '{name}', remove it first");
+    }
     let removed_pin = doc.remove_input(name);
 
     let mut lk = project.load_lock()?;
@@ -212,7 +249,7 @@ pub fn set_frozen(project: &Project, names: &[String], frozen: bool) -> Result<(
     let mut doc = project.load_pins()?;
     let lock = project.load_lock()?;
     let all = doc.inputs()?;
-    let targets = select(&all, Selection::new(names, &[]))?;
+    let targets = select(&doc, &all, Selection::new(names, &[]))?;
     let mut changed = false;
     for input in targets {
         // an unlocked pin keeps the rev it was frozen at

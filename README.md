@@ -58,6 +58,8 @@ tack verify [--base <git-ref>]       check locked commits against declared signe
 tack add <name> <url> [--fetch|--fixed [--unpack tarball|file]]
                       [--dir <d>] [--submodules] [--follows c=p]...
                       [--tag <template> [--tags-from <url>]]
+tack add <name> --follows <pin/input>
+                                      make a pin of another pin's input
 tack rm <name>
 tack freeze <names|groups...>        hold pins at their locked rev
 tack unfreeze <names|groups...>      let update move them again
@@ -285,6 +287,22 @@ a target can also walk into another pin's inputs, like a flake.nix follows path
 url = "gh:hyprwm/hypridle"
 follows = { hyprlang = "hyprland/hyprlang", nixpkgs = "hyprland/nixpkgs" }
 ```
+
+a top-level pin can be another pin's input, as `bar.follows = "foo/bar"` does
+in a flake.nix. it has no url or lock entry of its own and moves whenever
+`foo` does. `tack add bar --follows foo/bar` writes one
+
+```toml
+[inputs.nixpkgs]
+follows = "hyprland/nixpkgs"
+```
+
+everything else treats `nixpkgs` as an ordinary pin, so other pins can follow
+it and `[all_follow]` can point at it. it can even follow another pin written
+this way, as long as the chain ends at a real one. hyprland skips any rule that
+would make its `nixpkgs` follow this pin, since that would point it at itself,
+so `[all_follow] nixpkgs = "nixpkgs"` is fine. a consumer overriding `nixpkgs`
+reaches every pin that follows it
 
 `all_follow` applies a rule to every pin that has a matching input, at every
 depth, while a pin's `follows` only reach its own inputs. two value shapes are

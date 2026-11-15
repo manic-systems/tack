@@ -10,11 +10,13 @@ use std::{
         Formatter,
         Result as FmtResult,
     },
+    mem,
     path::{
         Component,
         Path,
     },
     str::FromStr,
+    sync::OnceLock,
 };
 
 use misstep::{
@@ -462,6 +464,26 @@ fn follows_table(name: &str, item: Option<&Item>) -> Result<BTreeMap<String, Str
         .collect()
 }
 
+fn top_follow_target(item: &Item) -> Option<&str> {
+    item.get("follows").and_then(Item::as_str)
+}
+
+fn split_target(target: &str) -> (&str, Option<&str>) {
+    target
+        .split_once('/')
+        .map_or((target, None), |(first, tail)| (first, Some(tail)))
+}
+
+fn rejoin(head: &str, rest: Option<&str>) -> String {
+    rest.map_or_else(|| head.to_owned(), |tail| format!("{head}/{tail}"))
+}
+
+fn through_top_follows(top: &BTreeMap<String, String>, target: &str) -> String {
+    let (head, rest) = split_target(target);
+    top.get(head)
+        .map_or_else(|| target.to_owned(), |flat| rejoin(flat, rest))
+}
+
 fn string_array<'item>(
     context: &str,
     key: &str,
@@ -506,7 +528,8 @@ fn is_pin_group(table: &dyn TableLike) -> bool {
 
 #[derive(Debug)]
 pub struct PinsDoc {
-    doc: DocumentMut,
+    doc:         DocumentMut,
+    top_follows: OnceLock<BTreeMap<String, String>>,
 }
 
 impl PinsDoc {
@@ -521,7 +544,12 @@ impl PinsDoc {
     ];
 
     pub fn parse(raw: &str) -> Result<Self, toml_edit::TomlError> {
-        raw.parse().map(|doc| Self { doc })
+        raw.parse().map(|doc| {
+            Self {
+                doc,
+                top_follows: OnceLock::new(),
+            }
+        })
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -541,7 +569,12 @@ impl PinsDoc {
     }
 
     pub fn all_follows(&self) -> Result<BTreeMap<String, String>> {
-        AllFollowTable::from_doc(&self.doc).aliases()
+        let top = self.top_follows()?;
+        let mut rules = AllFollowTable::from_doc(&self.doc).aliases()?;
+        for target in rules.values_mut() {
+            *target = through_top_follows(top, target);
+        }
+        Ok(rules)
     }
 
     pub fn is_recomposable(&self) -> Result<bool> {
@@ -615,6 +648,9 @@ impl PinsDoc {
             if !names.insert(name) {
                 user_bail!("input '{name}' is defined twice");
             }
+            if top_follow_target(item).is_some() {
+                continue;
+            }
             let defaults = nest
                 .or_else(|| item.get("group").and_then(Item::as_str))
                 .and_then(|group| groups.get(group).copied());
@@ -661,7 +697,107 @@ impl PinsDoc {
             }
         }
 
+        let top = self.top_follows()?;
+        for input in &mut out {
+            let mut kept = BTreeMap::new();
+            for (child, written) in mem::take(&mut input.follows) {
+                let target = through_top_follows(top, &written);
+                let bare = rule_name(&child, Side::Flake)
+                    .or_else(|| rule_name(&child, Side::Tack))
+                    .unwrap_or(&child);
+                let own = format!("{}/{bare}", input.name);
+                if target == own {
+                    continue;
+                }
+                if target.starts_with(&format!("{own}/")) {
+                    user_bail!(
+                        "input '{}': follows.{child} leads to '{target}', inside that same input",
+                        input.name
+                    );
+                }
+                kept.insert(child, target);
+            }
+            input.follows = kept;
+        }
+
         Ok(out)
+    }
+
+    /// each `[inputs.<name>] follows = "pin/input"` entry walked
+    /// through until it starts at a real pin
+    pub fn top_follows(&self) -> Result<&BTreeMap<String, String>> {
+        if let Some(top) = self.top_follows.get() {
+            return Ok(top);
+        }
+        let built = self.build_top_follows()?;
+        Ok(self.top_follows.get_or_init(|| built))
+    }
+
+    fn build_top_follows(&self) -> Result<BTreeMap<String, String>> {
+        let mut declared = BTreeMap::new();
+        let mut pins = BTreeSet::new();
+        for (nest, name, item) in self.input_entries() {
+            let Some(target) = top_follow_target(item) else {
+                pins.insert(name);
+                continue;
+            };
+            if let Some(outer) = nest {
+                user_bail!(
+                    "input '{name}' follows '{target}', so it can't sit under [inputs.{outer}]"
+                );
+            }
+            if let Some(key) = item.as_table_like().and_then(|entry| {
+                entry
+                    .iter()
+                    .map(|(key, _)| key)
+                    .find(|&key| key != "follows")
+            }) {
+                user_bail!("input '{name}' follows '{target}', so it can't also set {key}");
+            }
+            check_name(name)?;
+            if target.split('/').any(str::is_empty) {
+                user_bail!(
+                    "input '{name}': follows '{target}' must be a pin name, then its inputs, \
+                     joined by '/'"
+                );
+            }
+            declared.insert(name, target);
+        }
+
+        declared
+            .iter()
+            .map(|(&name, &written)| {
+                let mut seen = vec![name];
+                let mut target = written.to_owned();
+                loop {
+                    let (head, rest) = split_target(&target);
+                    if pins.contains(head) {
+                        return Ok((name.to_owned(), target));
+                    }
+                    let Some((&next_name, &next)) = declared.get_key_value(head) else {
+                        user_bail!(
+                            "input '{name}' follows '{written}', but there is no pin '{head}'"
+                        );
+                    };
+                    if seen.contains(&next_name) {
+                        seen.push(next_name);
+                        user_bail!("top-level follows loop through {}", seen.join(" -> "));
+                    }
+                    seen.push(next_name);
+                    target = rejoin(next, rest);
+                }
+            })
+            .collect()
+    }
+
+    /// top-level follows whose target starts at `pin`, as written
+    pub fn top_follows_into(&self, pin: &str) -> Vec<&str> {
+        self.input_entries()
+            .filter(|&(_, _, item)| {
+                top_follow_target(item).and_then(|target| target.split('/').next()) == Some(pin)
+            })
+            .map(|(_, name, _)| name)
+            .collect()
     }
 
     fn input_entries(&self) -> impl Iterator<Item = (Option<&str>, &str, &Item)> + '_ {
@@ -774,7 +910,7 @@ impl PinsDoc {
     }
 
     pub fn remove_signer(&mut self, name: &SignerName) -> bool {
-        self.doc
+        self.doc_mut()
             .get_mut("signers")
             .and_then(Item::as_table_like_mut)
             .and_then(|signers| signers.remove(name.as_str()))
@@ -786,6 +922,17 @@ impl PinsDoc {
     }
 
     pub fn add_input(&mut self, name: &str, url: &str, opts: &AddInputOpts<'_>) -> Result<()> {
+        let table = opts.to_table(url, self.default_type()?);
+        self.insert_input(name, table)
+    }
+
+    pub fn add_top_follow(&mut self, name: &str, target: &str) -> Result<()> {
+        let mut entry = Table::new();
+        entry.insert("follows", value(target));
+        self.insert_input(name, entry)
+    }
+
+    fn insert_input(&mut self, name: &str, entry: Table) -> Result<()> {
         if self
             .doc
             .get("inputs")
@@ -794,8 +941,7 @@ impl PinsDoc {
         {
             user_bail!("'{name}' is already taken under [inputs]");
         }
-        let table = opts.to_table(url, self.default_type()?);
-        self.ensure_table("inputs").insert(name, Item::Table(table));
+        self.ensure_table("inputs").insert(name, Item::Table(entry));
         Ok(())
     }
 
@@ -805,7 +951,7 @@ impl PinsDoc {
 
     fn take_input(&mut self, name: &str) -> Option<Item> {
         let slot = self.input_slot(name)?;
-        let inputs = self.doc.get_mut("inputs")?.as_table_like_mut()?;
+        let inputs = self.doc_mut().get_mut("inputs")?.as_table_like_mut()?;
         let Slot::Nested(outer) = slot else {
             return inputs.remove(name);
         };
@@ -918,7 +1064,7 @@ impl PinsDoc {
             .input_slot(name)
             .with_context(|| format!("no input '{name}'"))?;
         let mut parent = self
-            .doc
+            .doc_mut()
             .get_mut("inputs")
             .and_then(Item::as_table_like_mut)
             .with_context(|| format!("no input '{name}'"))?;
@@ -938,7 +1084,7 @@ impl PinsDoc {
     }
 
     pub fn remove_alias(&mut self, name: &str) -> bool {
-        self.doc
+        self.doc_mut()
             .get_mut("shorturls")
             .and_then(Item::as_table_mut)
             .and_then(|tbl| tbl.remove(name))
@@ -973,14 +1119,20 @@ impl PinsDoc {
             .insert("recomposable", value(true));
     }
 
+    /// every write goes through here so the memoized `top_follows` can't go
+    /// stale
+    fn doc_mut(&mut self) -> &mut DocumentMut {
+        self.top_follows.take();
+        &mut self.doc
+    }
+
     fn ensure_table(&mut self, name: &str) -> &mut Table {
-        let table = self
-            .doc
+        let doc = self.doc_mut();
+        let table = doc
             .remove(name)
             .and_then(|item| item.into_table().ok())
             .unwrap_or_default();
-        self.doc
-            .entry(name)
+        doc.entry(name)
             .or_insert(Item::Table(table))
             .as_table_mut()
             .expect("table was just inserted")

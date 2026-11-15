@@ -37,6 +37,7 @@ pub const GROUPS: &str = "groups";
 pub const ARCHIVE: &str = "archive";
 pub const DEFAULT_TYPE: &str = "defaultType";
 pub const NESTED_GROUPS: &str = "nestedGroups";
+pub const TOP_FOLLOWS: &str = "topFollows";
 
 /// lock features an older resolver can safely ignore
 const OPTIONAL: [&str; 2] = [PATCHED_DIFF, ARCHIVE];
@@ -53,6 +54,7 @@ pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
     let pins = project.load_pins()?;
     let groups = pins.groups()?;
     let inputs = pins.inputs()?;
+    let top_follows = pins.top_follows()?;
     let grouped = inputs
         .iter()
         .filter(|input| {
@@ -87,6 +89,12 @@ pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
         .chain(grouped)
         .chain((pins.default_type()? != PinType::Flake).then_some(("[tack] type", DEFAULT_TYPE)))
         .chain(pins.nested_pin().map(|pin| (pin, NESTED_GROUPS)))
+        .chain(
+            top_follows
+                .keys()
+                .next()
+                .map(|name| (name.as_str(), TOP_FOLLOWS)),
+        )
         .collect::<Vec<_>>();
     ensure(project, &needs)
 }

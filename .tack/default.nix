@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
-# tack-resolver: patched patchedDiff tag version signedBy groups archive defaultType nestedGroups
+# tack-resolver: patched patchedDiff tag version signedBy groups archive defaultType nestedGroups topFollows
 
 let
   inherit (builtins)
@@ -269,7 +269,40 @@ let
         then
           throw "tack: '_meta', '_patched' and '_nested' are reserved by tack, rename that input"
         else
-          pinsOf pins;
+          removeAttrs allPins (attrNames topFollowsRaw);
+      allPins = pinsOf pins;
+      topFollowsRaw = listToAttrs (
+        concatMap (
+          name:
+          let
+            pin = allPins.${name};
+          in
+          if !isString (pin.follows or null) then
+            [ ]
+          else if attrNames pin != [ "follows" ] then
+            throw "tack: input '${name}' follows '${pin.follows}', so it can't set any other key or sit in a group"
+          else
+            [
+              {
+                inherit name;
+                value = pin.follows;
+              }
+            ]
+        ) (attrNames allPins)
+      );
+      flattenTarget =
+        seen: target:
+        let
+          path = filter isString (split "/" target);
+          first = head path;
+        in
+        if !isString target || !(topFollowsRaw ? ${first}) then
+          target
+        else if elem first seen then
+          throw "tack: top-level follows loop through ${concatStringsSep " -> " (seen ++ [ first ])}"
+        else
+          flattenTarget (seen ++ [ first ]) (concatStringsSep "/" ([ topFollowsRaw.${first} ] ++ tail path));
+      topFollows = mapAttrs (name: flattenTarget [ name ]) topFollowsRaw;
       all_follow_raw = pins.all_follow or { };
       # tackOverrides carries this reserved entry across nested resolver boundaries
       inheritedPolicy = overrides.__tack_policy or { };
@@ -898,9 +931,17 @@ let
         let
           # a rule into this pin's own inputs would make that input follow itself
           prefix = name + "/";
-          intoSelf = filter (k: substring 0 (stringLength prefix) all_follow.${k} == prefix) (
-            attrNames all_follow
-          );
+          intoSelf = filter (
+            k: substring 0 (stringLength prefix) (flattenTarget [ ] all_follow.${k}) == prefix
+          ) (attrNames all_follow);
+          local = pin.follows or { };
+          sameEdge = filter (
+            k:
+            let
+              m = match "(flake|tack):(.*)" k;
+            in
+            flattenTarget [ ] local.${k} == prefix + (if m == null then k else elemAt m 1)
+          ) (if isAttrs local then attrNames local else [ ]);
         in
         {
           level = {
@@ -913,7 +954,7 @@ let
               in
               if m == null then key else elemAt m 1
             ) intoSelf;
-            local = pin.follows or { };
+            local = if isAttrs local then removeAttrs local sameEdge else local;
             localLocation = "inputs.${name}.follows";
             excluded = pin.exclude_follow or [ ];
             inherited = inheritedFollows;
@@ -1510,7 +1551,9 @@ let
           value = true;
         }) (attrValues all_follow)
       );
-      autoNames = filter (n: !(declared ? ${n}) && autoTargets ? ${n}) (attrNames lock);
+      autoNames = filter (n: !(declared ? ${n}) && !(topFollows ? ${n}) && autoTargets ? ${n}) (
+        attrNames lock
+      );
       autoPin =
         name:
         let
@@ -1538,10 +1581,15 @@ let
             value = autoPin name;
           }) autoNames
         )
+        // resolveFollows topFollows
         // pinOverrides;
 
       selfMeta = removeAttrs (
-        mapAttrs (name: _: pinMeta name) (removeAttrs self (attrNames pinOverrides))
+        mapAttrs (name: _: pinMeta name) (removeAttrs self (attrNames pinOverrides ++ attrNames topFollows))
+        // mapAttrs (_: target: {
+          type = "follows";
+          follows = target;
+        }) (removeAttrs topFollows (attrNames pinOverrides))
         // mapAttrs (name: _: inheritedOverrideMeta.${name} or { type = "upstream"; }) pinOverrides
       ) inheritedOmitted;
     in
