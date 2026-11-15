@@ -994,7 +994,16 @@ let
         _: target:
         let
           path = filter isString (split "/" target);
-          pin = self.${head path} or (throw "tack: follows target '${head path}' is not a pin");
+          name = head path;
+          pin =
+            self.${name} or (
+              if
+                any (alias: all_follow.${alias} == name && substring 0 5 alias != "tack:") (attrNames all_follow)
+              then
+                throw "tack: all_follow target '${name}' has no lock entry; run tack update"
+              else
+                throw "tack: follows target '${name}' is not a pin"
+            );
         in
         foldl' (
           node: key:
