@@ -413,6 +413,7 @@ let
       fetchFixed =
         { name, entry }:
         let
+          # tack update adds the file to the store under this name, see fetch_fixed_pin
           raw = derivation {
             inherit name;
             inherit (entry) url;
