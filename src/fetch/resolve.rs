@@ -2,16 +2,25 @@
 
 use std::{
     borrow::Cow,
-    fs,
-    io::ErrorKind,
+    fs::{
+        self,
+        File,
+    },
+    io::{
+        ErrorKind,
+        Read as _,
+        Write as _,
+    },
     os::unix::fs::MetadataExt as _,
     path::{
         Path,
         PathBuf,
     },
     slice::from_ref,
+    time::Duration,
 };
 
+use etcetera::BaseStrategy as _;
 use misstep::{
     OptionExt as _,
     Result,
@@ -60,7 +69,11 @@ use crate::{
         LockedNode,
         PathFingerprint,
     },
-    nar,
+    nar::{
+        self,
+        HashingReader,
+    },
+    patched::store::StorePath,
     pins::Unpack,
     render::printable,
     source::{
@@ -316,7 +329,7 @@ fn forge_resolve_ref(url: &str, reff: Option<&str>) -> Option<String> {
         .flatten()
 }
 
-pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<FetchedPin> {
+pub fn fetch_fixed_pin(name: &str, url: &str, unpack: Option<Unpack>) -> Result<FetchedPin> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         user_bail!("fixed pins require a plain http(s) URL, got: {url}");
     }
@@ -324,8 +337,38 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<FetchedPin> 
         .through_redirects(url, false)
         .with_context(|| format!("GET {url}"))?;
     let immutable_url = immutable_url_of(&resp, immutable, url);
-    let sha256 = nar::hash_reader(resp.body_mut().as_reader())
-        .with_context(|| format!("read body of {url}"))?;
+    let mut staged = staging_dir().and_then(|dir| {
+        let file = dir.path().join(name);
+        File::create(&file)
+            .map(|out| (dir, file.clone(), out))
+            .map_err(|err| format!("create {}: {err}", file.display()))
+    });
+    let mut body = HashingReader::new(resp.body_mut().as_reader());
+    let mut chunk = vec![0_u8; 1 << 16];
+    loop {
+        let read = body
+            .read(&mut chunk)
+            .with_context(|| format!("read body of {url}"))?;
+        if read == 0 {
+            break;
+        }
+        if let Ok((_, ref file, ref mut out)) = staged
+            && let Err(err) = out.write_all(chunk.get(..read).unwrap_or_default())
+        {
+            staged = Err(format!("write {}: {err}", file.display()));
+        }
+    }
+
+    // the resolver's builtin:fetchurl derivation is named after the pin, so
+    // adding the file under that name fills its output and nix skips the
+    // download, until a gc collects the unrooted path
+    let stored = staged
+        .and_then(|(_dir, file, _)| StorePath::add_flat(&file).map_err(|err| format!("{err:#}")));
+    if let Err(err) = stored {
+        record_fetch_warning(format!(
+            "could not add {name} to the nix store, the build will download it again: {err}"
+        ));
+    }
 
     // redirected immutable urls may lose the archive extension
     let kind = unpack.unwrap_or_else(|| {
@@ -337,8 +380,46 @@ pub fn fetch_fixed_pin(url: &str, unpack: Option<Unpack>) -> Result<FetchedPin> 
             Unpack::File
         }
     });
+
+    let sha256 = body.finish()?;
     let node = LockedNode::new_fixed(immutable_url, sha256.clone(), kind.as_str());
     Ok(FetchedPin::content_hash(node, sha256))
+}
+
+/// an interrupted update never drops its [`TempDir`], so sweep staging dirs
+/// nothing has written to for an hour
+fn staging_dir() -> Result<TempDir, String> {
+    const PREFIX: &str = "fixed-";
+    const STALE: Duration = Duration::from_hours(1);
+
+    let base = etcetera::choose_base_strategy()
+        .map_err(|err| err.to_string())?
+        .cache_dir()
+        .join("tack");
+    fs::create_dir_all(&base).map_err(|err| format!("create {}: {err}", base.display()))?;
+
+    let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    for entry in fs::read_dir(&base).into_iter().flatten().flatten() {
+        let dir = entry.path();
+        if !entry.file_name().to_string_lossy().starts_with(PREFIX) {
+            continue;
+        }
+        let newest = fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|file| modified(&file.path()))
+            .chain(modified(&dir))
+            .max();
+        if newest.is_some_and(|at| at.elapsed().is_ok_and(|age| age > STALE)) {
+            drop(fs::remove_dir_all(&dir));
+        }
+    }
+
+    tempfile::Builder::new()
+        .prefix(PREFIX)
+        .tempdir_in(&base)
+        .map_err(|err| format!("create a staging dir: {err}"))
 }
 
 pub fn fetch_verified_tree_into(node: &LockedNode, dir: &Path) -> Result<PathBuf> {

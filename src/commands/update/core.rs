@@ -98,6 +98,7 @@ impl<O> Progress<O> for NoProgress {
 }
 
 pub fn fetch_input(
+    name: &str,
     pin_type: PinType,
     unpack: Option<Unpack>,
     submodules: bool,
@@ -105,7 +106,7 @@ pub fn fetch_input(
     expanded: &str,
 ) -> Result<FetchedPin> {
     match pin_type {
-        PinType::Fixed => fetch::fetch_fixed_pin(expanded, unpack),
+        PinType::Fixed => fetch::fetch_fixed_pin(name, expanded, unpack),
         PinType::Flake | PinType::Fetch => {
             let fetched = fetch::fetch_pin(&expanded.parse::<Source>()?, submodules)?;
             Ok(if pin_type == PinType::Fetch && !patched {
@@ -329,6 +330,7 @@ fn classify(
     }
 
     let mut fetched = match fetch_input(
+        &input.name,
         input.pin_type,
         input.unpack,
         input.submodules,

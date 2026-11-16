@@ -23,15 +23,25 @@ pub struct StorePath(String);
 
 impl StorePath {
     pub fn add(tree: &Path) -> Result<Self> {
+        Self::add_fixed(&["--recursive"], tree)
+    }
+
+    pub fn add_flat(file: &Path) -> Result<Self> {
+        Self::add_fixed(&[], file)
+    }
+
+    fn add_fixed(mode: &[&str], path: &Path) -> Result<Self> {
         let mut command = Command::new("nix-store");
         command
-            .args(["--add-fixed", "--recursive", "sha256"])
-            .arg(tree);
-        let path = stdout_of(&mut command)?;
-        if !Path::new(&path).is_absolute() {
-            bail!("nix-store --add-fixed printed '{path}' instead of a store path");
+            .arg("--add-fixed")
+            .args(mode)
+            .arg("sha256")
+            .arg(path);
+        let stored = stdout_of(&mut command)?;
+        if !Path::new(&stored).is_absolute() {
+            bail!("nix-store --add-fixed printed '{stored}' instead of a store path");
         }
-        Ok(Self(path))
+        Ok(Self(stored))
     }
 
     pub fn root_at(&self, link: &Path) -> Result<()> {

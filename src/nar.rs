@@ -111,23 +111,6 @@ where
     }
 }
 
-#[expect(clippy::large_stack_arrays, reason = "64kb isn't that large, really")]
-pub fn hash_reader<R>(mut reader: R) -> io::Result<String>
-where
-    R: io::Read,
-{
-    let mut hasher = Sha256::new();
-    let mut buf = [0_u8; 0x10000];
-    loop {
-        let read = reader.read(&mut buf)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buf[..read]);
-    }
-    Ok(format!("sha256-{}", BASE64.encode(&hasher.finalize())))
-}
-
 fn emit_node<H>(hash: &mut H, path: &mut PathBuf) -> Result<()>
 where
     H: Feed,
