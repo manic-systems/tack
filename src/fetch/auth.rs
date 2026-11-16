@@ -265,6 +265,7 @@ pub(super) fn with_netrc_hint(err: FetchError) -> FetchError {
         | FetchError::NotFound { .. }
         | FetchError::RateLimited { .. }
         | FetchError::Transport(_)
+        | FetchError::SparseUnsupported(_)
         | FetchError::Decode { .. }
         | FetchError::Github(_)
         | FetchError::Gitlab(_)

@@ -36,6 +36,10 @@ pub enum FetchError {
     #[error("network: {0}")]
     Transport(String),
 
+    /// the remote's transport cannot fetch single trees and blobs
+    #[error("sparse scan needs an http remote, not {0}")]
+    SparseUnsupported(String),
+
     #[error("decoding {what}")]
     Decode {
         what:   String,

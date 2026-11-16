@@ -485,6 +485,7 @@ fn is_missing_remote_commit(job: &CompareJob, err: &FetchError) -> bool {
         FetchError::Auth { .. }
         | FetchError::RateLimited { .. }
         | FetchError::Transport(_)
+        | FetchError::SparseUnsupported(_)
         | FetchError::Decode { .. }
         | FetchError::Gitlab(_)
         | FetchError::Forge(_) => false,
