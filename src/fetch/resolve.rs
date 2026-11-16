@@ -1058,10 +1058,12 @@ pub fn private_repo_hint(base: &str) -> String {
 }
 
 fn sparse_file(node: &LockedNode, path: &str, anonymous_miss: bool) -> Result<Option<String>> {
-    match fetch_locked_scan_files(node, &[path]).erase()? {
-        Some(files) => Ok(files.into_iter().next().flatten()),
-        None if anonymous_miss => bail!("no git remote to read {path} from"),
-        None => Ok(None),
+    match fetch_locked_scan_files(node, &[path]) {
+        Ok(Some(files)) => Ok(files.into_iter().next().flatten()),
+        Ok(None) if anonymous_miss => bail!("no git remote to read {path} from"),
+        // only a full download reads ssh remotes
+        Ok(None) | Err(FetchError::SparseUnsupported(_)) => Ok(None),
+        Err(err) => Err(err).erase(),
     }
 }
 

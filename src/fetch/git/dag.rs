@@ -378,9 +378,7 @@ pub(super) fn fetch_scan_files(
     // ssh servers usually refuse wants for tree and blob ids, and the ssh child
     // prints that refusal straight to the terminal
     if !matches!(parsed_url.scheme, Scheme::Https | Scheme::Http) {
-        return Err(FetchError::Transport(format!(
-            "sparse scan needs an http remote, not {url}"
-        )));
+        return Err(FetchError::SparseUnsupported(url.to_owned()));
     }
 
     let dir = tempfile::tempdir()
@@ -891,6 +889,7 @@ fn is_pack_limit(err: &FetchError) -> bool {
         FetchError::NotFound { .. }
         | FetchError::Auth { .. }
         | FetchError::RateLimited { .. }
+        | FetchError::SparseUnsupported(_)
         | FetchError::Decode { .. }
         | FetchError::Github(_)
         | FetchError::Gitlab(_)
