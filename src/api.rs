@@ -131,10 +131,12 @@ impl<'a> Tack<'a> {
                 exclude,
                 names,
                 accept,
+                refresh_patches,
             } => {
                 let selection = commands::Selection::new(&names, &exclude);
                 self.recorded(label, || {
-                    commands::update(self.project, selection, accept).map(CommandOutcome::Update)
+                    commands::update(self.project, selection, accept, refresh_patches)
+                        .map(CommandOutcome::Update)
                 })
             },
             Command::Look {

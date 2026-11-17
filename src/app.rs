@@ -72,6 +72,7 @@ pub fn run(cmd: Command) -> misstep::Result<()> {
             exclude,
             names,
             accept,
+            refresh_patches,
         } => {
             recorded(&project, &label, || {
                 commands::update_cli(
@@ -81,6 +82,7 @@ pub fn run(cmd: Command) -> misstep::Result<()> {
                         exclude: &exclude,
                     },
                     accept,
+                    refresh_patches,
                 )
             })
         },
