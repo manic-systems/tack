@@ -48,3 +48,13 @@ fn extra_lock_fields_survive_node_roundtrip() {
     assert_eq!(back.get("ref"), Some(&json!("nixos-unstable")));
     assert_eq!(back.get("revCount"), Some(&json!(42_i64)));
 }
+
+#[test]
+fn public_is_written_only_when_set() {
+    let mut node = LockedNode::new_github("o", "r", "abc", "sha256-z", 1700);
+    assert_eq!(serde_json::to_value(&node).unwrap().get("public"), None);
+
+    node.set_public();
+    let back = LockedNode::from_value(serde_json::to_value(&node).unwrap()).unwrap();
+    assert!(back.is_public());
+}

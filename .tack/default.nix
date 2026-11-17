@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
-# tack-resolver: patched patchedDiff tag version signedBy groups archive defaultType nestedGroups topFollows
+# tack-resolver: patched patchedDiff tag version signedBy groups archive defaultType nestedGroups topFollows public
 
 let
   inherit (builtins)
@@ -159,9 +159,14 @@ let
     publicKeys = null;
   };
 
-  # fetchTarball ignores access-tokens, so prefer fetchTree when available
+  # fetchTarball ignores access-tokens, so prefer fetchTree when available, except
+  # for the public pins tack update marks
   fetchLocked =
-    { what, locked }:
+    {
+      what,
+      locked,
+      public ? false,
+    }:
     let
       type = locked.type or "";
       host = default: locked.host or default;
@@ -195,7 +200,9 @@ let
         inherit (locked) narHash;
       };
     in
-    if builtins ? fetchTree then
+    if
+      builtins ? fetchTree && !(public && archiveUrl ? ${type} && locked ? rev && locked ? narHash)
+    then
       builtins.fetchTree locked
     else if !(locked ? narHash) then
       throw "tack: ${what} has no narHash and requires builtins.fetchTree"
@@ -428,9 +435,12 @@ let
         else if !(elem type knownTypes) then
           throw "tack: unknown lock type '${type}' for pin '${name}'"
         else
+          # nix's fetchTree downloads a rev again even when tack update added it to
+          # the store, fetchTarball finds it there
           fetchLocked {
             what = "pin '${name}'";
             locked = intersectAttrs fetchTreeAttrs node;
+            public = node.public or false;
           };
 
       fetchPin =

@@ -3,6 +3,7 @@
 use std::{
     collections::{
         BTreeSet,
+        HashMap,
         VecDeque,
     },
     env,
@@ -15,7 +16,12 @@ use std::{
     },
     ops::ControlFlow,
     path::Path,
-    sync::atomic::AtomicBool,
+    sync::{
+        Mutex,
+        OnceLock,
+        PoisonError,
+        atomic::AtomicBool,
+    },
 };
 
 use gix::{
@@ -113,14 +119,39 @@ pub(super) fn resolve_tip(url: &str, reff: Option<&str>) -> FetchResult<String> 
     if let Some(path) = super::local_file_url_path(&parsed_url) {
         return resolve_local_tip(&path, reff);
     }
+    resolve_remote_tip(url, reff).map(|(rev, _)| rev)
+}
 
+/// the tip and the full ref name it was found under, asked once per run since
+/// the update's compare and the nix fetch both want it
+pub(super) fn resolve_remote_tip(url: &str, reff: Option<&str>) -> FetchResult<(String, String)> {
+    type Tips = Mutex<HashMap<(String, Option<String>), (String, String)>>;
+    static TIPS: OnceLock<Tips> = OnceLock::new();
+
+    let key = (url.to_owned(), reff.map(str::to_owned));
+    let tips = TIPS.get_or_init(Tips::default);
+    if let Some(found) = tips
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(found.clone());
+    }
+    let found = probe_remote_tip(url, reff)?;
+    tips.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, found.clone());
+    Ok(found)
+}
+
+fn probe_remote_tip(url: &str, reff: Option<&str>) -> FetchResult<(String, String)> {
     let remote_refs = probe_refs(url, ref_prefixes(reff))?;
     for candidate in str_ref_candidates(reff) {
         if let Some(object) = remote_refs
             .iter()
             .find_map(|reference| object_for_ref(reference, &candidate))
         {
-            return Ok(object.to_string());
+            return Ok((object.to_string(), candidate));
         }
     }
     Err(FetchError::NotFound {
