@@ -33,19 +33,23 @@ use crate::{
         LockFile,
         LockIdentity,
         LockedNode,
+        PatchedTree,
         SignedBy,
     },
     patched::{
         self,
         Mode,
+        NotApplied,
         PatchedPin,
         Settled,
+        source::PatchSource,
     },
     pins::{
         self,
         BuildFetch,
         Frozen,
         PinType,
+        PinsDoc,
         Unpack,
     },
     project::Project,
@@ -425,6 +429,9 @@ struct PinRun<'run> {
     named:   &'run [String],
     accept:  bool,
     refresh: bool,
+    /// where the patches each pin lists itself, the only ones an update may
+    /// drop, are read from
+    doc:     &'run PinsDoc,
 }
 
 impl PinRun<'_> {
@@ -501,7 +508,15 @@ impl PinRun<'_> {
         };
         let recorded = lock.signed_by(&input.name);
         let mut mark = check_signers(input, old, recorded, self.keyring, &mut resolution);
-        settle_patches(self.project, input, lock, self.refresh, &mut resolution);
+        let own = self.doc.own_patches(&input.name);
+        settle_patches(
+            self.project,
+            input,
+            lock,
+            &own,
+            self.refresh,
+            &mut resolution,
+        );
         note_unfit(input, old, &mut resolution);
         if matches!(resolution.outcome, UpdateOutcome::Failed(_)) {
             mark = SignerMark::Keep;
@@ -650,6 +665,7 @@ fn settle_patches(
     project: &Project,
     input: &pins::Input,
     lock: &LockFile,
+    own: &[String],
     refresh: bool,
     resolution: &mut PinResolution,
 ) {
@@ -663,22 +679,54 @@ fn settle_patches(
     };
     let pin = PatchedPin::new(project, &input.name, node).with_upstream(upstream);
     let mode = if refresh { Mode::Refresh } else { Mode::Update };
-    match pin.settle(&input.patches, lock.patched(&input.name), moved, mode) {
+    let locked = lock.patched(&input.name);
+    match pin.settle(&input.patches, locked, moved, own, mode) {
         Ok(settled) => {
+            let refreshed = match settled {
+                Settled::Rebuilt { ref tree, .. } if refresh => {
+                    refreshed_patches(&input.name, locked, tree)
+                },
+                Settled::Current
+                | Settled::Restored
+                | Settled::Rebuilt { .. }
+                | Settled::Rehashed(_)
+                | Settled::Rediffed(_)
+                | Settled::Dropped(_)
+                | Settled::Unpatched => Vec::new(),
+            };
             // the rev line says unchanged, so a rebuild on the same node needs
-            // saying
+            // saying, unless the refreshed patches already did
             let rebuilt = match settled {
                 Settled::Rehashed(_) => Some("its tree no longer matched the lock's hash"),
                 Settled::Rediffed(_) => {
                     Some("its generated diff was missing, edited, or unrecorded")
                 },
-                Settled::Rebuilt(_) if !moved => Some("its patches changed"),
-                Settled::Current | Settled::Restored | Settled::Rebuilt(_) | Settled::Unpatched => {
-                    None
+                Settled::Rebuilt { .. } if !moved && refreshed.is_empty() => {
+                    Some("its patches changed")
                 },
+                Settled::Current
+                | Settled::Restored
+                | Settled::Rebuilt { .. }
+                | Settled::Dropped(_)
+                | Settled::Unpatched => None,
             };
-            if let Some(reason) = rebuilt {
-                let message = format!("{}: rebuilt its patched tree, {reason}", input.name);
+            let notes = rebuilt
+                .map(|reason| format!("{}: rebuilt its patched tree, {reason}", input.name))
+                .into_iter()
+                .chain(refreshed)
+                .chain(settled.dropped().iter().map(|source| {
+                    let local = input.patches.iter().any(|listed| {
+                        matches!(*listed, PatchSource::Local(_)) && listed.to_string() == *source
+                    });
+                    let kept = if local { ", the file is kept" } else { "" };
+                    format!(
+                        "{}: dropped {source}, its new rev already has it{kept}",
+                        input.name
+                    )
+                }))
+                .collect::<Vec<_>>();
+            if !notes.is_empty() {
+                let message = notes.join(" ");
                 resolution.warning = Some(
                     resolution
                         .warning
@@ -689,9 +737,14 @@ fn settle_patches(
             resolution.patched = settled;
         },
         Err(err) => {
-            let vendored = lock
-                .patched(&input.name)
-                .is_some_and(|tree| tree.patches.iter().any(|digest| digest.url.is_some()));
+            let failed = err
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<NotApplied>());
+            let vendored = failed.zip(locked).is_some_and(|(not_applied, tree)| {
+                tree.patches
+                    .iter()
+                    .any(|digest| digest.source == not_applied.patch() && digest.url.is_some())
+            });
             let hint = if moved && vendored && !refresh {
                 format!(
                     ", `tack update --refresh-patches {}` downloads the newer versions",
@@ -704,6 +757,31 @@ fn settle_patches(
             resolution.node = None;
         },
     }
+}
+
+/// a moved pin's rev line doesn't say its pull requests changed, which is
+/// what tack update otherwise keeps from slipping in unreviewed
+fn refreshed_patches(pin: &str, locked: Option<&PatchedTree>, tree: &PatchedTree) -> Vec<String> {
+    let short = |rev: &str| rev.get(..7).unwrap_or(rev).to_owned();
+    tree.patches
+        .iter()
+        .filter_map(|digest| {
+            let old = locked?
+                .patches
+                .iter()
+                .find(|old| old.source == digest.source && old.url.is_some())?;
+            (old.sha256 != digest.sha256).then(|| {
+                let heads = old
+                    .head
+                    .as_deref()
+                    .zip(digest.head.as_deref())
+                    .map_or_else(String::new, |(was, now)| {
+                        format!(" ({} -> {})", short(was), short(now))
+                    });
+                format!("{pin}: refreshed {}{heads}", digest.source)
+            })
+        })
+        .collect()
 }
 
 /// `url` pinned to `rev`, unless it already names a rev of its own
@@ -812,6 +890,7 @@ pub(super) fn update(
         named: selection.names,
         accept,
         refresh,
+        doc: &doc,
     };
     let resolutions = dispatcher::ordered(jobs, UPDATE_IN_FLIGHT, |index, (input, url)| {
         let (resolution, mark) = run.resolve(input, &url, || progress.fetching(index));
@@ -824,9 +903,12 @@ pub(super) fn update(
     let mut pins = Vec::with_capacity(resolutions.len());
     let mut warnings = Vec::new();
     let mut changed_names = Vec::new();
-    let mut refrozen = false;
+    let mut pins_changed = false;
     for (input, (mut resolution, mark, url)) in selected.iter().zip(resolutions) {
         warnings.extend(resolution.warning.take());
+        for source in resolution.patched.dropped() {
+            pins_changed |= doc.remove_patch(&input.name, source)?;
+        }
         let (recorded, moved) = record_pin(&mut lock, input, &url, &mut resolution, mark);
         changed |= recorded;
         if moved {
@@ -841,7 +923,7 @@ pub(super) fn update(
             && held.rev().is_some_and(|frozen_at| frozen_at != rev)
         {
             doc.set_frozen(&input.name, Some(&Frozen::At(rev.to_owned())));
-            refrozen = true;
+            pins_changed = true;
         }
         if resolution.drift {
             drift += 1;
@@ -869,7 +951,7 @@ pub(super) fn update(
     if changed {
         project.save_lock(&lock)?;
     }
-    if refrozen {
+    if pins_changed {
         project.save_pins(&doc)?;
     }
 

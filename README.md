@@ -48,7 +48,7 @@ legacy `./inputs.nix` at repo root is detected and preserved as-is.
 tack init [--force] [--resolver] [--flake]
                                       scaffold .tack/ (--resolver writes only default.nix,
                                       --flake also a wired flake.nix)
-tack update [names|groups...] [--accept] [--exclude <names>]...
+tack update [names|groups...] [--accept] [--refresh-patches] [--exclude <names>]...
                                       fetch latest, rewrite lock
 tack look [names|groups...] [--verbose|-v] [--exclude <names>]...
                                       report pins with newer upstream revs
@@ -433,12 +433,15 @@ vendored unless the patch applies.
 tack applies the patches itself, adds the result to the nix store, and locks
 its store path and narHash, so eval only ever reads a path that already exists.
 `tack update` reapplies them to each new rev, and a patch that stops applying
-keeps the pin on the rev it had. when the patch failed because upstream already
-has its change, tack says so and points at `tack patch rm`. `tack update` never
-re-downloads a patch, so a force-pushed pull request can't slip in, and
-`tack patch update` is how you take the new version on purpose. `tack look`
-notes each vendored pull or merge request that has merged, closed, or changed
-since you vendored it.
+keeps the pin on the rev it had. when the new rev already has a patch the pin
+lists itself, `tack update` drops it from pins.toml, though a pull request only
+goes once its forge says it merged and a local patch file stays on disk. one a
+group gives the pin has to come out of the group by hand. `tack update` never
+re-downloads a patch, so a force-pushed pull request can't slip in.
+`tack update --refresh-patches` takes the new versions along with the new rev
+and names each one that changed, and `tack patch update` takes them on the rev
+the pin has. `tack look` notes each vendored pull or merge request that has
+merged, closed, or changed since you vendored it.
 
 patched trees only exist in the store of the machine that built them. on a
 fresh machine or in CI, run `tack materialize` before evaluating, or build them

@@ -95,6 +95,7 @@ fn add(project: &Project, name: &str, raw_source: &str) -> Result<()> {
             &sources,
             lock.patched(name),
             false,
+            &[],
             Mode::Update,
         )
     });
@@ -130,11 +131,13 @@ fn rm(project: &Project, name: &str, raw_source: &str) -> Result<()> {
         .cloned()
         .collect::<Vec<_>>();
 
-    doc.remove_patch(name, &source.to_string())?;
+    if !doc.remove_patch(name, &source.to_string())? {
+        user_bail!("{source} comes from {name}'s group, remove it from the group's patches");
+    }
     let mut lock = project.load_lock()?;
     if let Some(node) = lock.get(name) {
         let pin = PatchedPin::new(project, name, node);
-        let settled = pin.settle(&remaining, lock.patched(name), false, Mode::Update)?;
+        let settled = pin.settle(&remaining, lock.patched(name), false, &[], Mode::Update)?;
         settled.record_into(&mut lock, name);
     }
     project.save_pins(&doc)?;
@@ -200,15 +203,15 @@ fn settle_selected(project: &Project, names: &[String], mode: Mode) -> Result<()
             continue;
         };
         let pin = PatchedPin::new(project, &input.name, node);
-        match pin.settle(&input.patches, lock.patched(&input.name), false, mode) {
+        match pin.settle(&input.patches, lock.patched(&input.name), false, &[], mode) {
             Ok(settled) => {
                 let status = match (mode, &settled) {
-                    (_, &Settled::Unpatched) => None,
+                    (_, &(Settled::Unpatched | Settled::Dropped(_))) => None,
                     (Mode::Refresh, &(Settled::Current | Settled::Restored)) => Some("unchanged"),
-                    (Mode::Refresh, &Settled::Rebuilt(_)) => Some("refreshed"),
+                    (Mode::Refresh, &Settled::Rebuilt { .. }) => Some("refreshed"),
                     (_, &Settled::Current) => Some("present"),
                     (_, &Settled::Restored) => Some("restored"),
-                    (_, &Settled::Rebuilt(_)) => Some("rebuilt"),
+                    (_, &Settled::Rebuilt { .. }) => Some("rebuilt"),
                     (_, &Settled::Rehashed(_)) => {
                         Some("rebuilt, it no longer matched the lock's hash")
                     },

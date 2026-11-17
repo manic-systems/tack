@@ -240,13 +240,19 @@ pub fn look_cli(project: &Project, selection: Selection<'_>, verbose: bool) -> R
             .iter()
             .map(|pin| pin.log.clone().filter(|_| verbose))
             .collect::<Vec<_>>();
+        let doc = project.load_pins()?;
         let notes = report
             .pins
             .iter()
             .map(|pin| {
+                let moves = matches!(
+                    pin.outcome,
+                    LookOutcome::Updated { .. } | LookOutcome::Tagged(_)
+                );
+                let own = doc.own_patches(&pin.name);
                 pin.pulls
                     .iter()
-                    .map(|pull| pull_note(&pin.name, pull))
+                    .map(|pull| pull_note(&pin.name, pull, moves.then_some(&*own)))
                     .collect()
             })
             .collect::<Vec<_>>();
@@ -258,41 +264,43 @@ pub fn look_cli(project: &Project, selection: Selection<'_>, verbose: bool) -> R
     Ok(())
 }
 
-fn pull_note(pin: &str, pull: &PullPatch) -> String {
+/// `own` holds the patches the pin lists itself when it has a newer rev for
+/// `tack update` to take
+fn pull_note(pin: &str, pull: &PullPatch, own: Option<&[String]>) -> String {
     let reference = &pull.reference;
     let source = &pull.source;
-    match pull.status {
-        PullStatus::Landed => {
+    match (&pull.status, own) {
+        (&PullStatus::Landed, Some(listed)) if listed.contains(source) => {
+            format!("{reference} is upstream now, `tack update {pin}` should drop it")
+        },
+        (&PullStatus::Landed, Some(_)) => {
+            format!("{reference} is upstream now, remove it from the patches of {pin}'s group")
+        },
+        (&PullStatus::Landed, None) => {
             format!(
                 "{reference} is upstream now, drop it with `tack patch rm {pin} {}`",
-                shell_word(source)
+                render::shell_word(source)
             )
         },
-        PullStatus::Merged { checked: true } => {
+        (&PullStatus::Merged { checked: true }, _) => {
             format!("{reference} merged, but {pin} doesn't have it yet")
         },
-        PullStatus::Merged { checked: false } => {
+        (&PullStatus::Merged { checked: false }, _) => {
             format!("{reference} merged, tack can't tell whether {pin} has it yet")
         },
-        PullStatus::Closed => format!("{reference} was closed without merging"),
-        PullStatus::Changed => {
+        (&PullStatus::Closed, _) => format!("{reference} was closed without merging"),
+        (&PullStatus::Changed, Some(_)) => {
+            format!(
+                "{reference} changed since you vendored it, `tack update --refresh-patches {pin}` \
+                 takes the new version with the new rev"
+            )
+        },
+        (&PullStatus::Changed, None) => {
             format!(
                 "{reference} changed since you vendored it, `tack patch update {pin}` takes the \
                  new version"
             )
         },
-    }
-}
-
-/// `word` quoted for a shell when it carries anything a shell would act on
-fn shell_word(word: &str) -> String {
-    let plain = word
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"-_./:@%+=,".contains(&byte));
-    if plain {
-        word.to_owned()
-    } else {
-        format!("'{}'", word.replace('\'', "'\\''"))
     }
 }
 

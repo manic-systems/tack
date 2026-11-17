@@ -116,6 +116,7 @@ fn expected(report: &misstep::Report) -> bool {
         cause.downcast_ref::<error::UserError>().is_some()
             || cause.downcast_ref::<ConfigError>().is_some()
             || cause.downcast_ref::<fetch::FetchError>().is_some()
+            || cause.downcast_ref::<patched::NotApplied>().is_some()
     })
 }
 

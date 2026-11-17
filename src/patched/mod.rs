@@ -18,12 +18,14 @@ use apply::SourceTree;
 use data_encoding::HEXLOWER;
 use hmac_sha256::Hash as Sha256;
 use misstep::{
+    OptionExt as _,
     Result,
     ResultExt as _,
     bail,
 };
 use source::PatchSource;
 use store::StorePath;
+use thiserror::Error;
 
 use crate::{
     error::user_bail,
@@ -44,8 +46,28 @@ use crate::{
         Project,
         write_atomic,
     },
-    report::PullPatch,
+    render::shell_word,
+    report::{
+        PullPatch,
+        PullStatus,
+    },
 };
+
+/// a patch that doesn't apply to the new tree, which a newer version of a
+/// downloaded one might
+#[derive(Debug, Error)]
+#[error("apply {patch}{rejects}: {cause}")]
+pub struct NotApplied {
+    patch:   String,
+    rejects: String,
+    cause:   String,
+}
+
+impl NotApplied {
+    pub fn patch(&self) -> &str {
+        &self.patch
+    }
+}
 
 struct PatchFile {
     source:     String,
@@ -102,7 +124,13 @@ pub enum Mode {
 pub enum Settled {
     Current,
     Restored,
-    Rebuilt(PatchedTree),
+    Rebuilt {
+        tree:    PatchedTree,
+        /// the sources of patches the new node already has, left out of `tree`
+        dropped: Vec<String>,
+    },
+    /// the new node already has every patch, so the pin has no patched tree
+    Dropped(Vec<String>),
     /// the same patches on the same node built a tree the lock hashes
     /// differently, as when patch application itself changed
     Rehashed(PatchedTree),
@@ -116,10 +144,21 @@ impl Settled {
     pub fn record_into(self, lock: &mut LockFile, pin: &str) -> bool {
         match self {
             Self::Current | Self::Restored => false,
-            Self::Rebuilt(tree) | Self::Rehashed(tree) | Self::Rediffed(tree) => {
+            Self::Rebuilt { tree, .. } | Self::Rehashed(tree) | Self::Rediffed(tree) => {
                 lock.set_patched(pin, Some(tree))
             },
-            Self::Unpatched => lock.set_patched(pin, None),
+            Self::Unpatched | Self::Dropped(_) => lock.set_patched(pin, None),
+        }
+    }
+
+    pub fn dropped(&self) -> &[String] {
+        match *self {
+            Self::Rebuilt { ref dropped, .. } | Self::Dropped(ref dropped) => dropped,
+            Self::Current
+            | Self::Restored
+            | Self::Rehashed(_)
+            | Self::Rediffed(_)
+            | Self::Unpatched => &[],
         }
     }
 }
@@ -154,6 +193,7 @@ impl<'a> PatchedPin<'a> {
         sources: &[PatchSource],
         locked: Option<&PatchedTree>,
         moved: bool,
+        droppable: &[String],
         mode: Mode,
     ) -> Result<Settled> {
         let name = self.name;
@@ -168,7 +208,7 @@ impl<'a> PatchedPin<'a> {
         ) {
             user_bail!("patches need a github, gitlab, git or tarball pin");
         }
-        let patches = self.collect(sources, locked, mode)?;
+        let mut patches = self.collect(sources, locked, mode)?;
         let digests = patches.iter().map(PatchDigest::from).collect::<Vec<_>>();
         let current = locked.filter(|tree| !moved && tree.patches == digests);
         // a hand-edited or badly merged lock can name a hash the path doesn't
@@ -197,7 +237,7 @@ impl<'a> PatchedPin<'a> {
                 )
             },
             (Some(tree), Mode::Restore) => {
-                let (rebuilt, diff) = self.materialize(&patches, digests, Some(&tree.nar_hash))?;
+                let (rebuilt, diff) = self.build(&patches, digests, Some(&tree.nar_hash))?;
                 if rebuilt.diff == tree.diff {
                     generated = Some(diff);
                 } else {
@@ -209,7 +249,7 @@ impl<'a> PatchedPin<'a> {
                 Settled::Restored
             },
             (Some(tree), Mode::Update | Mode::Refresh) => {
-                let (rebuilt, diff) = self.materialize(&patches, digests, None)?;
+                let (rebuilt, diff) = self.build(&patches, digests, None)?;
                 generated = Some(diff);
                 if rebuilt.nar_hash != tree.nar_hash {
                     Settled::Rehashed(rebuilt)
@@ -226,9 +266,10 @@ impl<'a> PatchedPin<'a> {
                 user_bail!("the patches no longer match the lock, run `tack update {name}`")
             },
             (None, Mode::Update | Mode::Refresh) => {
-                let (rebuilt, diff) = self.materialize(&patches, digests, None)?;
-                generated = Some(diff);
-                Settled::Rebuilt(rebuilt)
+                let own = moved.then_some(droppable);
+                let (rebuilt, diff) = self.rebuild(&mut patches, digests, sources, own)?;
+                generated = diff;
+                rebuilt
             },
         };
         if let Some(diff) = generated {
@@ -253,6 +294,9 @@ impl<'a> PatchedPin<'a> {
                 write_atomic(&target, &patch.bytes)?;
             }
             remove_stale(&self.project.dir().join(format!("{}.rej", patch.file)))?;
+        }
+        if !settled.dropped().is_empty() {
+            let _ = fs::remove_dir(self.project.patches_dir().join(name));
         }
         Ok(settled)
     }
@@ -326,12 +370,60 @@ impl<'a> PatchedPin<'a> {
         Ok(patches)
     }
 
-    fn materialize(
+    fn build(
         &mut self,
         patches: &[PatchFile],
         digests: Vec<PatchDigest>,
         locked: Option<&str>,
     ) -> Result<(PatchedTree, Vec<u8>)> {
+        self.materialize(patches, digests, locked, None)?
+            .built
+            .context("build a patched tree with no patches")
+    }
+
+    /// drops from `patches` each one the moved node already has, and the
+    /// patched tree too once none are left
+    fn rebuild(
+        &mut self,
+        patches: &mut Vec<PatchFile>,
+        digests: Vec<PatchDigest>,
+        sources: &[PatchSource],
+        droppable: Option<&[String]>,
+    ) -> Result<(Settled, Option<Vec<u8>>)> {
+        let candidates = droppable.map(|own| {
+            sources
+                .iter()
+                .filter(|source| own.contains(&source.to_string()))
+                .collect::<Vec<_>>()
+        });
+        let Materialized { built, dropped } =
+            self.materialize(patches, digests, None, candidates.as_deref())?;
+        // a dropped patch's .rej is stale, and settle's orphan sweep removes
+        // its vendored file
+        for patch in patches
+            .iter()
+            .filter(|patch| dropped.contains(&patch.source))
+        {
+            remove_stale(&self.project.dir().join(format!("{}.rej", patch.file)))?;
+        }
+        patches.retain(|patch| !dropped.contains(&patch.source));
+        let Some((tree, diff)) = built else {
+            unroot(self.project, self.name)?;
+            remove_diff(self.project, self.name)?;
+            return Ok((Settled::Dropped(dropped), None));
+        };
+        Ok((Settled::Rebuilt { tree, dropped }, Some(diff)))
+    }
+
+    /// on a moved pin, leaves out each `droppable` patch the unpatched tree
+    /// already has, so one only an earlier patch covers still fails
+    fn materialize(
+        &mut self,
+        patches: &[PatchFile],
+        mut digests: Vec<PatchDigest>,
+        locked: Option<&str>,
+        droppable: Option<&[&PatchSource]>,
+    ) -> Result<Materialized> {
         let name = self.name;
         let scratch = tempfile::tempdir()?;
         // nix-store names the path after the directory, and fetchTree only
@@ -349,27 +441,54 @@ impl<'a> PatchedPin<'a> {
 
         let newest = newest_mtime(&tree);
         let mut source_tree = SourceTree::new(&tree)?;
-        for patch in patches {
+        let (dropped, held) = self.upstream_has(&source_tree, patches, droppable);
+        if dropped.len() == patches.len() {
+            return Ok(Materialized {
+                built: None,
+                dropped,
+            });
+        }
+        for patch in patches
+            .iter()
+            .filter(|patch| !dropped.contains(&patch.source))
+        {
             if let Err(err) = source_tree.apply(&patch.bytes) {
                 let source = &patch.source;
-                if source_tree.already_applied(&patch.bytes) {
+                let inherited = droppable
+                    .is_some_and(|own| own.iter().all(|listed| listed.to_string() != *source));
+                if source_tree.already_applied(&patch.bytes) && inherited {
                     user_bail!(
-                        "{source} is already applied, upstream has it or an earlier patch does"
+                        "{source} is already applied, remove it from the patches of {name}'s group"
+                    );
+                }
+                if source_tree.already_applied(&patch.bytes) {
+                    let reason = held.iter().find(|&&(ref kept, _)| kept == source).map_or(
+                        "upstream has it or an earlier patch does",
+                        |&(_, ref why)| why,
+                    );
+                    user_bail!(
+                        "{source} is already applied, {reason}, `tack patch rm {name} {}` drops it",
+                        shell_word(source)
                     );
                 }
                 let rejects = source_tree.rejects(&patch.bytes);
-                if !rejects.is_empty() {
+                let reject_note = if rejects.is_empty() {
+                    String::new()
+                } else {
                     let reject_file = format!("{}.rej", patch.file);
                     let target = self.project.dir().join(&reject_file);
                     if let Some(parent) = target.parent() {
                         fs::create_dir_all(parent)?;
                     }
                     write_atomic(&target, &rejects)?;
-                    return Err(err).with_context(|| {
-                        format!("apply {source}, the hunks that failed are in {reject_file}")
-                    });
+                    format!(", the hunks that failed are in {reject_file}")
+                };
+                return Err(NotApplied {
+                    patch:   source.clone(),
+                    rejects: reject_note,
+                    cause:   format!("{err:#}"),
                 }
-                return Err(err).with_context(|| format!("apply {source}"));
+                .into());
             }
         }
 
@@ -382,6 +501,7 @@ impl<'a> PatchedPin<'a> {
         }
         let path = StorePath::add(&tree)?;
         path.root_at(&gcroot(self.project, name))?;
+        digests.retain(|digest| !dropped.contains(&digest.source));
         let built = PatchedTree {
             path,
             nar_hash,
@@ -393,8 +513,77 @@ impl<'a> PatchedPin<'a> {
             patches: digests,
             diff: Some(HEXLOWER.encode(&Sha256::hash(&diff))),
         };
-        Ok((built, diff))
+        Ok(Materialized {
+            built: Some((built, diff)),
+            dropped,
+        })
     }
+
+    /// the `droppable` patches the unpatched tree already has, split into
+    /// those to drop and those held back with the reason why
+    fn upstream_has(
+        &self,
+        source_tree: &SourceTree,
+        patches: &[PatchFile],
+        droppable: Option<&[&PatchSource]>,
+    ) -> (Vec<String>, Vec<(String, String)>) {
+        let mut dropped = Vec::new();
+        let mut held = Vec::new();
+        for patch in patches {
+            let listed = droppable
+                .into_iter()
+                .flatten()
+                .find(|source| source.to_string() == patch.source);
+            if let Some(source) = listed
+                && source_tree.already_applied(&patch.bytes)
+            {
+                match self.landed(source, patch) {
+                    Ok(()) => dropped.push(patch.source.clone()),
+                    Err(reason) => held.push((patch.source.clone(), reason)),
+                }
+            }
+        }
+        (dropped, held)
+    }
+
+    /// a pull request patch only counts as upstream once its forge says it
+    /// merged, since a matching tree alone could be a coincidence
+    fn landed(&self, source: &PatchSource, patch: &PatchFile) -> Result<(), String> {
+        let PatchSource::Remote(ref remote) = *source else {
+            return Ok(());
+        };
+        if !remote.is_pull() {
+            return Ok(());
+        }
+        match remote.pull_status(patch.head.as_deref(), self.node, self.node.forge_rev()) {
+            Ok(Some(PullPatch {
+                status: PullStatus::Landed | PullStatus::Merged { .. },
+                ..
+            })) => Ok(()),
+            Ok(Some(PullPatch {
+                status: PullStatus::Closed,
+                ..
+            })) => Err("but its pull request was closed without merging".to_owned()),
+            Ok(
+                Some(PullPatch {
+                    status: PullStatus::Changed,
+                    ..
+                })
+                | None,
+            ) => Err("but its pull request is still open".to_owned()),
+            Err(err) => {
+                Err(format!(
+                    "but tack couldn't ask its forge whether it merged ({err:#})"
+                ))
+            },
+        }
+    }
+}
+
+struct Materialized {
+    /// [`None`] when the unpatched tree already has every patch
+    built:   Option<(PatchedTree, Vec<u8>)>,
+    dropped: Vec<String>,
 }
 
 /// asks each forge what became of the pull requests among `sources`, with

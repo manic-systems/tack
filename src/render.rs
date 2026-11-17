@@ -330,3 +330,15 @@ fn follow_rhs(follow: &CollapsedFollow) -> String {
         },
     }
 }
+
+/// `word` quoted for a shell when it carries anything a shell would act on
+pub fn shell_word(word: &str) -> String {
+    let plain = word
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_./:@%+=,".contains(&byte));
+    if plain {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
