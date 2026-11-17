@@ -30,9 +30,19 @@ use super::{
         Unpacked,
         unpack_hashed,
     },
-    auth::with_credential_fallback,
+    auth::{
+        token_for_host,
+        with_credential_fallback,
+    },
     http::HttpClient,
-    resolve::Download,
+    nix::{
+        self,
+        TreeAttrs,
+    },
+    resolve::{
+        Download,
+        fetch_by_nix,
+    },
     time::epoch_from_iso,
     topology::{
         CommitLog,
@@ -61,6 +71,12 @@ impl GithubClient {
         let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{reff}");
         let parsed = self.http.github_json::<GithubCommitResponse>(&url, None)?;
         parsed.rev_and_epoch(&format!("{owner}/{repo}@{reff}"))
+    }
+
+    fn is_private(self, owner: &str, repo: &str) -> FetchResult<bool> {
+        let url = format!("https://api.github.com/repos/{owner}/{repo}");
+        let parsed = self.http.github_json::<GithubRepoResponse>(&url, None)?;
+        Ok(parsed.private)
     }
 
     fn compare_status(
@@ -148,6 +164,11 @@ impl GithubClient {
         })
         .map_err(|err| misstep::report!("download {url}: {err}"))
     }
+}
+
+#[derive(Deserialize)]
+struct GithubRepoResponse {
+    private: bool,
 }
 
 #[derive(Deserialize)]
@@ -300,11 +321,34 @@ pub(super) fn fetch_pin(
     repo: &str,
     reff: Option<&str>,
     pinned: Option<String>,
+    patched: bool,
 ) -> Result<FetchedPin> {
     let github = GithubClient::global();
     let resolved = github.resolve_for_pin(owner, repo, reff, pinned)?;
-    let dir = tempfile::tempdir()?;
     let url = tarball_url(owner, repo, &resolved.rev);
+    // an anonymous resolve only succeeds on a public repo, and a failed
+    // lookup counts as private since nix fetches those with tack's token
+    let public = !patched
+        && (token_for_host("github.com").is_none()
+            || github.is_private(owner, repo).is_ok_and(|private| !private));
+    if !patched && !public && nix::fetches_past_store() {
+        let attrs = TreeAttrs::Github {
+            owner,
+            repo,
+            rev: &resolved.rev,
+        };
+        if let Some(tree) = fetch_by_nix(&attrs, &format!("{owner}/{repo}")) {
+            let node = LockedNode::new_github(
+                owner,
+                repo,
+                resolved.rev.clone(),
+                tree.nar_hash,
+                tree.last_modified,
+            );
+            return Ok(FetchedPin::rev(node, resolved.rev));
+        }
+    }
+    let dir = tempfile::tempdir()?;
     let Unpacked {
         root,
         sha256,
@@ -312,8 +356,12 @@ pub(super) fn fetch_pin(
     } = github.download_tarball(&url, dir.path())?;
     let (nar_hash, out_hash) = nar::hash_path_and_wrapped(&root, "source")?;
     let rev = resolved.rev;
-    let node = LockedNode::new_github(owner, repo, rev.clone(), nar_hash, resolved.last_modified);
-    let download = Download::new(url, sha256, single_dir, out_hash, Some("github.com"));
+    let mut node =
+        LockedNode::new_github(owner, repo, rev.clone(), nar_hash, resolved.last_modified);
+    if public {
+        node.set_public();
+    }
+    let download = Download::new(sha256, single_dir, out_hash);
     Ok(FetchedPin::rev(node, rev)
         .with_download(download)
         .with_tree(dir, root))

@@ -60,6 +60,11 @@ use super::{
     github_commits,
     gitlab,
     http::HttpClient,
+    nix::{
+        self,
+        NixTree,
+        TreeAttrs,
+    },
     time::epoch_from_http_date,
 };
 use crate::{
@@ -94,27 +99,17 @@ pub struct FetchedPin {
 
 #[derive(Debug)]
 pub(super) struct Download {
-    url:             String,
-    sha256:          String,
-    out_hash:        String,
-    single_dir:      bool,
-    credential_host: Option<String>,
+    sha256:     String,
+    out_hash:   String,
+    single_dir: bool,
 }
 
 impl Download {
-    pub(super) fn new(
-        url: String,
-        sha256: String,
-        single_dir: bool,
-        out_hash: String,
-        credential_host: Option<&str>,
-    ) -> Self {
+    pub(super) const fn new(sha256: String, single_dir: bool, out_hash: String) -> Self {
         Self {
-            url,
             sha256,
             out_hash,
             single_dir,
-            credential_host: credential_host.map(str::to_owned),
         }
     }
 }
@@ -184,12 +179,25 @@ impl FetchedPin {
         }
     }
 
+    /// lets `nix build` skip the download when the resolver's fetcher checks
+    /// the store first
+    pub fn add_to_store(&self, name: &str) {
+        let Some(ref tree) = self.tree else {
+            return;
+        };
+        if !nix::seeds_store() {
+            return;
+        }
+        if let Err(err) = StorePath::add_source(&tree.root) {
+            record_fetch_warning(format!(
+                "could not add {name} to the nix store, the build will download it again: {err:#}"
+            ));
+        }
+    }
+
     pub fn offer_archive(mut self) -> Self {
+        let anonymous = matches!(self.node, LockedNode::Tarball { .. }) || self.node.is_public();
         let fit = self.download.take().filter(|download| {
-            let anonymous = download
-                .credential_host
-                .as_deref()
-                .is_none_or(|host| token_for_host(host).is_none() || serves(&download.url));
             download.single_dir
                 && anonymous
                 && self.tree.as_ref().is_some_and(|tree| !has_tack(&tree.root))
@@ -531,7 +539,9 @@ pub fn fetch_tree_into(source: &Source, submodules: bool, dir: &Path) -> Result<
     }
 }
 
-pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
+/// on nix, an unpatched private github pin and every gitlab and network git
+/// pin are fetched by nix itself, since its fetchTree reads only nix's cache
+pub fn fetch_pin(source: &Source, submodules: bool, patched: bool) -> Result<FetchedPin> {
     let resolved = downgrade_forge_for_submodules(source, submodules);
     match *resolved {
         Source::Github {
@@ -539,17 +549,25 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
             ref repo,
             ref reff,
             rev: ref pinned,
-        } => github::fetch_pin(owner, repo, reff.as_deref(), pinned.clone()),
+        } => github::fetch_pin(owner, repo, reff.as_deref(), pinned.clone(), patched),
         Source::Gitlab {
             ref host,
             ref owner,
             ref repo,
             ..
-        } => fetch_gitlab_archive_pin(resolved.as_ref(), host, owner, repo),
+        } => fetch_gitlab_archive_pin(resolved.as_ref(), host, owner, repo, patched),
         Source::Git { .. } => {
             let target = resolved
                 .git_target()
                 .context("git-backed source missing git target")?;
+            if !patched
+                && !is_local_url(target.url.as_ref())
+                && nix::fetches_past_store()
+                && let Some(pin) =
+                    fetch_git_by_nix(&target.url, target.reff, target.rev, submodules)
+            {
+                return Ok(pin);
+            }
             let checkout =
                 git::fetch_pin_checkout(target.url.as_ref(), target.reff, target.rev, submodules)?;
             git_pin_from_checkout(resolved.as_ref(), checkout, submodules)
@@ -572,8 +590,7 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
                 .or_else(|_| detect_tar_format(url))
                 .with_context(|| format!("tarball {url}"))?;
 
-            let served_from = (with_sorted_query(&resp.get_uri().to_string()) == immutable_url)
-                .then(|| immutable_url.clone());
+            let served_directly = with_sorted_query(&resp.get_uri().to_string()) == immutable_url;
             let dir = tempfile::tempdir()?;
             let Unpacked {
                 root,
@@ -595,11 +612,10 @@ pub fn fetch_pin(source: &Source, submodules: bool) -> Result<FetchedPin> {
                 },
             );
             let pin = FetchedPin::immutable_url(node, immutable_url);
-            let downloaded = match served_from {
-                Some(served) => {
-                    pin.with_download(Download::new(served, sha256, single_dir, out_hash, None))
-                },
-                None => pin,
+            let downloaded = if served_directly {
+                pin.with_download(Download::new(sha256, single_dir, out_hash))
+            } else {
+                pin
             };
             Ok(downloaded.with_tree(dir, root))
         },
@@ -721,9 +737,29 @@ fn fetch_gitlab_archive_pin(
     host: &str,
     owner: &str,
     repo: &str,
+    patched: bool,
 ) -> Result<FetchedPin> {
     let rev = current_rev(source)
         .with_context(|| format!("resolve gitlab ref for {host}/{owner}/{repo}"))?;
+    if !patched && nix::fetches_past_store() {
+        let attrs = TreeAttrs::Gitlab {
+            host,
+            owner,
+            repo,
+            rev: &rev,
+        };
+        if let Some(tree) = fetch_by_nix(&attrs, &format!("{host}/{owner}/{repo}")) {
+            let node = LockedNode::new_gitlab(
+                host,
+                owner,
+                repo,
+                rev.clone(),
+                tree.nar_hash,
+                tree.last_modified,
+            );
+            return Ok(FetchedPin::rev(node, rev));
+        }
+    }
     let dir = tempfile::tempdir()?;
     let root = gitlab::download_archive(host, owner, repo, &rev, dir.path())?;
     let nar_hash = nar::hash_path(&root)?;
@@ -736,6 +772,47 @@ fn fetch_gitlab_archive_pin(
         });
     let node = LockedNode::new_gitlab(host, owner, repo, rev.clone(), nar_hash, last_modified);
     Ok(FetchedPin::rev(node, rev).with_tree(dir, root))
+}
+
+/// [`None`] with a warning when nix can't fetch it, so tack downloads it
+/// instead
+pub(super) fn fetch_by_nix(attrs: &TreeAttrs<'_>, what: &str) -> Option<NixTree> {
+    nix::fetch_tree(attrs)
+        .inspect_err(|err| {
+            record_fetch_warning(format!(
+                "nix could not fetch {what}, so `nix build` will likely fail on it too: {err:#}"
+            ));
+        })
+        .ok()
+}
+
+fn fetch_git_by_nix(
+    url: &str,
+    reff: Option<&str>,
+    pinned: Option<&str>,
+    submodules: bool,
+) -> Option<FetchedPin> {
+    let (rev, refname) = match pinned {
+        Some(rev) => (rev.to_owned(), reff.unwrap_or("HEAD").to_owned()),
+        None => git::resolve_tip_ref(url, reff).ok()?,
+    };
+    let attrs = TreeAttrs::Git {
+        url,
+        reff: &refname,
+        rev: &rev,
+        submodules,
+        shallow: true,
+    };
+    let tree = fetch_by_nix(&attrs, url)?;
+    let node = LockedNode::new_git(
+        url,
+        refname,
+        rev.clone(),
+        tree.nar_hash,
+        tree.last_modified,
+        submodules,
+    );
+    Some(FetchedPin::rev(node, rev))
 }
 
 fn git_pin_from_checkout(

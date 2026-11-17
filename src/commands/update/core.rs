@@ -108,8 +108,12 @@ pub fn fetch_input(
     match pin_type {
         PinType::Fixed => fetch::fetch_fixed_pin(name, expanded, unpack),
         PinType::Flake | PinType::Fetch => {
-            let fetched = fetch::fetch_pin(&expanded.parse::<Source>()?, submodules)?;
-            Ok(if pin_type == PinType::Fetch && !patched {
+            let fetched = fetch::fetch_pin(&expanded.parse::<Source>()?, submodules, patched)?;
+            if patched {
+                return Ok(fetched);
+            }
+            fetched.add_to_store(name);
+            Ok(if pin_type == PinType::Fetch {
                 fetched.offer_archive()
             } else {
                 fetched

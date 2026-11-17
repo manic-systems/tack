@@ -16,6 +16,7 @@ pub mod github;
 mod github_commits;
 pub mod gitlab;
 mod http;
+mod nix;
 mod resolve;
 mod time;
 mod topology;

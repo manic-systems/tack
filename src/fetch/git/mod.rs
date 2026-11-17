@@ -90,6 +90,11 @@ pub(super) fn current_rev(url: &str, reff: Option<&str>, pinned: Option<&str>) -
     )
 }
 
+/// the tip of a network remote and the full ref name it was found under
+pub(super) fn resolve_tip_ref(url: &str, reff: Option<&str>) -> FetchResult<(String, String)> {
+    dag::resolve_remote_tip(url, reff)
+}
+
 pub(super) fn list_tags(url: &str) -> FetchResult<Vec<RemoteTag>> {
     dag::list_tags(url)
 }

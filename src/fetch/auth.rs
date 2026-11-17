@@ -42,6 +42,14 @@ pub(super) fn token_for_host(host: &str) -> Option<&'static str> {
     env_token.or_else(|| nix_conf().tokens.get(host).map(String::as_str))
 }
 
+/// the env tokens tack fetches with, typed for nix's access-tokens, which
+/// lose to nix.conf's for a host, as they would in the build
+pub(super) fn nix_access_tokens() -> Vec<String> {
+    let github = github_env_token().map(|token| format!("github.com={token}"));
+    let gitlab = gitlab_env_token().map(|token| format!("gitlab.com=OAuth2:{token}"));
+    github.into_iter().chain(gitlab).collect()
+}
+
 fn github_env_token() -> Option<&'static str> {
     static TOKEN: OnceLock<Option<String>> = OnceLock::new();
     TOKEN
@@ -83,7 +91,7 @@ fn nix_conf_scrape_enabled() -> bool {
     env_flag_enabled(env::var("TACK_NIX_CONF_TOKENS").ok().as_deref())
 }
 
-fn env_flag_enabled(value: Option<&str>) -> bool {
+pub(super) fn env_flag_enabled(value: Option<&str>) -> bool {
     matches!(
         value.map(str::to_ascii_lowercase).as_deref(),
         Some(flag) if !matches!(flag, "" | "0" | "false" | "no" | "off")

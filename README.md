@@ -505,6 +505,13 @@ then the transitive inputs (`flake-compat`, `devshell`, `nix-test-runner`,
 `cachix`, and `pre-commit-hooks`) will be fetched, even though they're never
 used.
 
+`tack update` hands nix what it fetched, so the first build after it doesn't
+download a pin again. public github and tarball pins go into the nix store, and
+nix fetches the rest itself so they land in its cache. that cache belongs to
+whoever ran the update, so `sudo nixos-rebuild` still downloads those once.
+machines that only update the lock, like CI bots, can skip the store copies with
+`TACK_NO_STORE=1`.
+
 ## omit inputs
 
 an omitted upstream input is never fetched or scanned by `tack dedup`, and

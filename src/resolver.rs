@@ -38,9 +38,10 @@ pub const ARCHIVE: &str = "archive";
 pub const DEFAULT_TYPE: &str = "defaultType";
 pub const NESTED_GROUPS: &str = "nestedGroups";
 pub const TOP_FOLLOWS: &str = "topFollows";
+pub const PUBLIC: &str = "public";
 
 /// lock features an older resolver can safely ignore
-const OPTIONAL: [&str; 2] = [PATCHED_DIFF, ARCHIVE];
+const OPTIONAL: [&str; 3] = [PATCHED_DIFF, ARCHIVE, PUBLIC];
 
 fn declared(resolver: &str) -> Vec<&str> {
     resolver
@@ -81,6 +82,7 @@ pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
                     lock.get(name).and_then(LockedNode::archive).is_some(),
                     ARCHIVE,
                 ),
+                (lock.get(name).is_some_and(LockedNode::is_public), PUBLIC),
             ]
             .into_iter()
             .filter(|&(used, _)| used)
