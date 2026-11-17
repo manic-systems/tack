@@ -441,6 +441,10 @@ impl RemotePatch {
         }
     }
 
+    pub const fn is_pull(&self) -> bool {
+        matches!(self.kind, Remote::Pull { .. })
+    }
+
     pub fn url(&self) -> &str {
         &self.url
     }

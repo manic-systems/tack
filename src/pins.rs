@@ -818,6 +818,17 @@ impl PinsDoc {
             })
     }
 
+    /// the patches `name` lists itself, leaving out those its group gives it
+    pub fn own_patches(&self, name: &str) -> Vec<String> {
+        self.input_entries()
+            .find(|&(_, pin, _)| pin == name)
+            .and_then(|(_, _, item)| item.as_table_like()?.get("patches")?.as_array())
+            .into_iter()
+            .flat_map(|patches| patches.iter().filter_map(|listed| listed.as_str()))
+            .map(str::to_owned)
+            .collect()
+    }
+
     pub fn nested_pin(&self) -> Option<&str> {
         self.input_entries()
             .find(|&(nest, ..)| nest.is_some())
@@ -1030,19 +1041,21 @@ impl PinsDoc {
         Ok(())
     }
 
-    pub fn remove_patch(&mut self, name: &str, patch: &str) -> Result<()> {
+    /// whether `name` listed `patch` itself, since one its group gives it
+    /// stays
+    pub fn remove_patch(&mut self, name: &str, patch: &str) -> Result<bool> {
         let item = self.input_item_mut(name)?;
         let entry = item
             .as_table_like_mut()
             .with_context(|| format!("input '{name}' is not a table"))?;
         let Some(patches) = entry.get_mut("patches").and_then(Item::as_array_mut) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(index) = patches
             .iter()
             .position(|listed| listed.as_str() == Some(patch))
         else {
-            return Ok(());
+            return Ok(false);
         };
         let removed = patches.remove(index);
         if patches.is_empty() {
@@ -1056,7 +1069,7 @@ impl PinsDoc {
         if let Some(inline) = item.as_inline_table_mut() {
             inline.fmt();
         }
-        Ok(())
+        Ok(true)
     }
 
     fn input_item_mut(&mut self, name: &str) -> Result<&mut Item> {

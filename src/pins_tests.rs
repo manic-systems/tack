@@ -85,3 +85,20 @@ fn follow_tables_reject_bare_and_scoped_keys_for_one_name() {
     let distinct_sides = doc("[all_follow]\n\"flake:foo\" = \"a\"\n\"tack:foo\" = \"b\"\n");
     assert_eq!(distinct_sides.all_follows().unwrap().len(), 2);
 }
+
+#[test]
+fn group_patches_are_not_the_pins_own() {
+    let mut doc = doc(r#"
+[groups.x]
+patches = ["patches/group.patch"]
+
+[inputs.pin]
+url = "github:o/r"
+group = "x"
+patches = ["patches/own.patch"]
+"#);
+
+    assert_eq!(doc.own_patches("pin"), vec!["patches/own.patch"]);
+    assert!(!doc.remove_patch("pin", "patches/group.patch").unwrap());
+    assert!(doc.remove_patch("pin", "patches/own.patch").unwrap());
+}
