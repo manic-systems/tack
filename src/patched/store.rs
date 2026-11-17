@@ -30,6 +30,21 @@ impl StorePath {
         Self::add_fixed(&[], file)
     }
 
+    /// the path fetchTarball and lix's fetchTree look up for a tree with this
+    /// narHash, whatever the directory is called
+    pub fn add_source(tree: &Path) -> Result<Self> {
+        let mut command = Command::new("nix");
+        command
+            .args(["--extra-experimental-features", "nix-command"])
+            .args(["store", "add-path", "--name", "source"])
+            .arg(tree);
+        let stored = stdout_of(&mut command)?;
+        if !Path::new(&stored).is_absolute() {
+            bail!("nix store add-path printed '{stored}' instead of a store path");
+        }
+        Ok(Self(stored))
+    }
+
     fn add_fixed(mode: &[&str], path: &Path) -> Result<Self> {
         let mut command = Command::new("nix-store");
         command

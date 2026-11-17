@@ -410,6 +410,8 @@ pub enum LockedNode {
             skip_serializing_if = "Option::is_none"
         )]
         archive:       Option<Archived>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        public:        bool,
         #[serde(flatten)]
         extra:         ExtraFields,
     },
@@ -567,6 +569,7 @@ impl LockedNode {
             nar_hash:      Some(nar_hash.into()),
             last_modified: Some(last_modified),
             archive:       None,
+            public:        false,
             extra:         BTreeMap::new(),
         }
     }
@@ -783,6 +786,17 @@ impl LockedNode {
             | Self::Fixed { .. }
             | Self::Indirect { .. }
             | Self::Path { .. } => None,
+        }
+    }
+
+    /// whether the forge serves the rev's archive without credentials
+    pub const fn is_public(&self) -> bool {
+        matches!(self, Self::Github { public: true, .. })
+    }
+
+    pub const fn set_public(&mut self) {
+        if let Self::Github { public, .. } = self {
+            *public = true;
         }
     }
 
