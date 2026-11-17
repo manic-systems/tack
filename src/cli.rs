@@ -33,9 +33,10 @@ pub enum Command {
         convert:  bool,
     },
     Update {
-        exclude: Vec<String>,
-        names:   Vec<String>,
-        accept:  bool,
+        exclude:         Vec<String>,
+        names:           Vec<String>,
+        accept:          bool,
+        refresh_patches: bool,
     },
     Look {
         exclude: Vec<String>,
@@ -134,13 +135,16 @@ enum Cli {
     Update {
         /// relock drifted pins instead of failing
         #[pound(long)]
-        accept:  bool,
+        accept:          bool,
+        /// download remote patches again instead of reusing the vendored ones
+        #[pound(long)]
+        refresh_patches: bool,
         /// pins or groups to leave alone (repeatable, or comma-separated)
         #[pound(long, complete = pin_names)]
-        exclude: Vec<String>,
+        exclude:         Vec<String>,
         /// pins or groups to update (default: all)
         #[pound(complete = pin_names)]
-        names:   Vec<String>,
+        names:           Vec<String>,
     },
     /// show upstream drift without writing the lock
     Look {
@@ -439,6 +443,7 @@ impl From<Cli> for Command {
             },
             Cli::Update {
                 accept,
+                refresh_patches,
                 exclude,
                 names,
             } => {
@@ -446,6 +451,7 @@ impl From<Cli> for Command {
                     names,
                     exclude: split_list(&exclude),
                     accept,
+                    refresh_patches,
                 }
             },
             Cli::Look {

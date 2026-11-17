@@ -115,16 +115,26 @@ pub fn materialize(project: &Project, names: &[String]) -> Result<()> {
     patch::materialize(project, names)
 }
 
-pub fn update(project: &Project, selection: Selection<'_>, accept: bool) -> Result<UpdateReport> {
-    update::update(project, selection, accept)
+pub fn update(
+    project: &Project,
+    selection: Selection<'_>,
+    accept: bool,
+    refresh_patches: bool,
+) -> Result<UpdateReport> {
+    update::update(project, selection, accept, refresh_patches)
 }
 
 pub fn look(project: &Project, selection: Selection<'_>, verbose: bool) -> Result<LookReport> {
     update::look(project, selection, verbose)
 }
 
-pub fn update_cli(project: &Project, selection: Selection<'_>, accept: bool) -> Result<()> {
-    update::update_cli(project, selection, accept)
+pub fn update_cli(
+    project: &Project,
+    selection: Selection<'_>,
+    accept: bool,
+    refresh_patches: bool,
+) -> Result<()> {
+    update::update_cli(project, selection, accept, refresh_patches)
 }
 
 pub fn look_cli(project: &Project, selection: Selection<'_>, verbose: bool) -> Result<()> {

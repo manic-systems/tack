@@ -424,6 +424,7 @@ struct PinRun<'run> {
     session: &'run CompareSession,
     named:   &'run [String],
     accept:  bool,
+    refresh: bool,
 }
 
 impl PinRun<'_> {
@@ -500,7 +501,7 @@ impl PinRun<'_> {
         };
         let recorded = lock.signed_by(&input.name);
         let mut mark = check_signers(input, old, recorded, self.keyring, &mut resolution);
-        settle_patches(self.project, input, lock, &mut resolution);
+        settle_patches(self.project, input, lock, self.refresh, &mut resolution);
         note_unfit(input, old, &mut resolution);
         if matches!(resolution.outcome, UpdateOutcome::Failed(_)) {
             mark = SignerMark::Keep;
@@ -649,6 +650,7 @@ fn settle_patches(
     project: &Project,
     input: &pins::Input,
     lock: &LockFile,
+    refresh: bool,
     resolution: &mut PinResolution,
 ) {
     let upstream = resolution.upstream.take();
@@ -660,12 +662,8 @@ fn settle_patches(
         return;
     };
     let pin = PatchedPin::new(project, &input.name, node).with_upstream(upstream);
-    match pin.settle(
-        &input.patches,
-        lock.patched(&input.name),
-        moved,
-        Mode::Update,
-    ) {
+    let mode = if refresh { Mode::Refresh } else { Mode::Update };
+    match pin.settle(&input.patches, lock.patched(&input.name), moved, mode) {
         Ok(settled) => {
             // the rev line says unchanged, so a rebuild on the same node needs
             // saying
@@ -691,7 +689,18 @@ fn settle_patches(
             resolution.patched = settled;
         },
         Err(err) => {
-            resolution.outcome = UpdateOutcome::Failed(format!("{err:#}"));
+            let vendored = lock
+                .patched(&input.name)
+                .is_some_and(|tree| tree.patches.iter().any(|digest| digest.url.is_some()));
+            let hint = if moved && vendored && !refresh {
+                format!(
+                    ", `tack update --refresh-patches {}` downloads the newer versions",
+                    input.name
+                )
+            } else {
+                String::new()
+            };
+            resolution.outcome = UpdateOutcome::Failed(format!("{err:#}{hint}"));
             resolution.node = None;
         },
     }
@@ -771,6 +780,7 @@ pub(super) fn update(
     project: &Project,
     selection: Selection<'_>,
     accept: bool,
+    refresh: bool,
     progress: &impl Progress<UpdateOutcome>,
 ) -> Result<UpdateReport> {
     let mut doc = project.load_pins()?;
@@ -801,6 +811,7 @@ pub(super) fn update(
         session: &session,
         named: selection.names,
         accept,
+        refresh,
     };
     let resolutions = dispatcher::ordered(jobs, UPDATE_IN_FLIGHT, |index, (input, url)| {
         let (resolution, mark) = run.resolve(input, &url, || progress.fetching(index));

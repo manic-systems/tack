@@ -185,16 +185,33 @@ impl<O> core::Progress<O> for SpinnerProgress<'_, O> {
     }
 }
 
-pub fn update(project: &Project, selection: Selection<'_>, accept: bool) -> Result<UpdateReport> {
-    core::update(project, selection, accept, &core::NoProgress)
+pub fn update(
+    project: &Project,
+    selection: Selection<'_>,
+    accept: bool,
+    refresh_patches: bool,
+) -> Result<UpdateReport> {
+    core::update(
+        project,
+        selection,
+        accept,
+        refresh_patches,
+        &core::NoProgress,
+    )
 }
 
-pub fn update_cli(project: &Project, selection: Selection<'_>, accept: bool) -> Result<()> {
+pub fn update_cli(
+    project: &Project,
+    selection: Selection<'_>,
+    accept: bool,
+    refresh_patches: bool,
+) -> Result<()> {
     let spinner = Spinner::new();
-    let report = core::update(project, selection, accept, &SpinnerProgress {
+    let progress = SpinnerProgress {
         spinner: &spinner,
         status:  update_status,
-    })?;
+    };
+    let report = core::update(project, selection, accept, refresh_patches, &progress)?;
     if let Some(display) = spinner.into_display() {
         display.finish();
     } else {
