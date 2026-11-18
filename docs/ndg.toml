@@ -1,0 +1,37 @@
+footer_text    = "manic.systems"
+highlight_code = true
+title          = "tack"
+
+[search]
+enable = true
+
+[anchor]
+on_duplicate = "deduplicate"
+
+[sidebar]
+numbered = false
+ordering = "custom"
+
+[sidebar.options]
+depth = 3
+
+# book order. ndg sorts by title otherwise
+[[sidebar.matches]]
+path     = "index.md"
+position = 1
+
+[[sidebar.matches]]
+path     = "obtaining.md"
+position = 2
+
+[[sidebar.matches]]
+path     = "basic.md"
+position = 3
+
+[[sidebar.matches]]
+path     = "advanced.md"
+position = 4
+
+[[sidebar.matches]]
+path     = "pins-toml.md"
+position = 5
