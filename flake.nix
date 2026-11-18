@@ -48,6 +48,8 @@
           default = self.packages.${system}.tack;
 
           tack = pkgs.callPackage ./nix/package.nix { };
+
+          docs = pkgs.callPackage ./nix/docs.nix { inherit self; };
         }
       );
 

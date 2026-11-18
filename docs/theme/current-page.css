@@ -1,0 +1,4 @@
+.sidebar-section[data-section="docs"] a[aria-current="page"] {
+  color: var(--link-color);
+  font-weight: 600;
+}
