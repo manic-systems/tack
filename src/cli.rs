@@ -147,6 +147,7 @@ enum Cli {
         names:           Vec<String>,
     },
     /// show upstream drift without writing the lock
+    #[pound(alias = "rook")]
     Look {
         /// list the freshest commits for each changed pin
         #[pound(short, long)]
