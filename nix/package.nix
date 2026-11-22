@@ -4,6 +4,7 @@
   rustPlatform,
   stdenv,
   buildPackages,
+  installShellFiles,
   pkg-config,
   zstd,
 }:
@@ -20,6 +21,7 @@ rustPlatform.buildRustPackage {
   cargoLock.lockFile = ../Cargo.lock;
 
   nativeBuildInputs = [
+    installShellFiles
     pkg-config
   ]
   ++ lib.optionals hasWild [
@@ -32,6 +34,19 @@ rustPlatform.buildRustPackage {
   env = lib.optionalAttrs hasWild {
     RUSTFLAGS = "-Clinker=${clang}/bin/${clang.targetPrefix}clang -Clink-arg=--ld-path=wild";
   };
+
+  postInstall = lib.optionalString (stdenv.hostPlatform.emulatorAvailable buildPackages) (
+    let
+      tack = "${stdenv.hostPlatform.emulator buildPackages} $out/bin/tack";
+    in
+    ''
+      installShellCompletion --cmd tack \
+        --bash    <(COMPLETE=bash ${tack}) \
+        --zsh     <(COMPLETE=zsh  ${tack}) \
+        --fish    <(COMPLETE=fish ${tack}) \
+        --nushell <(COMPLETE=nu   ${tack})
+    ''
+  );
 
   meta = {
     description = "flake-like toml nix pins, lazily fetched and transformed";

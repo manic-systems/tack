@@ -603,6 +603,19 @@ nix run github:manic-systems/tack -- init
 nix run github:manic-systems/tack -- add nixpkgs github:NixOS/nixpkgs/nixpkgs-unstable
 ```
 
+## completions
+
+The Nix package installs completions for Bash, Zsh, Fish and Nushell. To set
+completions up by hand, source the script tack prints.
+
+| shell  | setup                                                    |
+|--------|----------------------------------------------------------|
+| bash   | `source <(COMPLETE=bash tack)`                           |
+| zsh    | `COMPLETE=zsh tack > ~/.zfunc/_tack`, with it in `fpath` |
+| fish   | `COMPLETE=fish tack \| source`                           |
+| nu     | `COMPLETE=nu tack \| save tack.nu`, then `source` it     |
+| elvish | `eval (env COMPLETE=elvish tack \| slurp)`               |
+
 ## binary cache
 
 cache.manic.systems serves tack for Linux and macOS, and `nix run` offers to
