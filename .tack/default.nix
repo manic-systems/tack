@@ -557,19 +557,14 @@ let
                   type = "path";
                   inherit (tree) path narHash;
                 }
-                // (if tree ? lastModified then { inherit (tree) lastModified; } else { });
+                // (pkgs.lib.optionalAttrs (tree ? lastModified) { inherit (tree) lastModified; });
               });
         in
         fetched
-        // (
-          if node ? rev then
-            {
-              dirtyRev = node.rev + "-dirty";
-              dirtyShortRev = substring 0 7 node.rev + "-dirty";
-            }
-          else
-            { }
-        );
+        // (pkgs.lib.optionalAttrs (node ? rev) {
+          dirtyRev = node.rev + "-dirty";
+          dirtyShortRev = substring 0 7 node.rev + "-dirty";
+        });
 
       patchTools =
         if pkgs != null then
@@ -701,15 +696,16 @@ let
               }).outPath;
             root = source + subdir;
           in
-          if
-            !plainName name
-            || !isAttrs pin
-            || (pin.type or "") == "fixed"
-            || pin ? dir && !plainDir pin.dir
-            || !fetchedNode node
-          then
-            [ ]
-          else
+          pkgs.lib.optionals
+            (
+              !(
+                !plainName name
+                || !isAttrs pin
+                || (pin.type or "") == "fixed"
+                || pin ? dir && !plainDir pin.dir
+                || !fetchedNode node
+              )
+            )
             [
               {
                 key = node.narHash + subdir + (if patchesTack then "#patched" else "");
@@ -1096,23 +1092,23 @@ let
                   value = follows.${key};
                 }
               ]
-            else if
-              m != null
-              && head m == side
-              && !(matchesInput {
-                rules = excluded;
-                inherit side;
-                name = elemAt m 1;
-              })
-            then
-              [
-                {
-                  name = elemAt m 1;
-                  value = follows.${key};
-                }
-              ]
             else
-              [ ]
+              pkgs.lib.optionals
+                (
+                  m != null
+                  && head m == side
+                  && !(matchesInput {
+                    rules = excluded;
+                    inherit side;
+                    name = elemAt m 1;
+                  })
+                )
+                [
+                  {
+                    name = elemAt m 1;
+                    value = follows.${key};
+                  }
+                ]
           ) (attrNames checked)
         );
 
@@ -1127,7 +1123,7 @@ let
           inherit side;
           follows = policy.global;
           location = "all_follow";
-          excluded = policy.excluded;
+          inherit (policy) excluded;
         })
         // resolve (projectFollows {
           inherit side;
@@ -1145,7 +1141,7 @@ let
         followLayersForSide {
           inherit side policy;
           resolve = resolveFollows;
-          inherited = policy.inherited;
+          inherit (policy) inherited;
         };
 
       followMetaForSide =
@@ -1387,11 +1383,9 @@ let
 
           # upstream declares its outputs forward tackOverrides; a closed `{ self }:`
           # would throw on the extra kwarg, so forward only when declared
-          extraArgs =
-            if tackCall.supportsOverrides && (tackCall.needed || forcedMode != null) then
-              { tackOverrides = tackCall.overrides; }
-            else
-              { };
+          extraArgs = pkgs.lib.optionalAttrs (
+            tackCall.supportsOverrides && (tackCall.needed || forcedMode != null)
+          ) { tackOverrides = tackCall.overrides; };
 
           outputs = raw.outputs (callerInputs // extraArgs // { self = result; });
 
@@ -1496,7 +1490,7 @@ let
         let
           pinType =
             pin.type or (
-              if pin ? flake then (if pin.flake then "flake" else "fetch") else (pins.tack or { }).type or "flake"
+              if pin ? flake then if pin.flake then "flake" else "fetch" else (pins.tack or { }).type or "flake"
             );
           omit = omitsFor { inherit name pin; };
           follows = checkFollowKeys {
