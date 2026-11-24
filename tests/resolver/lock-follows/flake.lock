@@ -1,0 +1,42 @@
+{
+  "root": "root",
+  "version": 7,
+  "nodes": {
+    "root": {
+      "inputs": {
+        "parent": "parent"
+      }
+    },
+    "parent": {
+      "inputs": {
+        "child": "child",
+        "dep": "dep"
+      },
+      "locked": {
+        "type": "path",
+        "path": "/nix/store/spypvw9zsklab8d7r880ayjq7i2vj2cc-source",
+        "narHash": "sha256-ezwaocY2+dQjBPn4tbgA1zXMnmIwoRZbRdBN5n27ZMo=",
+        "dir": "parent"
+      }
+    },
+    "child": {
+      "inputs": {
+        "shared": [ "parent", "dep" ]
+      },
+      "locked": {
+        "type": "path",
+        "path": "/nix/store/spypvw9zsklab8d7r880ayjq7i2vj2cc-source",
+        "narHash": "sha256-ezwaocY2+dQjBPn4tbgA1zXMnmIwoRZbRdBN5n27ZMo=",
+        "dir": "child"
+      }
+    },
+    "dep": {
+      "flake": false,
+      "locked": {
+        "type": "path",
+        "path": "/nix/store/spypvw9zsklab8d7r880ayjq7i2vj2cc-source",
+        "narHash": "sha256-ezwaocY2+dQjBPn4tbgA1zXMnmIwoRZbRdBN5n27ZMo="
+      }
+    }
+  }
+}

@@ -1041,6 +1041,13 @@ let
         { side, name }:
         warn "tack: ${side} input '${name}' was omitted by omit_inputs, ${name} will be null" null;
 
+      # follows paths walk these nodes rather than flake results, since reading a
+      # result's `inputs` forces its outputs, which may depend on the follower
+      inputNode = value: {
+        inherit value;
+        inputs = mapAttrs (_: inputNode) (value.inputs or { });
+      };
+
       # `pin/input/...` walks the inputs that pin was evaluated with, as a flake.nix follows does
       resolveFollows = mapAttrs (
         _: target:
@@ -1048,7 +1055,7 @@ let
           path = filter isString (split "/" target);
           name = head path;
           pin =
-            self.${name} or (
+            nodes.${name} or (
               if
                 any (alias: all_follow.${alias} == name && substring 0 5 alias != "tack:") (attrNames all_follow)
               then
@@ -1058,8 +1065,7 @@ let
             );
         in
         foldl' (
-          node: key:
-          (node.inputs or { }).${key} or (throw "tack: follows target '${target}' has no input '${key}'")
+          node: key: node.inputs.${key} or (throw "tack: follows target '${target}' has no input '${key}'")
         ) pin (tail path)
       );
 
@@ -1140,13 +1146,15 @@ let
           location = "inherited follows";
         };
 
-      followOverridesForSide =
+      followNodesForSide =
         { side, policy }:
         followLayersForSide {
           inherit side policy;
           resolve = resolveFollows;
-          inherited = policy.inherited;
+          inherited = mapAttrs (_: inputNode) policy.inherited;
         };
+
+      followOverridesForSide = args: mapAttrs (_: node: node.value) (followNodesForSide args);
 
       followMetaForSide =
         { side, policy }:
@@ -1260,7 +1268,7 @@ let
               value;
         };
 
-      mkCallerInputs =
+      mkCallerNodes =
         {
           upLock,
           nodeName,
@@ -1282,10 +1290,10 @@ let
                 name = n;
               }
             then
-              omittedInput {
+              inputNode (omittedInput {
                 side = "flake";
                 name = n;
-              }
+              })
             else if upLock != null then
               let
                 ref =
@@ -1293,9 +1301,8 @@ let
                     or (throw "tack: input '${n}' declared but not in flake.lock node '${nodeName}'");
                 # a lock follows path names the root's input, which may itself be followed or omitted
                 followed = foldl' (
-                  value: key:
-                  (value.inputs or { }).${key}
-                    or (throw "tack: follows path dead-end: no input '${key}' along ${toString ref}")
+                  node: key:
+                  node.inputs.${key} or (throw "tack: follows path dead-end: no input '${key}' along ${toString ref}")
                 ) rootInputs.${head ref} (tail ref);
                 childName = resolveSpec {
                   inherit upLock;
@@ -1318,13 +1325,15 @@ let
                   follows = deepFollows;
                 }
               else if childNode.locked ? dir then
-                childSrc
-                // {
-                  outPath = childSrc.outPath + "/" + childNode.locked.dir;
-                  sourceInfo = childSrc;
-                }
+                inputNode (
+                  childSrc
+                  // {
+                    outPath = childSrc.outPath + "/" + childNode.locked.dir;
+                    sourceInfo = childSrc;
+                  }
+                )
               else
-                childSrc
+                inputNode childSrc
             else
               throw "tack: no flake.lock; cannot resolve input '${n}'"
           )
@@ -1366,13 +1375,13 @@ let
             dir = flakeDir;
             inherit omit levelFollows deepFollows;
           };
-          flakeLevel = intersectAttrs (raw.inputs or { }) (followOverridesForSide {
+          flakeLevel = intersectAttrs (raw.inputs or { }) (followNodesForSide {
             side = "flake";
             policy = levelFollows;
           });
 
           # deep follows pass down raw, so each descendant re-projects per side
-          callerInputs = mkCallerInputs {
+          callerNodes = mkCallerNodes {
             inherit
               upLock
               nodeName
@@ -1382,8 +1391,9 @@ let
             rawInputs = raw.inputs or { };
             levelOverrides = flakeLevel;
             selfFollowed = levelFollows.selfFollowed or [ ];
-            rootInputs = if rootInputs == null then callerInputs else rootInputs;
+            rootInputs = if rootInputs == null then callerNodes else rootInputs;
           };
+          callerInputs = mapAttrs (_: node: node.value) callerNodes;
 
           # upstream declares its outputs forward tackOverrides; a closed `{ self }:`
           # would throw on the extra kwarg, so forward only when declared
@@ -1404,7 +1414,10 @@ let
               ;
           });
         in
-        result;
+        {
+          value = result;
+          inputs = callerNodes;
+        };
 
       evalTransitive =
         {
@@ -1516,10 +1529,10 @@ let
           ]
           (
             if pinType == "fixed" then
-              fetchFixed {
+              inputNode (fetchFixed {
                 inherit name;
                 entry = lock.${name};
-              }
+              })
             else
               let
                 sourceInfo =
@@ -1540,9 +1553,9 @@ let
               else if
                 pinFetchMode pin == "build" && node.archive or null != null && (pin.patches or [ ]) == [ ]
               then
-                fetchArchive node + subdir
+                inputNode (fetchArchive node + subdir)
               else
-                evalFetch {
+                inputNode (evalFetch {
                   inherit
                     sourceInfo
                     name
@@ -1550,7 +1563,7 @@ let
                     subdir
                     omit
                     ;
-                }
+                })
           );
 
       # undeclared lock entries are synthesised into toplevels by auto-dedup
@@ -1581,9 +1594,9 @@ let
               ;
           }
         else
-          sourceInfo;
+          inputNode sourceInfo;
 
-      self =
+      nodes =
         (mapAttrs (name: pin: loadPin { inherit name pin; }) declared)
         // listToAttrs (
           map (name: {
@@ -1592,7 +1605,9 @@ let
           }) autoNames
         )
         // resolveFollows topFollows
-        // pinOverrides;
+        // mapAttrs (_: inputNode) pinOverrides;
+
+      self = mapAttrs (_: node: node.value) nodes;
 
       selfMeta = removeAttrs (
         mapAttrs (name: _: pinMeta name) (removeAttrs self (attrNames pinOverrides ++ attrNames topFollows))
