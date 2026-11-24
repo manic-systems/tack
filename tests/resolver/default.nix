@@ -60,4 +60,12 @@ assert
     follows = "replacement";
   };
 assert !(builtins.tryEval inputs.loopa).success;
+# lock-follows/flake.lock locks its nodes by this store path, and copying it
+# first lets pure eval fetch them offline. child's `shared` follows
+# `parent/dep`, so walking it through parent's outputs would recurse, and
+# all_follow overrides that dep
+assert builtins.seq (builtins.path {
+  path = ./lock-follows/nodes;
+  name = "source";
+}) (toString inputs.lockflow.parent.child.shared == replacement);
 true

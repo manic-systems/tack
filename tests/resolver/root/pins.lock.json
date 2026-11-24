@@ -28,6 +28,10 @@
     "url": "https://example.invalid/fixed.txt",
     "sha256": "0000000000000000000000000000000000000000000000000000"
   },
+  "lockflow": {
+    "type": "path",
+    "path": "../lock-follows"
+  },
   "ghpin": {
     "type": "github",
     "owner": "example",

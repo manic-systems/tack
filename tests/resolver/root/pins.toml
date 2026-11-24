@@ -52,3 +52,6 @@ follows = "loopb/x"
 
 [inputs.loopb]
 follows = "loopa/y"
+
+[inputs.lockflow]
+url = "path:../lock-follows"
