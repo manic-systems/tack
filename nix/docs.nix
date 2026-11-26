@@ -10,16 +10,14 @@
   self,
 }:
 let
-  modulePath = toString ./module.nix;
   blob = "https://github.com/manic-systems/tack/blob/${self.rev or "main"}";
 
   # eval only the module
   options =
     (lib.evalModules {
       modules = [
-        (import ./module.nix self)
+        (lib.modules.importApply ./module.nix self)
         {
-          _file = modulePath;
           options._module.args = lib.mkOption { internal = true; };
           config._module = {
             check = false;
