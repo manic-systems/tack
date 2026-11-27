@@ -39,9 +39,10 @@ pub const DEFAULT_TYPE: &str = "defaultType";
 pub const NESTED_GROUPS: &str = "nestedGroups";
 pub const TOP_FOLLOWS: &str = "topFollows";
 pub const PUBLIC: &str = "public";
+pub const TACK_FOLLOWS: &str = "tackFollows";
 
 /// lock features an older resolver can safely ignore
-const OPTIONAL: [&str; 3] = [PATCHED_DIFF, ARCHIVE, PUBLIC];
+const OPTIONAL: [&str; 4] = [PATCHED_DIFF, ARCHIVE, PUBLIC, TACK_FOLLOWS];
 
 fn declared(resolver: &str) -> Vec<&str> {
     resolver
@@ -56,6 +57,19 @@ pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
     let groups = pins.groups()?;
     let inputs = pins.inputs()?;
     let top_follows = pins.top_follows()?;
+    let all_follows = pins.all_follows()?;
+    // a follows path may walk into an upstream's tack pins
+    let walks = top_follows
+        .iter()
+        .chain(inputs.iter().flat_map(|input| {
+            input
+                .follows
+                .values()
+                .map(move |target| (&input.name, target))
+        }))
+        .chain(&all_follows)
+        .find(|&(_, target)| target.contains('/'))
+        .map(|(name, _)| (name.as_str(), TACK_FOLLOWS));
     let grouped = inputs
         .iter()
         .filter(|input| {
@@ -97,6 +111,7 @@ pub fn ensure_lock(project: &Project, lock: &LockFile) -> Result<()> {
                 .next()
                 .map(|name| (name.as_str(), TOP_FOLLOWS)),
         )
+        .chain(walks)
         .collect::<Vec<_>>();
     ensure(project, &needs)
 }

@@ -55,3 +55,55 @@ follows = "loopa/y"
 
 [inputs.lockflow]
 url = "path:../lock-follows"
+
+[inputs.legacy]
+type = "fetch"
+url  = "path:../legacy"
+
+[inputs.tablewalk]
+follows = { immediate = "topflake/mid" }
+type    = "fetch"
+url     = "path:../level1"
+
+# follows paths into upstream tack pins
+[inputs.viaflake]
+follows = "topflake/mid"
+
+[inputs.viaflakedeep]
+follows = "topflake/mid/dep"
+
+[inputs.viafetch]
+follows = "top/immediate"
+
+[inputs.viafetchdeep]
+follows = "top/mid/dep"
+
+[inputs.chained]
+follows = "viaflake/dep"
+
+[inputs.bareclash]
+follows = "topflake/scoped"
+
+[inputs.tackclash]
+follows = "topflake/tack:scoped"
+
+[inputs.flakeclash]
+follows = "topflake/flake:scoped"
+
+[inputs.notack]
+follows = "topflake/tack:nope"
+
+[inputs.noflake]
+follows = "topflake/flake:mid"
+
+[inputs.vialegacy]
+follows = "legacy/leaf"
+
+[inputs.pastlegacy]
+follows = "legacy/leaf/x"
+
+[inputs.lazyflake]
+url = "path:../lazy-flake"
+
+[inputs.vialazy]
+follows = "lazyflake/leaf"

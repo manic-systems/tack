@@ -6,5 +6,9 @@
   "drop": {
     "type": "path",
     "path": "../../original"
+  },
+  "scoped": {
+    "type": "path",
+    "path": "../../original"
   }
 }

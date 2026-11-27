@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # tack-managed resolver. delete this line to take ownership; tack will leave it alone afterwards.
-# tack-resolver: patched patchedDiff tag version signedBy groups archive defaultType nestedGroups topFollows public
+# tack-resolver: patched patchedDiff tag version signedBy groups archive defaultType nestedGroups topFollows public tackFollows
 
 let
   inherit (builtins)
@@ -272,9 +272,10 @@ let
             "_meta"
             "_patched"
             "_nested"
+            "__tack_nodes"
           ]
         then
-          throw "tack: '_meta', '_patched' and '_nested' are reserved by tack, rename that input"
+          throw "tack: '_meta', '_patched', '_nested' and '__tack_nodes' are reserved by tack, rename that input"
         else
           removeAttrs allPins (attrNames topFollowsRaw);
       allPins = pinsOf pins;
@@ -1046,9 +1047,70 @@ let
       inputNode = value: {
         inherit value;
         inputs = mapAttrs (_: inputNode) (value.inputs or { });
+        tackInputs = if isAttrs value then value.__tack_nodes or { } else { };
       };
 
-      # `pin/input/...` walks the inputs that pin was evaluated with, as a flake.nix follows does
+      # an upstream's resolver + its overrides (or null)
+      # prevents forcing unless an actual follows pin requires it
+      upstreamResolver =
+        {
+          dir,
+          tackCall,
+          forward,
+        }:
+        let
+          resolver = import (dir + "/.tack");
+        in
+        if !(tackCall.hasTack && pathExists (dir + "/.tack/default.nix")) then
+          null
+        else if forward && resolver ? __functor then
+          resolver { inherit (tackCall) overrides; }
+        else
+          resolver;
+
+      # a resolver predating __tack_nodes only offers its pins' values
+      tackNodesOf =
+        { dir, upstream }:
+        if upstream == null then
+          { }
+        else
+          upstream.__tack_nodes or (mapAttrs
+            (name: _: {
+              value = upstream.${name};
+              inputs = { };
+              tackInputs = { };
+              opaque = "the resolver in ${toString dir}/.tack predates follows paths into its pins' inputs";
+            })
+            (
+              upstream._meta or (removeAttrs upstream [
+                "_patched"
+                "__functor"
+                "outPath"
+              ])
+            )
+          );
+
+      # past the pin, a segment is `tack:name` for the upstream's tack pin,
+      # `flake:name` for its flake input, or a bare name, which takes the tack
+      # pin when the upstream has both
+      followStep =
+        target: node: key:
+        let
+          m = match "(flake|tack):(.*)" key;
+          name = if m == null then key else elemAt m 1;
+          missing = what: throw "tack: follows target '${target}' has no ${what} '${name}'";
+        in
+        if node ? opaque then
+          throw "tack: follows target '${target}' can't walk into '${key}', ${node.opaque}"
+        else if m == null then
+          node.tackInputs.${name} or node.inputs.${name} or (missing "tack pin or flake input")
+        else if head m == "tack" then
+          node.tackInputs.${name} or (missing "tack pin")
+        else
+          node.inputs.${name} or (missing "flake input");
+
+      # `pin/input/...` walks the inputs and tack pins that pin was evaluated
+      # with, as a flake.nix follows walks flake inputs
       resolveFollows = mapAttrs (
         _: target:
         let
@@ -1064,9 +1126,7 @@ let
                 throw "tack: follows target '${name}' is not a pin"
             );
         in
-        foldl' (
-          node: key: node.inputs.${key} or (throw "tack: follows target '${target}' has no input '${key}'")
-        ) pin (tail path)
+        foldl' (followStep target) pin (tail path)
       );
 
       # follow keys are `flake:name`, `tack:name`, or bare `name`
@@ -1258,7 +1318,12 @@ let
           blocked = hasTack && direct && !supportsOverrides;
         in
         {
-          inherit supportsOverrides direct needed;
+          inherit
+            hasTack
+            supportsOverrides
+            direct
+            needed
+            ;
           overrides = effectiveTackOverrides // propagated.override;
           report =
             value:
@@ -1397,11 +1462,8 @@ let
 
           # upstream declares its outputs forward tackOverrides; a closed `{ self }:`
           # would throw on the extra kwarg, so forward only when declared
-          extraArgs =
-            if tackCall.supportsOverrides && (tackCall.needed || forcedMode != null) then
-              { tackOverrides = tackCall.overrides; }
-            else
-              { };
+          forward = tackCall.supportsOverrides && (tackCall.needed || forcedMode != null);
+          extraArgs = if forward then { tackOverrides = tackCall.overrides; } else { };
 
           outputs = raw.outputs (callerInputs // extraArgs // { self = result; });
 
@@ -1417,6 +1479,14 @@ let
         {
           value = result;
           inputs = callerNodes;
+          # inputs + upstream overrides
+          tackInputs = tackNodesOf {
+            dir = flakeDir;
+            upstream = upstreamResolver {
+              dir = flakeDir;
+              inherit tackCall forward;
+            };
+          };
         };
 
       evalTransitive =
@@ -1486,23 +1556,34 @@ let
             levelFollows = f.level;
             deepFollows = f.deep;
           };
+          forward = tackCall.supportsOverrides && tackCall.needed;
+          resolver = upstreamResolver {
+            dir = path;
+            inherit tackCall forward;
+          };
         in
         # only override tack files within a `fetch`, since there's no flake.lock
-        builtins.seq omit (
-          if tackCall.supportsOverrides && tackCall.needed then
-            let
-              upstream = import (path + "/.tack");
-            in
-            # old resolvers return a plain attrset, not a callable functor
-            if upstream ? __functor then
-              (upstream { inherit (tackCall) overrides; }) // { outPath = path; }
-            else if tackCall.direct then
-              trace "tack: ${path}: upstream .tack predates override support; overrides will not reach it" path
+        builtins.seq omit {
+          value =
+            if forward then
+              let
+                upstream = import (path + "/.tack");
+              in
+              # old resolvers return a plain attrset, not a callable functor
+              if upstream ? __functor then
+                resolver // { outPath = path; }
+              else if tackCall.direct then
+                trace "tack: ${path}: upstream .tack predates override support; overrides will not reach it" path
+              else
+                path
             else
-              path
-          else
-            tackCall.report path
-        );
+              tackCall.report path;
+          inputs = { };
+          tackInputs = tackNodesOf {
+            dir = path;
+            upstream = resolver;
+          };
+        };
 
       loadPin =
         { name, pin }:
@@ -1555,7 +1636,7 @@ let
               then
                 inputNode (fetchArchive node + subdir)
               else
-                inputNode (evalFetch {
+                evalFetch {
                   inherit
                     sourceInfo
                     name
@@ -1563,7 +1644,7 @@ let
                     subdir
                     omit
                     ;
-                })
+                }
           );
 
       # undeclared lock entries are synthesised into toplevels by auto-dedup
@@ -1628,6 +1709,8 @@ let
           self
           // {
             _meta = selfMeta;
+            # follows from a consumer (see followStep)
+            __tack_nodes = nodes;
             _patched = ownPatched // {
               _nested = nestedPatched // {
                 recurseForDerivations = true;

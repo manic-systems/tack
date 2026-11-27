@@ -69,7 +69,7 @@ pin names, group names and signer names all have rules.
 - pin names are **unique** across the whole file, including pins nested inside groups.
 - a **group name** and pin name can't collide.
 - a **signer name** may only use letters, digits, `-`, `_` and `.`.
-- `_meta`, `_patched`, `_nested` and `$declared` are **reserved names** for internal tack usage.
+- `_meta`, `_patched`, `_nested`, `__tack_nodes` and `$declared` are **reserved names** for internal tack usage.
 
 ## [tack]
 
@@ -199,6 +199,19 @@ the key is the name of one of this pin's own direct inputs (use [`[all_follow]`]
 
 the value is a pin name, optionally followed by `/`-separated inputs to walk into another pin's inputs (similar to flake follows).
 
+each input along the path is a tack or flake pin. when pin names collide between tack and flakes, tack is preferred by default - a `tack:` /`flake:` prefix picks a side:
+
+````toml
+[inputs.hypridle]
+url     = "gh:hyprwm/hypridle"
+follows = { nixpkgs = "hyprland/flake:nixpkgs", hyprlang = "hyprland/tack:hyprlang" }
+````
+
+tack pins are resolved using their own resolver. if it is marked [recomposable](#tack), it will also use your follows and omits.
+
+[!NOTE]
+a resolver of insufficient version will not offer its pin's inputs.
+
 values that go through a [top-level follow](#top-level-follows) are walked through to the real pin.
 
 ### top-level follows
@@ -209,6 +222,8 @@ when `follows` is a string instead of a table, the whole pin is taken from the s
 [inputs.nixpkgs]
 follows = "nixos-core/nixpkgs"
 ````
+
+the path is walked the same way as a [follows](#follows) table's values, through tack pins and flake inputs.
 
 it has no url (and no lock entry) of its own, no other options available, and can't be inside a [nested group](#groups).
 

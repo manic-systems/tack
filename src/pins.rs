@@ -61,10 +61,12 @@ use crate::{
 const META_KEY: &str = "_meta";
 const PATCHED_KEY: &str = "_patched";
 const NESTED_KEY: &str = "_nested";
+/// the resolver's pins as nodes, used to keep laziness in follows walks
+const NODES_KEY: &str = "__tack_nodes";
 
 /// names the lock and the resolver keep for themselves
 pub fn is_reserved(name: &str) -> bool {
-    [DECLARED_KEY, META_KEY, PATCHED_KEY, NESTED_KEY].contains(&name)
+    [DECLARED_KEY, META_KEY, PATCHED_KEY, NESTED_KEY, NODES_KEY].contains(&name)
 }
 
 /// tack keeps per-pin files and gcroots under the name, so it has to be one

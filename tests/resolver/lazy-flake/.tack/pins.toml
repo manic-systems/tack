@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: EUPL-1.2
+
+[tack]
+recomposable = true
+
+[inputs.leaf]
+type = "fetch"
+url  = "path:../../original"
