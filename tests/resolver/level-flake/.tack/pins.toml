@@ -10,3 +10,8 @@ url  = "path:../../level2"
 [inputs.drop]
 type = "fetch"
 url  = "path:../../original"
+
+# also a flake input, follows has to pick a side
+[inputs.scoped]
+type = "fetch"
+url  = "path:../../original"

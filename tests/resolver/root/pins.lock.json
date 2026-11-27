@@ -28,6 +28,18 @@
     "url": "https://example.invalid/fixed.txt",
     "sha256": "0000000000000000000000000000000000000000000000000000"
   },
+  "legacy": {
+    "type": "path",
+    "path": "../legacy"
+  },
+  "tablewalk": {
+    "type": "path",
+    "path": "../level1"
+  },
+  "lazyflake": {
+    "type": "path",
+    "path": "../lazy-flake"
+  },
   "lockflow": {
     "type": "path",
     "path": "../lock-follows"

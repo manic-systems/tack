@@ -4,6 +4,8 @@ let
   resolver = import ../../.tack;
   inputs = resolver { resolverDir = ./root; };
   replacement = toString inputs.replacement;
+  original = toString ./original;
+  level2 = toString ./level2;
 in
 assert
   !(builtins.tryEval (resolver {
@@ -68,4 +70,29 @@ assert builtins.seq (builtins.path {
   path = ./lock-follows/nodes;
   name = "source";
 }) (toString inputs.lockflow.parent.child.shared == replacement);
+# follows paths walk into tack pins of flake and fetch pins, as those pins'
+# resolvers see them with the overrides they're given
+assert toString inputs.viaflake == level2;
+assert toString inputs.viaflakedeep == replacement;
+assert toString inputs.viafetch == replacement;
+assert toString inputs.viafetchdeep == replacement;
+assert toString inputs.chained == replacement;
+assert toString inputs.tablewalk.immediate == level2;
+assert
+  inputs._meta.chained == {
+    type = "follows";
+    follows = "topflake/mid/dep";
+  };
+# topflake has both a flake input and a tack pin named scoped; the flake
+# input is omitted, so null can only come from it
+assert toString inputs.bareclash == original;
+assert toString inputs.tackclash == original;
+assert inputs.flakeclash == null;
+assert !(builtins.tryEval inputs.notack).success;
+assert !(builtins.tryEval inputs.noflake).success;
+# an upstream resolver without __tack_nodes still offers its pins, but no deeper
+assert toString inputs.vialazy == original;
+assert toString inputs.vialegacy == original;
+assert !(builtins.tryEval inputs.pastlegacy).success;
+assert inputs ? __tack_nodes;
 true
